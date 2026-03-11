@@ -73,7 +73,11 @@ pub fn validate_diff(patch: &str) -> Result<DiffValidationResult, DiffError> {
     }
 
     let mut files = Vec::new();
-    let mut seen_diff_header = false;
+    // Track whether we are inside a diff --git section that still expects
+    // its --- / +++ file-header pair.  Any --- or +++ file-header line
+    // that appears outside such a section is a traditional unified diff
+    // and must be rejected.
+    let mut in_git_section = false;
 
     for line in patch.lines() {
         // Detect binary file markers
@@ -101,12 +105,14 @@ pub fn validate_diff(patch: &str) -> Result<DiffValidationResult, DiffError> {
             });
         }
 
-        // Reject traditional unified diffs without diff --git headers
+        // Reject file-header lines that appear outside a diff --git section.
+        // This catches both leading traditional unified diffs and smuggled
+        // sections appended after a valid git-style section.
         if (line.starts_with("--- a/")
             || line.starts_with("--- /")
             || line.starts_with("+++ b/")
             || line.starts_with("+++ /"))
-            && !seen_diff_header
+            && !in_git_section
         {
             return Err(DiffError::InvalidHeader {
                 reason: "traditional unified diff not supported; patch must use git diff format"
@@ -114,9 +120,14 @@ pub fn validate_diff(patch: &str) -> Result<DiffValidationResult, DiffError> {
             });
         }
 
+        // A +++ line completes the file-header pair for the current section.
+        if line.starts_with("+++ ") {
+            in_git_section = false;
+        }
+
         // Parse diff headers: "diff --git a/path b/path"
         if let Some(rest) = line.strip_prefix("diff --git ") {
-            seen_diff_header = true;
+            in_git_section = true;
             let (a_path, b_path) = parse_diff_header(rest)?;
             // Use b_path as the canonical path (destination), fall back to
             // a_path for deletions.
@@ -363,6 +374,26 @@ diff --git a/../../../etc/passwd b/../../../etc/passwd
                 .contains("traditional unified diff not supported"),
             "error message was: {err}"
         );
+    }
+
+    #[test]
+    fn rejects_smuggled_traditional_diff_after_git_section() {
+        let patch = "\
+diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -1 +1,2 @@
+ # Hello
++World
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -1 +1 @@
+-old
++new
+";
+        let err = validate_diff(patch)
+            .expect_err("smuggled traditional diff after git section should be rejected");
+        assert!(matches!(err, DiffError::InvalidHeader { .. }));
     }
 
     #[test]
