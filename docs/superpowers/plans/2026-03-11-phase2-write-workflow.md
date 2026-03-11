@@ -4,9 +4,9 @@
 
 **Goal:** Add the safe write workflow to forge-mcp: branch creation, patch application, commit, push, change request creation — all gated by policy enforcement, diff validation, and audit.
 
-**Architecture:** The write path flows through the orchestrator as the sole composition root. It validates the diff, evaluates policy, records audit intent, executes git operations via CLI subprocess, pushes the branch, and opens a change request on the forge. All new domain logic (policy, diff validation) is pure and synchronous. Git operations shell out to the `git` CLI behind `spawn_blocking`. HTTPS-only push with token auth via credential helper environment variables.
+**Architecture:** The write path flows through the orchestrator as the sole composition root. It validates the diff, evaluates policy, records audit intent, executes git operations via CLI subprocess, pushes the branch, and opens a change request on the forge. All new domain logic (policy, diff validation) is pure and synchronous. Git operations shell out to the `git` CLI behind `spawn_blocking`. HTTPS-only push with token auth via `http.extraHeader` environment variable (never in argv or URLs). Policy is enforced on both `commit_patch` and `open_change_request`.
 
-**Tech Stack:** Rust, tokio, git CLI (subprocess), Forgejo API v1, rmcp, thiserror, serde, sha2 (for diff digest)
+**Tech Stack:** Rust, tokio, git CLI (subprocess), Forgejo API v1, rmcp, thiserror, serde, base64
 
 **Conventions:**
 - Order enum variants, struct fields, imports, and module declarations alphabetically
@@ -804,7 +804,7 @@ Includes 7 unit tests for allow, deny, and multi-reason scenarios."
 - Create: `git-exec/src/lib.rs` (replace placeholder)
 - Modify: `git-exec/Cargo.toml` (add dependencies)
 
-The git-exec crate shells out to the `git` CLI for all git operations. It provides a `GitExecutor` that works in ephemeral temporary directories. HTTPS-only, token auth via the `GIT_ASKPASS` mechanism.
+The git-exec crate shells out to the `git` CLI for all git operations. It provides a `GitWorkspace` that works in ephemeral temporary directories. HTTPS-only, token auth via `http.extraHeader` environment variable — the token never appears in process arguments or URLs.
 
 - [ ] **Step 1: Update git-exec/Cargo.toml**
 
@@ -815,6 +815,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+base64 = "0.22.1"
 tempfile = "3.19"
 thiserror = "2.0.18"
 ```
@@ -825,12 +826,13 @@ thiserror = "2.0.18"
 //! Git execution via CLI subprocess.
 //!
 //! All operations run in ephemeral temporary directories and use HTTPS
-//! with token authentication. Designed to be called behind
-//! `tokio::task::spawn_blocking`.
+//! with token authentication via http.extraHeader (never in argv or URLs).
+//! Designed to be called behind `tokio::task::spawn_blocking`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use base64::Engine;
 use tempfile::TempDir;
 use thiserror::Error;
 
@@ -850,47 +852,67 @@ pub struct GitCommitResult {
     pub commit_sha: String,
 }
 
+/// Builds the `http.extraHeader` value for git token authentication.
+/// Uses HTTP Basic auth with "forge-mcp" as the username.
+fn auth_header(token: &str) -> String {
+    let credentials = base64::engine::general_purpose::STANDARD
+        .encode(format!("forge-mcp:{token}"));
+    format!("Authorization: Basic {credentials}")
+}
+
 /// A workspace backed by a temporary directory for git operations.
 pub struct GitWorkspace {
     _temp_dir: TempDir,
     repo_path: PathBuf,
-    token: Option<String>,
+    auth_env: Vec<(String, String)>,
 }
 
 impl GitWorkspace {
     /// Clones a repository into a temporary directory.
+    ///
+    /// The `base_branch` parameter specifies which branch to check out.
+    /// Authentication is handled via `http.extraHeader` environment
+    /// variables — the token never appears in process arguments or URLs.
     ///
     /// # Errors
     ///
     /// Returns an error if cloning fails.
     pub fn clone_repo(
         clone_url: &str,
+        base_branch: &str,
         token: Option<&str>,
     ) -> Result<Self, GitExecError> {
         let temp_dir =
             TempDir::new().map_err(|e| GitExecError::TempDir(e.to_string()))?;
         let repo_path = temp_dir.path().join("repo");
 
-        let auth_url = if let Some(token) = token {
-            inject_token_into_url(clone_url, token)
+        // Build auth environment variables using git config env mechanism.
+        // GIT_CONFIG_COUNT + GIT_CONFIG_KEY_N + GIT_CONFIG_VALUE_N sets
+        // http.extraHeader without touching argv or the URL.
+        let auth_env: Vec<(String, String)> = if let Some(token) = token {
+            vec![
+                ("GIT_CONFIG_COUNT".to_string(), "1".to_string()),
+                ("GIT_CONFIG_KEY_0".to_string(), "http.extraHeader".to_string()),
+                ("GIT_CONFIG_VALUE_0".to_string(), auth_header(token)),
+            ]
         } else {
-            clone_url.to_string()
+            Vec::new()
         };
 
         run_git(
             temp_dir.path(),
-            &["clone", "--depth=1", &auth_url, "repo"],
-            None,
+            &["clone", "--branch", base_branch, "--depth=1", clone_url, "repo"],
+            &auth_env,
         )?;
 
         Ok(Self {
             _temp_dir: temp_dir,
             repo_path,
-            token: token.map(String::from),
+            auth_env,
         })
     }
 
-    /// Creates a new branch from the current HEAD.
+    /// Creates a new branch from the current HEAD (which is base_branch).
     ///
     /// # Errors
     ///
@@ -899,7 +921,7 @@ impl GitWorkspace {
         run_git(
             &self.repo_path,
             &["checkout", "-b", branch_name],
-            None,
+            &self.auth_env,
         )
         .map(|_| ())
     }
@@ -914,7 +936,7 @@ impl GitWorkspace {
             &self.repo_path,
             &["apply", "--index", "-"],
             patch,
-            None,
+            &self.auth_env,
         )
         .map(|_| ())
     }
@@ -938,13 +960,13 @@ impl GitWorkspace {
                 "commit",
                 "-m", message,
             ],
-            None,
+            &self.auth_env,
         )?;
 
         let sha = run_git(
             &self.repo_path,
             &["rev-parse", "HEAD"],
-            None,
+            &self.auth_env,
         )?;
 
         Ok(GitCommitResult {
@@ -958,55 +980,26 @@ impl GitWorkspace {
     ///
     /// Returns an error if the push fails.
     pub fn push_branch(&self, branch_name: &str) -> Result<(), GitExecError> {
-        // Re-inject token for push if we have one
-        if let Some(token) = &self.token {
-            let remote_url = run_git(
-                &self.repo_path,
-                &["remote", "get-url", "origin"],
-                None,
-            )?;
-            let auth_url = inject_token_into_url(remote_url.trim(), token);
-            run_git(
-                &self.repo_path,
-                &["remote", "set-url", "origin", &auth_url],
-                None,
-            )?;
-        }
-
         run_git(
             &self.repo_path,
             &["push", "-u", "origin", branch_name],
-            None,
+            &self.auth_env,
         )
         .map(|_| ())
-    }
-}
-
-/// Injects a token into an HTTPS URL for authentication.
-/// `https://host/path` becomes `https://token@host/path`.
-fn inject_token_into_url(url: &str, token: &str) -> String {
-    if let Some(rest) = url.strip_prefix("https://") {
-        format!("https://forge-mcp:{token}@{rest}")
-    } else {
-        url.to_string()
     }
 }
 
 fn run_git(
     cwd: &Path,
     args: &[&str],
-    env: Option<&[(&str, &str)]>,
+    extra_env: &[(String, String)],
 ) -> Result<String, GitExecError> {
     let mut cmd = Command::new("git");
     cmd.current_dir(cwd).args(args);
-
-    // Disable interactive prompts
     cmd.env("GIT_TERMINAL_PROMPT", "0");
 
-    if let Some(env_vars) = env {
-        for (key, value) in env_vars {
-            cmd.env(key, value);
-        }
+    for (key, value) in extra_env {
+        cmd.env(key, value);
     }
 
     let output = cmd.output()?;
@@ -1026,7 +1019,7 @@ fn run_git_with_stdin(
     cwd: &Path,
     args: &[&str],
     stdin_data: &str,
-    env: Option<&[(&str, &str)]>,
+    extra_env: &[(String, String)],
 ) -> Result<String, GitExecError> {
     use std::io::Write;
     use std::process::Stdio;
@@ -1037,13 +1030,10 @@ fn run_git_with_stdin(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-
     cmd.env("GIT_TERMINAL_PROMPT", "0");
 
-    if let Some(env_vars) = env {
-        for (key, value) in env_vars {
-            cmd.env(key, value);
-        }
+    for (key, value) in extra_env {
+        cmd.env(key, value);
     }
 
     let mut child = cmd.spawn()?;
@@ -1051,7 +1041,7 @@ fn run_git_with_stdin(
     if let Some(mut stdin) = child.stdin.take() {
         stdin
             .write_all(stdin_data.as_bytes())
-            .map_err(|e| GitExecError::Spawn(e))?;
+            .map_err(GitExecError::Spawn)?;
     }
 
     let output = child.wait_with_output()?;
@@ -1072,22 +1062,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn injects_token_into_https_url() {
-        let url = inject_token_into_url("https://forgejo.example/org/repo.git", "mytoken");
-        assert_eq!(url, "https://forge-mcp:mytoken@forgejo.example/org/repo.git");
-    }
-
-    #[test]
-    fn preserves_non_https_url() {
-        let url = inject_token_into_url("http://example.com/repo", "tok");
-        assert_eq!(url, "http://example.com/repo");
+    fn auth_header_encodes_correctly() {
+        let header = auth_header("test-token");
+        assert!(header.starts_with("Authorization: Basic "));
+        let encoded = header.strip_prefix("Authorization: Basic ").unwrap();
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .unwrap();
+        assert_eq!(String::from_utf8(decoded).unwrap(), "forge-mcp:test-token");
     }
 
     #[test]
     fn full_workflow_with_local_repo() {
+        let empty_env = Vec::new();
+
         // Create a bare "remote" repo
         let remote_dir = TempDir::new().unwrap();
-        run_git(remote_dir.path(), &["init", "--bare", "remote.git"], None).unwrap();
+        run_git(remote_dir.path(), &["init", "--bare", "remote.git"], &empty_env).unwrap();
         let remote_path = remote_dir.path().join("remote.git");
 
         // Create initial commit in a working copy
@@ -1096,22 +1087,23 @@ mod tests {
         run_git(
             init_dir.path(),
             &["clone", remote_path.to_str().unwrap(), "work"],
-            None,
+            &empty_env,
         )
         .unwrap();
         std::fs::write(init_path.join("README.md"), "# Hello\n").unwrap();
-        run_git(&init_path, &["add", "README.md"], None).unwrap();
+        run_git(&init_path, &["add", "README.md"], &empty_env).unwrap();
         run_git(
             &init_path,
             &["-c", "user.name=Test", "-c", "user.email=test@test", "commit", "-m", "init"],
-            None,
+            &empty_env,
         )
         .unwrap();
-        run_git(&init_path, &["push", "-u", "origin", "HEAD:main"], None).unwrap();
+        run_git(&init_path, &["push", "-u", "origin", "HEAD:main"], &empty_env).unwrap();
 
-        // Now test our workspace
+        // Now test our workspace — clone from base_branch "main"
         let workspace = GitWorkspace::clone_repo(
             &format!("file://{}", remote_path.display()),
+            "main",
             None,
         )
         .unwrap();
@@ -1137,7 +1129,7 @@ index 7e59600..1234567 100644
         workspace.push_branch("agent/test-branch").unwrap();
 
         // Verify the branch exists on the remote
-        let branches = run_git(&remote_path, &["branch"], None).unwrap();
+        let branches = run_git(&remote_path, &["branch"], &empty_env).unwrap();
         assert!(branches.contains("agent/test-branch"));
     }
 }
@@ -1439,7 +1431,7 @@ Update test fakes in orchestrator with stubs for new trait methods."
 - Modify: `orchestrator/Cargo.toml` (add git-exec, domain deps for policy/diff)
 - Modify: `orchestrator/src/lib.rs`
 
-The write orchestrator composes: path validation -> diff validation -> policy evaluation -> audit -> git-exec -> forge adapter -> audit.
+The write orchestrator composes: diff validation -> policy evaluation -> audit intent -> git-exec (clone base_branch, create branch, apply, commit, push) -> forge adapter. Policy is enforced on both `commit_patch` and `open_change_request`. The forge token is threaded through to git-exec for authenticated push.
 
 - [ ] **Step 1: Update orchestrator/Cargo.toml**
 
@@ -1460,6 +1452,7 @@ where
 {
     adapter: Arc<A>,
     audit_sink: Arc<S>,
+    forge_token: Option<String>,
     policy_config: domain::policy::PolicyConfig,
 }
 
@@ -1472,11 +1465,13 @@ where
     pub fn new(
         adapter: Arc<A>,
         audit_sink: Arc<S>,
+        forge_token: Option<String>,
         policy_config: domain::policy::PolicyConfig,
     ) -> Self {
         Self {
             adapter,
             audit_sink,
+            forge_token,
             policy_config,
         }
     }
@@ -1533,13 +1528,19 @@ where
             request.repository.owner,
             request.repository.name,
         );
+        let base_branch = request.base_branch.clone();
         let patch = request.patch.clone();
         let new_branch = request.new_branch.clone();
         let commit_message = request.commit_message.clone();
         let agent_id = request.agent.agent_id.clone();
+        let token = self.forge_token.clone();
 
         let git_result = tokio::task::spawn_blocking(move || {
-            let workspace = git_exec::GitWorkspace::clone_repo(&clone_url, None)?;
+            let workspace = git_exec::GitWorkspace::clone_repo(
+                &clone_url,
+                &base_branch,
+                token.as_deref(),
+            )?;
             workspace.create_branch(&new_branch)?;
             workspace.apply_patch(&patch)?;
             let result = workspace.commit(
@@ -1565,7 +1566,24 @@ where
         &self,
         request: domain::OpenChangeRequestRequest,
     ) -> Result<domain::OpenChangeRequestResponse, ServiceError> {
-        // 1. Audit intent
+        // 1. Evaluate policy — enforce branch constraints
+        let policy_context = domain::policy::PolicyContext {
+            action: "open_change_request".to_string(),
+            agent: request.agent.clone(),
+            repository: request.repository.clone(),
+            target_branch: request.head_branch.clone(),
+            touched_paths: Vec::new(), // No diff to validate for PR creation
+        };
+        let decision = domain::policy::evaluate(&self.policy_config, &policy_context)
+            .map_err(|e| ServiceError::Validation(e.to_string()))?;
+
+        if !decision.is_allowed() {
+            return Err(ServiceError::PolicyDenied {
+                reasons: decision.reasons.join("; "),
+            });
+        }
+
+        // 2. Audit intent
         self.audit_sink
             .record(AuditRecord {
                 agent: request.agent.clone(),
@@ -1576,7 +1594,7 @@ where
             .await
             .map_err(|e| ServiceError::Audit(e.to_string()))?;
 
-        // 2. Create on forge
+        // 3. Create on forge
         let change_request = self
             .adapter
             .create_change_request(
@@ -1694,7 +1712,7 @@ diff --git a/README.md b/README.md
         let audit = Arc::new(InMemoryAuditSink::new());
         let config = domain::policy::PolicyConfig::default();
         let orchestrator =
-            super::WriteOrchestrator::new(adapter, Arc::clone(&audit), config);
+            super::WriteOrchestrator::new(adapter, Arc::clone(&audit), None, config);
 
         let mut request = write_test_request();
         request.patch = "Binary files differ\n".to_string();
@@ -1712,7 +1730,7 @@ diff --git a/README.md b/README.md
         let audit = Arc::new(InMemoryAuditSink::new());
         let config = domain::policy::PolicyConfig::default();
         let orchestrator =
-            super::WriteOrchestrator::new(adapter, Arc::clone(&audit), config);
+            super::WriteOrchestrator::new(adapter, Arc::clone(&audit), None, config);
 
         let mut request = write_test_request();
         request.new_branch = "main".to_string();
@@ -1730,7 +1748,7 @@ diff --git a/README.md b/README.md
         let audit = Arc::new(InMemoryAuditSink::new());
         let config = domain::policy::PolicyConfig::default();
         let orchestrator =
-            super::WriteOrchestrator::new(adapter, Arc::clone(&audit), config);
+            super::WriteOrchestrator::new(adapter, Arc::clone(&audit), None, config);
 
         let mut request = write_test_request();
         request.patch = "\
@@ -1751,12 +1769,46 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
     }
 
     #[tokio::test]
+    async fn open_change_request_rejects_wrong_branch_prefix() {
+        let adapter = Arc::new(WriteTestForgeAdapter);
+        let audit = Arc::new(InMemoryAuditSink::new());
+        let config = domain::policy::PolicyConfig::default();
+        let orchestrator =
+            super::WriteOrchestrator::new(adapter, Arc::clone(&audit), None, config);
+
+        let request = domain::OpenChangeRequestRequest {
+            agent: AgentIdentity {
+                agent_id: "test-agent".to_string(),
+                session_id: "test-session".to_string(),
+            },
+            base_branch: "main".to_string(),
+            body: "Fix things".to_string(),
+            head_branch: "unauthorized-branch".to_string(),
+            repository: RepositoryRef {
+                forge: ForgeKind::Forgejo,
+                host: "https://forge.example".to_string(),
+                owner: "org".to_string(),
+                name: "repo".to_string(),
+            },
+            title: "Fix typo".to_string(),
+        };
+
+        let err = orchestrator
+            .open_change_request(request)
+            .await
+            .expect_err("wrong branch prefix should be denied");
+        assert!(matches!(err, ServiceError::PolicyDenied { .. }));
+        // No audit recorded because policy denied before audit
+        assert_eq!(audit.records().len(), 0);
+    }
+
+    #[tokio::test]
     async fn open_change_request_records_audit_and_creates() {
         let adapter = Arc::new(WriteTestForgeAdapter);
         let audit = Arc::new(InMemoryAuditSink::new());
         let config = domain::policy::PolicyConfig::default();
         let orchestrator =
-            super::WriteOrchestrator::new(adapter, Arc::clone(&audit), config);
+            super::WriteOrchestrator::new(adapter, Arc::clone(&audit), None, config);
 
         let request = domain::OpenChangeRequestRequest {
             agent: AgentIdentity {
@@ -2036,6 +2088,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let write_service = Arc::new(WriteOrchestrator::new(
         Arc::clone(&adapter),
         Arc::clone(&audit_sink),
+        forgejo_token.clone(),
         policy_config,
     ));
 
@@ -2096,12 +2149,12 @@ git commit -m "docs: update README for Phase 2 write workflow"
 | 3 | Policy engine module | 7 |
 | 4 | git-exec CLI implementation | 3 |
 | 5 | Forge adapter write methods | 0 (integration-tested via orchestrator) |
-| 6 | Write orchestrator | 4 |
+| 6 | Write orchestrator | 5 |
 | 7 | MCP transport write tools | updates to existing |
 | 8 | Server wiring | 0 (wiring only) |
 | 9 | README | 0 |
 
-**Total new tests:** ~26
+**Total new tests:** ~27
 **Total tasks:** 9
 **Estimated commits:** 9
 
