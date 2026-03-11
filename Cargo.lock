@@ -33,6 +33,7 @@ name = "audit"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "domain",
  "thiserror 2.0.18",
 ]
 
