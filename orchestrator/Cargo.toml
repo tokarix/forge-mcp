@@ -1,0 +1,11 @@
+[package]
+name = "orchestrator"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+async-trait = "0.1.89"
+audit = { version = "0.1.0", path = "../audit" }
+domain = { version = "0.1.0", path = "../domain" }
+forge = { version = "0.1.0", path = "../forge" }
+tokio = { version = "1.50.0", features = ["macros", "rt-multi-thread"] }
