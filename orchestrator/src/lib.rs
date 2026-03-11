@@ -70,11 +70,31 @@ where
 mod tests {
     use std::sync::Arc;
 
-    use audit::InMemoryAuditSink;
-    use domain::{AgentIdentity, ForgeKind, RepositoryReadService, RepositoryRef};
+    use audit::{AuditError, AuditRecord, AuditSink, InMemoryAuditSink};
+    use domain::{
+        AgentIdentity, ForgeKind, ReadRepositoryFileRequest, RepositoryReadService, RepositoryRef,
+        ServiceError,
+    };
     use forge::{ForgeAdapter, ForgeError};
 
     use super::ReadOrchestrator;
+
+    fn test_request(path: &str) -> ReadRepositoryFileRequest {
+        ReadRepositoryFileRequest {
+            agent: AgentIdentity {
+                agent_id: "codex".to_string(),
+                session_id: "test".to_string(),
+            },
+            repository: RepositoryRef {
+                forge: ForgeKind::Forgejo,
+                host: "https://forge.example".to_string(),
+                owner: "org".to_string(),
+                name: "repo".to_string(),
+            },
+            path: path.to_string(),
+            git_ref: Some("main".to_string()),
+        }
+    }
 
     struct FakeForgeAdapter;
 
@@ -95,6 +115,29 @@ mod tests {
         }
     }
 
+    struct FailingForgeAdapter;
+
+    #[async_trait::async_trait]
+    impl ForgeAdapter for FailingForgeAdapter {
+        async fn read_repository_file(
+            &self,
+            _repository: &RepositoryRef,
+            _path: &str,
+            _git_ref: Option<&str>,
+        ) -> Result<domain::ReadRepositoryFileResponse, ForgeError> {
+            Err(ForgeError::InvalidPayload("test error".to_string()))
+        }
+    }
+
+    struct FailingAuditSink;
+
+    #[async_trait::async_trait]
+    impl AuditSink for FailingAuditSink {
+        async fn record(&self, _record: AuditRecord) -> Result<(), AuditError> {
+            Err(AuditError::Unavailable)
+        }
+    }
+
     #[tokio::test]
     async fn reads_a_repository_file_and_records_audit() {
         let adapter = Arc::new(FakeForgeAdapter);
@@ -102,24 +145,71 @@ mod tests {
         let orchestrator = ReadOrchestrator::new(adapter, Arc::clone(&audit));
 
         let response = orchestrator
-            .read_repository_file(domain::ReadRepositoryFileRequest {
-                agent: AgentIdentity {
-                    agent_id: "codex".to_string(),
-                    session_id: "test".to_string(),
-                },
-                repository: RepositoryRef {
-                    forge: ForgeKind::Forgejo,
-                    host: "https://forge.example".to_string(),
-                    owner: "org".to_string(),
-                    name: "repo".to_string(),
-                },
-                path: "README.md".to_string(),
-                git_ref: Some("main".to_string()),
-            })
+            .read_repository_file(test_request("README.md"))
             .await
             .expect("read should succeed");
 
         assert_eq!(response.content, "hello");
         assert_eq!(audit.records().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn rejects_empty_path() {
+        let adapter = Arc::new(FakeForgeAdapter);
+        let audit = Arc::new(InMemoryAuditSink::new());
+        let orchestrator = ReadOrchestrator::new(adapter, Arc::clone(&audit));
+
+        let err = orchestrator
+            .read_repository_file(test_request(""))
+            .await
+            .expect_err("empty path should fail");
+
+        assert!(matches!(err, ServiceError::Validation(_)));
+        assert_eq!(audit.records().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn rejects_path_traversal() {
+        let adapter = Arc::new(FakeForgeAdapter);
+        let audit = Arc::new(InMemoryAuditSink::new());
+        let orchestrator = ReadOrchestrator::new(adapter, Arc::clone(&audit));
+
+        let err = orchestrator
+            .read_repository_file(test_request("../../../etc/passwd"))
+            .await
+            .expect_err("traversal should fail");
+
+        assert!(matches!(err, ServiceError::Validation(_)));
+        assert_eq!(audit.records().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn returns_upstream_error_on_forge_failure() {
+        let adapter = Arc::new(FailingForgeAdapter);
+        let audit = Arc::new(InMemoryAuditSink::new());
+        let orchestrator = ReadOrchestrator::new(adapter, Arc::clone(&audit));
+
+        let err = orchestrator
+            .read_repository_file(test_request("README.md"))
+            .await
+            .expect_err("forge failure should propagate");
+
+        assert!(matches!(err, ServiceError::Upstream(_)));
+        // Audit was recorded before the forge call
+        assert_eq!(audit.records().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn returns_audit_error_on_sink_failure() {
+        let adapter = Arc::new(FakeForgeAdapter);
+        let audit = Arc::new(FailingAuditSink);
+        let orchestrator = ReadOrchestrator::new(adapter, audit);
+
+        let err = orchestrator
+            .read_repository_file(test_request("README.md"))
+            .await
+            .expect_err("audit failure should propagate");
+
+        assert!(matches!(err, ServiceError::Audit(_)));
     }
 }

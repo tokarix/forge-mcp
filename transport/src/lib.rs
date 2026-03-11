@@ -185,6 +185,30 @@ mod tests {
         }
     }
 
+    struct ValidationFailReadService;
+
+    #[async_trait]
+    impl domain::RepositoryReadService for ValidationFailReadService {
+        async fn read_repository_file(
+            &self,
+            _request: domain::ReadRepositoryFileRequest,
+        ) -> Result<ReadRepositoryFileResponse, ServiceError> {
+            Err(ServiceError::Validation("bad path".to_string()))
+        }
+    }
+
+    struct UpstreamFailReadService;
+
+    #[async_trait]
+    impl domain::RepositoryReadService for UpstreamFailReadService {
+        async fn read_repository_file(
+            &self,
+            _request: domain::ReadRepositoryFileRequest,
+        ) -> Result<ReadRepositoryFileResponse, ServiceError> {
+            Err(ServiceError::Upstream("forge down".to_string()))
+        }
+    }
+
     #[derive(Debug, Clone, Default)]
     struct DummyClientHandler;
 
@@ -194,17 +218,42 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn serves_read_repository_file_over_mcp() -> Result<(), Box<dyn std::error::Error>> {
-        let (server_transport, client_transport) = tokio::io::duplex(4096);
-        let read_service = Arc::new(FakeReadService);
-        let config = ForgejoMcpConfig {
+    fn test_config() -> ForgejoMcpConfig {
+        ForgejoMcpConfig {
             forgejo_base_url: "https://forge.example".to_string(),
             agent_id: "codex".to_string(),
             session_id: "test-session".to_string(),
             server_name: "forge-mcp".to_string(),
             server_version: "0.1.0-test".to_string(),
-        };
+        }
+    }
+
+    fn read_file_args() -> serde_json::Map<String, serde_json::Value> {
+        serde_json::json!({
+            "owner": "org",
+            "repo": "repo",
+            "path": "README.md",
+            "git_ref": "main",
+        })
+        .as_object()
+        .expect("json object")
+        .clone()
+    }
+
+    async fn spawn_server_and_client<S>(
+        read_service: Arc<S>,
+    ) -> Result<
+        (
+            rmcp::service::RunningService<rmcp::service::RoleClient, DummyClientHandler>,
+            tokio::task::JoinHandle<Result<(), TransportError>>,
+        ),
+        Box<dyn std::error::Error>,
+    >
+    where
+        S: domain::RepositoryReadService + 'static,
+    {
+        let (server_transport, client_transport) = tokio::io::duplex(4096);
+        let config = test_config();
 
         let server_handle = tokio::spawn(async move {
             ForgejoMcpServer::new(config, read_service)
@@ -219,19 +268,18 @@ mod tests {
         });
 
         let client = DummyClientHandler.serve(client_transport).await?;
+        Ok((client, server_handle))
+    }
+
+    #[tokio::test]
+    async fn serves_read_repository_file_over_mcp() -> Result<(), Box<dyn std::error::Error>> {
+        let (client, server_handle) =
+            spawn_server_and_client(Arc::new(FakeReadService)).await?;
+
         let result = client
             .call_tool(
-                CallToolRequestParams::new("read_repository_file").with_arguments(
-                    serde_json::json!({
-                        "owner": "org",
-                        "repo": "repo",
-                        "path": "README.md",
-                        "git_ref": "main",
-                    })
-                    .as_object()
-                    .expect("json object")
-                    .clone(),
-                ),
+                CallToolRequestParams::new("read_repository_file")
+                    .with_arguments(read_file_args()),
             )
             .await?;
 
@@ -244,8 +292,46 @@ mod tests {
         assert_eq!(text, "mcp-ok");
 
         drop(client);
-        let server_result = server_handle.await?;
-        server_result?;
+        server_handle.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn maps_validation_error_to_invalid_params() -> Result<(), Box<dyn std::error::Error>> {
+        let (client, server_handle) =
+            spawn_server_and_client(Arc::new(ValidationFailReadService)).await?;
+
+        let result = client
+            .call_tool(
+                CallToolRequestParams::new("read_repository_file")
+                    .with_arguments(read_file_args()),
+            )
+            .await;
+
+        assert!(result.is_err(), "validation error should propagate as MCP error");
+
+        drop(client);
+        // Server may exit with an error due to client disconnect; that's fine
+        let _ = server_handle.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn maps_upstream_error_to_internal_error() -> Result<(), Box<dyn std::error::Error>> {
+        let (client, server_handle) =
+            spawn_server_and_client(Arc::new(UpstreamFailReadService)).await?;
+
+        let result = client
+            .call_tool(
+                CallToolRequestParams::new("read_repository_file")
+                    .with_arguments(read_file_args()),
+            )
+            .await;
+
+        assert!(result.is_err(), "upstream error should propagate as MCP error");
+
+        drop(client);
+        let _ = server_handle.await;
         Ok(())
     }
 }
