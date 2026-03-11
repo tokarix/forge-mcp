@@ -35,10 +35,19 @@ pub trait ForgeAdapter: Send + Sync {
     ) -> Result<ReadRepositoryFileResponse, ForgeError>;
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ForgejoConfig {
     pub base_url: String,
     pub token: Option<String>,
+}
+
+impl std::fmt::Debug for ForgejoConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ForgejoConfig")
+            .field("base_url", &self.base_url)
+            .field("token", &self.token.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug)]
