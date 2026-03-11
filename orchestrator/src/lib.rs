@@ -112,7 +112,17 @@ where
         let diff_result = domain::diff::validate_diff(&request.patch)
             .map_err(|e| ServiceError::Validation(e.to_string()))?;
 
-        let touched_paths: Vec<String> = diff_result.files.iter().map(|f| f.path.clone()).collect();
+        let touched_paths: Vec<String> = diff_result
+            .files
+            .iter()
+            .flat_map(|f| {
+                let mut paths = vec![f.path.clone()];
+                if let Some(ref source) = f.source_path {
+                    paths.push(source.clone());
+                }
+                paths
+            })
+            .collect();
 
         // 2. Evaluate policy
         let policy_context = domain::policy::PolicyContext {

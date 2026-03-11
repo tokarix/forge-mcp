@@ -38,6 +38,7 @@ pub struct DiffFileSummary {
     pub is_deleted: bool,
     pub is_new: bool,
     pub path: String,
+    pub source_path: Option<String>,
 }
 
 /// Result of validating a unified diff.
@@ -72,6 +73,7 @@ pub fn validate_diff(patch: &str) -> Result<DiffValidationResult, DiffError> {
     }
 
     let mut files = Vec::new();
+    let mut seen_diff_header = false;
 
     for line in patch.lines() {
         // Detect binary file markers
@@ -99,19 +101,38 @@ pub fn validate_diff(patch: &str) -> Result<DiffValidationResult, DiffError> {
             });
         }
 
+        // Reject traditional unified diffs without diff --git headers
+        if (line.starts_with("--- a/")
+            || line.starts_with("--- /")
+            || line.starts_with("+++ b/")
+            || line.starts_with("+++ /"))
+            && !seen_diff_header
+        {
+            return Err(DiffError::InvalidHeader {
+                reason: "traditional unified diff not supported; patch must use git diff format"
+                    .to_string(),
+            });
+        }
+
         // Parse diff headers: "diff --git a/path b/path"
         if let Some(rest) = line.strip_prefix("diff --git ") {
+            seen_diff_header = true;
             let (a_path, b_path) = parse_diff_header(rest)?;
-            // Use b_path as the canonical path (destination)
-            let file_path = if b_path == "/dev/null" {
-                a_path
+            // Use b_path as the canonical path (destination), fall back to
+            // a_path for deletions.
+            let (file_path, source_path) = if b_path == "/dev/null" {
+                (a_path, None)
+            } else if a_path == "/dev/null" || a_path == b_path {
+                (b_path, None)
             } else {
-                b_path
+                // Rename: track both paths
+                (b_path, Some(a_path))
             };
             files.push(DiffFileSummary {
                 is_deleted: false,
                 is_new: false,
                 path: file_path,
+                source_path,
             });
         }
 
@@ -135,9 +156,12 @@ pub fn validate_diff(patch: &str) -> Result<DiffValidationResult, DiffError> {
         });
     }
 
-    // Validate all paths
+    // Validate all paths (both destination and source for renames)
     for file in &files {
         validate_repository_path(&file.path).map_err(|reason| DiffError::InvalidPath { reason })?;
+        if let Some(ref source) = file.source_path {
+            validate_repository_path(source).map_err(|reason| DiffError::InvalidPath { reason })?;
+        }
     }
 
     Ok(DiffValidationResult { files, total_bytes })
@@ -321,5 +345,40 @@ diff --git a/../../../etc/passwd b/../../../etc/passwd
         let patch = "diff --git broken\n";
         let err = validate_diff(patch).expect_err("invalid header should be rejected");
         assert!(matches!(err, DiffError::InvalidHeader { .. }));
+    }
+
+    #[test]
+    fn rejects_traditional_unified_diff() {
+        let patch = "\
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -1 +1 @@
+-old
++new
+";
+        let err = validate_diff(patch).expect_err("traditional unified diff should be rejected");
+        assert!(matches!(err, DiffError::InvalidHeader { .. }));
+        assert!(
+            err.to_string()
+                .contains("traditional unified diff not supported"),
+            "error message was: {err}"
+        );
+    }
+
+    #[test]
+    fn rename_tracks_both_source_and_destination() {
+        let patch = "\
+diff --git a/.github/workflows/ci.yml b/ci.yml
+similarity index 100%
+rename from .github/workflows/ci.yml
+rename to ci.yml
+";
+        let result = validate_diff(patch).expect("should be valid");
+        assert_eq!(result.files.len(), 1);
+        assert_eq!(result.files[0].path, "ci.yml");
+        assert_eq!(
+            result.files[0].source_path.as_deref(),
+            Some(".github/workflows/ci.yml")
+        );
     }
 }
