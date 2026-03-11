@@ -1,81 +1,38 @@
-//! Binary entry point for the Phase 1 forge-mcp server bootstrap.
+//! Binary entry point for the stdio MCP server.
 
-use std::sync::Arc;
+use std::{env, sync::Arc};
 
-use clap::{Parser, Subcommand};
+use audit::InMemoryAuditSink;
 use forge::{ForgejoAdapter, ForgejoConfig};
 use orchestrator::ReadOrchestrator;
-use transport::{ReadRepositoryFileInput, ToolHandlers};
+use transport::{ForgejoMcpConfig, serve_stdio};
 
-#[derive(Debug, Parser)]
-#[command(name = "forge-mcp")]
-#[command(about = "Phase 1 bootstrap for a multi-forge policy-enforcing MCP server")]
-struct Cli {
-    #[command(subcommand)]
-    command: Command,
-}
-
-#[derive(Debug, Subcommand)]
-enum Command {
-    ReadFile {
-        #[arg(long)]
-        host: String,
-        #[arg(long)]
-        owner: String,
-        #[arg(long)]
-        repo: String,
-        #[arg(long)]
-        path: String,
-        #[arg(long)]
-        git_ref: Option<String>,
-        #[arg(long, default_value = "FORGEJO_TOKEN")]
-        token_env: String,
-        #[arg(long, default_value = "codex")]
-        agent_id: String,
-        #[arg(long, default_value = "local-session")]
-        session_id: String,
-    },
+fn server_version() -> String {
+    format!("{}+{}", env!("CARGO_PKG_VERSION"), env!("GIT_COMMIT_SHORT"))
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let cli = Cli::parse();
+    let forgejo_base_url = env::var("FORGEJO_BASE_URL")?;
+    let forgejo_token = env::var("FORGEJO_TOKEN").ok();
+    let agent_id = env::var("FORGE_MCP_AGENT_ID").unwrap_or_else(|_| "codex".to_string());
+    let session_id =
+        env::var("FORGE_MCP_SESSION_ID").unwrap_or_else(|_| "stdio-session".to_string());
 
-    match cli.command {
-        Command::ReadFile {
-            host,
-            owner,
-            repo,
-            path,
-            git_ref,
-            token_env,
-            agent_id,
-            session_id,
-        } => {
-            let token = std::env::var(token_env).ok();
-            let adapter = Arc::new(ForgejoAdapter::new(ForgejoConfig {
-                base_url: host.clone(),
-                token,
-            }));
-            let audit_sink = Arc::new(audit::InMemoryAuditSink::new());
-            let read_service = Arc::new(ReadOrchestrator::new(adapter, audit_sink));
-            let handlers = ToolHandlers::new(read_service);
+    let adapter = Arc::new(ForgejoAdapter::new(ForgejoConfig {
+        base_url: forgejo_base_url.clone(),
+        token: forgejo_token,
+    }));
+    let audit_sink = Arc::new(InMemoryAuditSink::new());
+    let read_service = Arc::new(ReadOrchestrator::new(adapter, audit_sink));
+    let config = ForgejoMcpConfig {
+        forgejo_base_url,
+        agent_id,
+        session_id,
+        server_name: "forge-mcp".to_string(),
+        server_version: server_version(),
+    };
 
-            let content = handlers
-                .read_repository_file(ReadRepositoryFileInput {
-                    agent_id,
-                    session_id,
-                    host,
-                    owner,
-                    repo,
-                    path,
-                    git_ref,
-                })
-                .await?;
-
-            println!("{content}");
-        }
-    }
-
+    serve_stdio(config, read_service).await?;
     Ok(())
 }
