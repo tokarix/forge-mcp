@@ -40,6 +40,71 @@ pub struct ReadRepositoryFileResponse {
     pub content: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ChangeRequest {
+    pub base_branch: String,
+    pub body: String,
+    pub head_branch: String,
+    pub index: u64,
+    pub state: ChangeRequestState,
+    pub title: String,
+    pub url: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ChangeRequestState {
+    Closed,
+    Merged,
+    Open,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommitPatchRequest {
+    pub agent: AgentIdentity,
+    pub base_branch: String,
+    pub commit_message: String,
+    pub new_branch: String,
+    pub patch: String,
+    pub repository: RepositoryRef,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommitPatchResponse {
+    pub branch: String,
+    pub commit_sha: String,
+    pub repository: RepositoryRef,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GetChangeRequestRequest {
+    pub agent: AgentIdentity,
+    pub index: u64,
+    pub repository: RepositoryRef,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ListChangeRequestsRequest {
+    pub agent: AgentIdentity,
+    pub repository: RepositoryRef,
+    pub state: Option<ChangeRequestState>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OpenChangeRequestRequest {
+    pub agent: AgentIdentity,
+    pub base_branch: String,
+    pub body: String,
+    pub head_branch: String,
+    pub repository: RepositoryRef,
+    pub title: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OpenChangeRequestResponse {
+    pub change_request: ChangeRequest,
+    pub repository: RepositoryRef,
+}
+
 /// Validates that a repository-relative path is safe.
 ///
 /// Rejects empty paths, absolute paths, paths containing `..` components,
@@ -74,12 +139,16 @@ pub fn validate_repository_path(path: &str) -> Result<(), String> {
 
 #[derive(Debug, Error)]
 pub enum ServiceError {
-    #[error("validation failed: {0}")]
-    Validation(String),
-    #[error("upstream forge error: {0}")]
-    Upstream(String),
     #[error("audit failure: {0}")]
     Audit(String),
+    #[error("git execution failed: {0}")]
+    GitExec(String),
+    #[error("policy denied: {reasons}")]
+    PolicyDenied { reasons: String },
+    #[error("upstream forge error: {0}")]
+    Upstream(String),
+    #[error("validation failed: {0}")]
+    Validation(String),
 }
 
 #[async_trait]
@@ -94,6 +163,29 @@ pub trait RepositoryReadService: Send + Sync {
         &self,
         request: ReadRepositoryFileRequest,
     ) -> Result<ReadRepositoryFileResponse, ServiceError>;
+}
+
+#[async_trait]
+pub trait RepositoryWriteService: Send + Sync {
+    /// Applies a patch to a new branch and pushes it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if validation, policy, git execution, or audit fails.
+    async fn commit_patch(
+        &self,
+        request: CommitPatchRequest,
+    ) -> Result<CommitPatchResponse, ServiceError>;
+
+    /// Opens a change request (pull request) on the forge.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if validation, the upstream forge request, or audit fails.
+    async fn open_change_request(
+        &self,
+        request: OpenChangeRequestRequest,
+    ) -> Result<OpenChangeRequestResponse, ServiceError>;
 }
 
 #[cfg(test)]

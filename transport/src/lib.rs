@@ -73,9 +73,12 @@ where
     fn map_service_error(error: ServiceError) -> McpError {
         match error {
             ServiceError::Validation(message) => McpError::invalid_params(message, None),
-            ServiceError::Upstream(message) | ServiceError::Audit(message) => {
-                McpError::internal_error(message, None)
+            ServiceError::PolicyDenied { reasons } => {
+                McpError::invalid_params(format!("policy denied: {reasons}"), None)
             }
+            ServiceError::Audit(message)
+            | ServiceError::GitExec(message)
+            | ServiceError::Upstream(message) => McpError::internal_error(message, None),
         }
     }
 }
@@ -273,13 +276,11 @@ mod tests {
 
     #[tokio::test]
     async fn serves_read_repository_file_over_mcp() -> Result<(), Box<dyn std::error::Error>> {
-        let (client, server_handle) =
-            spawn_server_and_client(Arc::new(FakeReadService)).await?;
+        let (client, server_handle) = spawn_server_and_client(Arc::new(FakeReadService)).await?;
 
         let result = client
             .call_tool(
-                CallToolRequestParams::new("read_repository_file")
-                    .with_arguments(read_file_args()),
+                CallToolRequestParams::new("read_repository_file").with_arguments(read_file_args()),
             )
             .await?;
 
@@ -303,12 +304,14 @@ mod tests {
 
         let result = client
             .call_tool(
-                CallToolRequestParams::new("read_repository_file")
-                    .with_arguments(read_file_args()),
+                CallToolRequestParams::new("read_repository_file").with_arguments(read_file_args()),
             )
             .await;
 
-        assert!(result.is_err(), "validation error should propagate as MCP error");
+        assert!(
+            result.is_err(),
+            "validation error should propagate as MCP error"
+        );
 
         drop(client);
         // Server may exit with an error due to client disconnect; that's fine
@@ -323,12 +326,14 @@ mod tests {
 
         let result = client
             .call_tool(
-                CallToolRequestParams::new("read_repository_file")
-                    .with_arguments(read_file_args()),
+                CallToolRequestParams::new("read_repository_file").with_arguments(read_file_args()),
             )
             .await;
 
-        assert!(result.is_err(), "upstream error should propagate as MCP error");
+        assert!(
+            result.is_err(),
+            "upstream error should propagate as MCP error"
+        );
 
         drop(client);
         let _ = server_handle.await;
