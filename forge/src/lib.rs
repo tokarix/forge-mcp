@@ -109,6 +109,7 @@ struct ForgejoPullRequest {
     body: Option<String>,
     head: ForgejoPullBranch,
     html_url: String,
+    merged: bool,
     number: u64,
     state: String,
     title: String,
@@ -116,10 +117,13 @@ struct ForgejoPullRequest {
 
 impl ForgejoPullRequest {
     fn into_change_request(self) -> ChangeRequest {
-        let state = match self.state.as_str() {
-            "closed" => ChangeRequestState::Closed,
-            "open" => ChangeRequestState::Open,
-            _ => ChangeRequestState::Merged,
+        let state = if self.merged {
+            ChangeRequestState::Merged
+        } else {
+            match self.state.as_str() {
+                "open" => ChangeRequestState::Open,
+                _ => ChangeRequestState::Closed,
+            }
         };
         ChangeRequest {
             base_branch: self.base.ref_name,
