@@ -8,4 +8,5 @@ async-trait = "0.1.89"
 audit = { version = "0.1.0", path = "../audit" }
 domain = { version = "0.1.0", path = "../domain" }
 forge = { version = "0.1.0", path = "../forge" }
+git-exec = { version = "0.1.0", path = "../git-exec" }
 tokio = { version = "1.50.0", features = ["macros", "rt-multi-thread"] }

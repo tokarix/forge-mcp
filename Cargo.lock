@@ -778,6 +778,7 @@ dependencies = [
  "audit",
  "domain",
  "forge",
+ "git-exec",
  "tokio",
 ]
 
