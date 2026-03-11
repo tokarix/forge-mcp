@@ -45,27 +45,24 @@ where
     ) -> Result<ReadRepositoryFileResponse, ServiceError> {
         validate_repository_path(&request.path).map_err(ServiceError::Validation)?;
 
-        let response = self
-            .adapter
+        self.audit_sink
+            .record(AuditRecord {
+                agent: request.agent,
+                action: "read_repository_file".to_string(),
+                repository: request.repository.clone(),
+                target: request.path.clone(),
+            })
+            .await
+            .map_err(|e| ServiceError::Audit(e.to_string()))?;
+
+        self.adapter
             .read_repository_file(
                 &request.repository,
                 &request.path,
                 request.git_ref.as_deref(),
             )
             .await
-            .map_err(|e| ServiceError::Upstream(e.to_string()))?;
-
-        self.audit_sink
-            .record(AuditRecord {
-                agent: request.agent,
-                action: "read_repository_file".to_string(),
-                repository: request.repository,
-                target: request.path,
-            })
-            .await
-            .map_err(|e| ServiceError::Audit(e.to_string()))?;
-
-        Ok(response)
+            .map_err(|e| ServiceError::Upstream(e.to_string()))
     }
 }
 
