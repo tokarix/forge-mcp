@@ -13,7 +13,8 @@ fn server_version() -> String {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let forgejo_base_url = env::var("FORGEJO_BASE_URL")?;
+    let forgejo_base_url = env::var("FORGEJO_BASE_URL")
+        .expect("FORGEJO_BASE_URL environment variable must be set");
     let forgejo_token = env::var("FORGEJO_TOKEN").ok();
     let agent_id = env::var("FORGE_MCP_AGENT_ID").unwrap_or_else(|_| "codex".to_string());
     let session_id =
