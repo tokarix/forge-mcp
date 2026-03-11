@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 use base64::Engine;
-use domain::{ReadRepositoryFileResponse, RepositoryRef};
+use domain::{ChangeRequest, ChangeRequestState, ReadRepositoryFileResponse, RepositoryRef};
 use reqwest::StatusCode;
 use serde::Deserialize;
 use thiserror::Error;
@@ -33,6 +33,30 @@ pub trait ForgeAdapter: Send + Sync {
         path: &str,
         git_ref: Option<&str>,
     ) -> Result<ReadRepositoryFileResponse, ForgeError>;
+
+    /// Creates a change request (pull request) on the forge.
+    async fn create_change_request(
+        &self,
+        repository: &RepositoryRef,
+        title: &str,
+        body: &str,
+        head_branch: &str,
+        base_branch: &str,
+    ) -> Result<ChangeRequest, ForgeError>;
+
+    /// Lists change requests for a repository.
+    async fn list_change_requests(
+        &self,
+        repository: &RepositoryRef,
+        state: Option<&ChangeRequestState>,
+    ) -> Result<Vec<ChangeRequest>, ForgeError>;
+
+    /// Gets a single change request by index.
+    async fn get_change_request(
+        &self,
+        repository: &RepositoryRef,
+        index: u64,
+    ) -> Result<ChangeRequest, ForgeError>;
 }
 
 #[derive(Clone)]
@@ -71,6 +95,42 @@ struct ForgejoContentsResponse {
     content: Option<String>,
     encoding: Option<String>,
     path: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ForgejoPullBranch {
+    #[serde(rename = "ref")]
+    ref_name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ForgejoPullRequest {
+    base: ForgejoPullBranch,
+    body: Option<String>,
+    head: ForgejoPullBranch,
+    html_url: String,
+    number: u64,
+    state: String,
+    title: String,
+}
+
+impl ForgejoPullRequest {
+    fn into_change_request(self) -> ChangeRequest {
+        let state = match self.state.as_str() {
+            "closed" => ChangeRequestState::Closed,
+            "open" => ChangeRequestState::Open,
+            _ => ChangeRequestState::Merged,
+        };
+        ChangeRequest {
+            base_branch: self.base.ref_name,
+            body: self.body.unwrap_or_default(),
+            head_branch: self.head.ref_name,
+            index: self.number,
+            state,
+            title: self.title,
+            url: self.html_url,
+        }
+    }
 }
 
 #[async_trait]
@@ -142,5 +202,120 @@ impl ForgeAdapter for ForgejoAdapter {
             git_ref: git_ref.map(ToOwned::to_owned),
             content,
         })
+    }
+
+    async fn create_change_request(
+        &self,
+        repository: &RepositoryRef,
+        title: &str,
+        body: &str,
+        head_branch: &str,
+        base_branch: &str,
+    ) -> Result<ChangeRequest, ForgeError> {
+        if repository.forge != domain::ForgeKind::Forgejo {
+            return Err(ForgeError::UnsupportedForge(repository.forge.clone()));
+        }
+
+        let url = format!(
+            "{}/api/v1/repos/{}/{}/pulls",
+            self.config.base_url.trim_end_matches('/'),
+            repository.owner,
+            repository.name,
+        );
+
+        let mut request = self.client.post(&url).json(&serde_json::json!({
+            "base": base_branch,
+            "body": body,
+            "head": head_branch,
+            "title": title,
+        }));
+        if let Some(token) = &self.config.token {
+            request = request.bearer_auth(token);
+        }
+
+        let response = request.send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(ForgeError::UnexpectedStatus { status, body });
+        }
+
+        let pr: ForgejoPullRequest = response.json().await?;
+        Ok(pr.into_change_request())
+    }
+
+    async fn list_change_requests(
+        &self,
+        repository: &RepositoryRef,
+        state: Option<&ChangeRequestState>,
+    ) -> Result<Vec<ChangeRequest>, ForgeError> {
+        if repository.forge != domain::ForgeKind::Forgejo {
+            return Err(ForgeError::UnsupportedForge(repository.forge.clone()));
+        }
+
+        let url = format!(
+            "{}/api/v1/repos/{}/{}/pulls",
+            self.config.base_url.trim_end_matches('/'),
+            repository.owner,
+            repository.name,
+        );
+
+        let state_str = state.map(|s| match s {
+            ChangeRequestState::Closed | ChangeRequestState::Merged => "closed",
+            ChangeRequestState::Open => "open",
+        });
+
+        let mut request = self.client.get(&url);
+        if let Some(state_str) = state_str {
+            request = request.query(&[("state", state_str)]);
+        }
+        if let Some(token) = &self.config.token {
+            request = request.bearer_auth(token);
+        }
+
+        let response = request.send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(ForgeError::UnexpectedStatus { status, body });
+        }
+
+        let prs: Vec<ForgejoPullRequest> = response.json().await?;
+        Ok(prs
+            .into_iter()
+            .map(ForgejoPullRequest::into_change_request)
+            .collect())
+    }
+
+    async fn get_change_request(
+        &self,
+        repository: &RepositoryRef,
+        index: u64,
+    ) -> Result<ChangeRequest, ForgeError> {
+        if repository.forge != domain::ForgeKind::Forgejo {
+            return Err(ForgeError::UnsupportedForge(repository.forge.clone()));
+        }
+
+        let url = format!(
+            "{}/api/v1/repos/{}/{}/pulls/{index}",
+            self.config.base_url.trim_end_matches('/'),
+            repository.owner,
+            repository.name,
+        );
+
+        let mut request = self.client.get(&url);
+        if let Some(token) = &self.config.token {
+            request = request.bearer_auth(token);
+        }
+
+        let response = request.send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(ForgeError::UnexpectedStatus { status, body });
+        }
+
+        let pr: ForgejoPullRequest = response.json().await?;
+        Ok(pr.into_change_request())
     }
 }

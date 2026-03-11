@@ -72,8 +72,8 @@ mod tests {
 
     use audit::{AuditError, AuditRecord, AuditSink, InMemoryAuditSink};
     use domain::{
-        AgentIdentity, ForgeKind, ReadRepositoryFileRequest, RepositoryReadService, RepositoryRef,
-        ServiceError,
+        AgentIdentity, ChangeRequest, ChangeRequestState, ForgeKind, ReadRepositoryFileRequest,
+        RepositoryReadService, RepositoryRef, ServiceError,
     };
     use forge::{ForgeAdapter, ForgeError};
 
@@ -113,6 +113,33 @@ mod tests {
                 content: "hello".to_string(),
             })
         }
+
+        async fn create_change_request(
+            &self,
+            _repository: &RepositoryRef,
+            _title: &str,
+            _body: &str,
+            _head_branch: &str,
+            _base_branch: &str,
+        ) -> Result<ChangeRequest, ForgeError> {
+            unimplemented!()
+        }
+
+        async fn list_change_requests(
+            &self,
+            _repository: &RepositoryRef,
+            _state: Option<&ChangeRequestState>,
+        ) -> Result<Vec<ChangeRequest>, ForgeError> {
+            unimplemented!()
+        }
+
+        async fn get_change_request(
+            &self,
+            _repository: &RepositoryRef,
+            _index: u64,
+        ) -> Result<ChangeRequest, ForgeError> {
+            unimplemented!()
+        }
     }
 
     struct FailingForgeAdapter;
@@ -126,6 +153,33 @@ mod tests {
             _git_ref: Option<&str>,
         ) -> Result<domain::ReadRepositoryFileResponse, ForgeError> {
             Err(ForgeError::InvalidPayload("test error".to_string()))
+        }
+
+        async fn create_change_request(
+            &self,
+            _repository: &RepositoryRef,
+            _title: &str,
+            _body: &str,
+            _head_branch: &str,
+            _base_branch: &str,
+        ) -> Result<ChangeRequest, ForgeError> {
+            unimplemented!()
+        }
+
+        async fn list_change_requests(
+            &self,
+            _repository: &RepositoryRef,
+            _state: Option<&ChangeRequestState>,
+        ) -> Result<Vec<ChangeRequest>, ForgeError> {
+            unimplemented!()
+        }
+
+        async fn get_change_request(
+            &self,
+            _repository: &RepositoryRef,
+            _index: u64,
+        ) -> Result<ChangeRequest, ForgeError> {
+            unimplemented!()
         }
     }
 
