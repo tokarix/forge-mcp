@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use thiserror::Error;
 
 pub mod diff;
+pub mod policy;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ForgeKind {
