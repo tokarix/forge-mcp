@@ -1,11 +1,15 @@
 //! Forge adapter traits and the Phase 1 Forgejo implementation.
 
+use std::sync::Once;
+
 use async_trait::async_trait;
 use base64::Engine;
 use domain::{ChangeRequest, ChangeRequestState, ReadRepositoryFileResponse, RepositoryRef};
 use reqwest::StatusCode;
 use serde::Deserialize;
 use thiserror::Error;
+
+static INSTALL_RING_PROVIDER: Once = Once::new();
 
 #[derive(Debug, Error)]
 pub enum ForgeError {
@@ -83,6 +87,10 @@ pub struct ForgejoAdapter {
 impl ForgejoAdapter {
     #[must_use]
     pub fn new(config: ForgejoConfig) -> Self {
+        INSTALL_RING_PROVIDER.call_once(|| {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+        });
+
         Self {
             client: reqwest::Client::new(),
             config,
