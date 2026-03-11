@@ -1147,8 +1147,8 @@ git add git-exec/Cargo.toml git-exec/src/lib.rs
 git commit -m "git-exec: implement CLI-based git operations for write workflow
 
 Shell out to git CLI for clone, branch, apply, commit, and push.
-HTTPS-only with token injection into clone URL. Operations run in
-ephemeral temporary directories.
+HTTPS-only with http.extraHeader auth via GIT_CONFIG env vars.
+Operations run in ephemeral temporary directories.
 
 Includes integration test with local bare repo for the full
 clone -> branch -> apply -> commit -> push workflow."
