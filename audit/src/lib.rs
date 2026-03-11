@@ -48,10 +48,7 @@ impl InMemoryAuditSink {
     /// Panics if the internal mutex is poisoned.
     #[must_use]
     pub fn records(&self) -> Vec<AuditRecord> {
-        self.records
-            .lock()
-            .expect("audit mutex poisoned")
-            .clone()
+        self.records.lock().expect("audit mutex poisoned").clone()
     }
 }
 

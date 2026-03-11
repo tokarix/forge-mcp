@@ -4,7 +4,7 @@ use std::{env, sync::Arc};
 
 use audit::InMemoryAuditSink;
 use forge::{ForgejoAdapter, ForgejoConfig};
-use orchestrator::ReadOrchestrator;
+use orchestrator::{ReadOrchestrator, WriteOrchestrator};
 use transport::{ForgejoMcpConfig, serve_stdio};
 
 fn server_version() -> String {
@@ -13,8 +13,8 @@ fn server_version() -> String {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let forgejo_base_url = env::var("FORGEJO_BASE_URL")
-        .expect("FORGEJO_BASE_URL environment variable must be set");
+    let forgejo_base_url =
+        env::var("FORGEJO_BASE_URL").expect("FORGEJO_BASE_URL environment variable must be set");
     let forgejo_token = env::var("FORGEJO_TOKEN").ok();
     let agent_id = env::var("FORGE_MCP_AGENT_ID").unwrap_or_else(|_| "codex".to_string());
     let session_id =
@@ -22,10 +22,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let adapter = Arc::new(ForgejoAdapter::new(ForgejoConfig {
         base_url: forgejo_base_url.clone(),
-        token: forgejo_token,
+        token: forgejo_token.clone(),
     }));
     let audit_sink = Arc::new(InMemoryAuditSink::new());
-    let read_service = Arc::new(ReadOrchestrator::new(adapter, audit_sink));
+    let read_service = Arc::new(ReadOrchestrator::new(
+        Arc::clone(&adapter),
+        Arc::clone(&audit_sink),
+    ));
+    let write_service = Arc::new(WriteOrchestrator::new(
+        adapter,
+        audit_sink,
+        forgejo_token,
+        domain::policy::PolicyConfig::default(),
+    ));
     let config = ForgejoMcpConfig {
         forgejo_base_url,
         agent_id,
@@ -34,6 +43,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         server_version: server_version(),
     };
 
-    serve_stdio(config, read_service).await?;
+    serve_stdio(config, read_service, write_service).await?;
     Ok(())
 }

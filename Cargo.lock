@@ -1285,6 +1285,7 @@ name = "server"
 version = "0.1.0"
 dependencies = [
  "audit",
+ "domain",
  "forge",
  "orchestrator",
  "tokio",

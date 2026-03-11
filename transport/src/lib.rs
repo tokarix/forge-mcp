@@ -1,9 +1,10 @@
-//! Stdio MCP transport for the Phase 1 read-only Forgejo server.
+//! Stdio MCP transport for the Forgejo server.
 
 use std::sync::Arc;
 
 use domain::{
-    AgentIdentity, ForgeKind, ReadRepositoryFileRequest, RepositoryReadService, RepositoryRef,
+    AgentIdentity, CommitPatchRequest, ForgeKind, OpenChangeRequestRequest,
+    ReadRepositoryFileRequest, RepositoryReadService, RepositoryRef, RepositoryWriteService,
     ServiceError,
 };
 use rmcp::{
@@ -37,6 +38,38 @@ pub enum TransportError {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct CommitPatchTool {
+    /// Base branch to create from (e.g. "main").
+    pub base_branch: String,
+    /// Commit message.
+    pub commit_message: String,
+    /// New branch name (must start with "agent/").
+    pub new_branch: String,
+    /// Repository owner or organization.
+    pub owner: String,
+    /// Unified diff patch to apply.
+    pub patch: String,
+    /// Repository name.
+    pub repo: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct OpenChangeRequestTool {
+    /// Base branch for the change request.
+    pub base_branch: String,
+    /// Description body.
+    pub body: String,
+    /// Head branch with the changes.
+    pub head_branch: String,
+    /// Repository owner or organization.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+    /// Title of the change request.
+    pub title: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct ReadRepositoryFileTool {
     /// Repository owner or organization.
     pub owner: String,
@@ -48,25 +81,29 @@ pub struct ReadRepositoryFileTool {
     pub git_ref: Option<String>,
 }
 
-pub struct ForgejoMcpServer<S>
+pub struct ForgejoMcpServer<R, W>
 where
-    S: RepositoryReadService + 'static,
+    R: RepositoryReadService + 'static,
+    W: RepositoryWriteService + 'static,
 {
     config: ForgejoMcpConfig,
-    read_service: Arc<S>,
+    read_service: Arc<R>,
     tool_router: ToolRouter<Self>,
+    write_service: Arc<W>,
 }
 
-impl<S> ForgejoMcpServer<S>
+impl<R, W> ForgejoMcpServer<R, W>
 where
-    S: RepositoryReadService + 'static,
+    R: RepositoryReadService + 'static,
+    W: RepositoryWriteService + 'static,
 {
     #[must_use]
-    pub fn new(config: ForgejoMcpConfig, read_service: Arc<S>) -> Self {
+    pub fn new(config: ForgejoMcpConfig, read_service: Arc<R>, write_service: Arc<W>) -> Self {
         Self {
             config,
             read_service,
             tool_router: Self::tool_router(),
+            write_service,
         }
     }
 
@@ -84,10 +121,81 @@ where
 }
 
 #[tool_router]
-impl<S> ForgejoMcpServer<S>
+impl<R, W> ForgejoMcpServer<R, W>
 where
-    S: RepositoryReadService + 'static,
+    R: RepositoryReadService + 'static,
+    W: RepositoryWriteService + 'static,
 {
+    /// Apply a unified diff patch to a new branch and push it.
+    #[tool(
+        name = "commit_patch",
+        description = "Apply a unified diff patch to a new branch and push it."
+    )]
+    async fn commit_patch(
+        &self,
+        Parameters(request): Parameters<CommitPatchTool>,
+    ) -> Result<String, McpError> {
+        let response = self
+            .write_service
+            .commit_patch(CommitPatchRequest {
+                agent: AgentIdentity {
+                    agent_id: self.config.agent_id.clone(),
+                    session_id: self.config.session_id.clone(),
+                },
+                base_branch: request.base_branch,
+                commit_message: request.commit_message,
+                new_branch: request.new_branch,
+                patch: request.patch,
+                repository: RepositoryRef {
+                    forge: ForgeKind::Forgejo,
+                    host: self.config.forgejo_base_url.clone(),
+                    name: request.repo,
+                    owner: request.owner,
+                },
+            })
+            .await
+            .map_err(Self::map_service_error)?;
+        Ok(format!(
+            "Committed to branch '{}' at {}",
+            response.branch, response.commit_sha
+        ))
+    }
+
+    /// Open a change request (pull request) on the forge.
+    #[tool(
+        name = "open_change_request",
+        description = "Open a change request (pull request) on the forge."
+    )]
+    async fn open_change_request(
+        &self,
+        Parameters(request): Parameters<OpenChangeRequestTool>,
+    ) -> Result<String, McpError> {
+        let response = self
+            .write_service
+            .open_change_request(OpenChangeRequestRequest {
+                agent: AgentIdentity {
+                    agent_id: self.config.agent_id.clone(),
+                    session_id: self.config.session_id.clone(),
+                },
+                base_branch: request.base_branch,
+                body: request.body,
+                head_branch: request.head_branch,
+                repository: RepositoryRef {
+                    forge: ForgeKind::Forgejo,
+                    host: self.config.forgejo_base_url.clone(),
+                    name: request.repo,
+                    owner: request.owner,
+                },
+                title: request.title,
+            })
+            .await
+            .map_err(Self::map_service_error)?;
+        Ok(format!(
+            "Change request #{} created: {}",
+            response.change_request.index, response.change_request.url
+        ))
+    }
+
     /// Read a single UTF-8 text file from a Forgejo repository.
     #[tool(
         name = "read_repository_file",
@@ -119,9 +227,10 @@ where
 }
 
 #[tool_handler(router = self.tool_router)]
-impl<S> ServerHandler for ForgejoMcpServer<S>
+impl<R, W> ServerHandler for ForgejoMcpServer<R, W>
 where
-    S: RepositoryReadService + 'static,
+    R: RepositoryReadService + 'static,
+    W: RepositoryWriteService + 'static,
 {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
@@ -141,14 +250,16 @@ where
 ///
 /// Returns an error if the MCP server cannot initialize or if the runtime task
 /// exits unexpectedly.
-pub async fn serve_stdio<S>(
+pub async fn serve_stdio<R, W>(
     config: ForgejoMcpConfig,
-    read_service: Arc<S>,
+    read_service: Arc<R>,
+    write_service: Arc<W>,
 ) -> Result<(), TransportError>
 where
-    S: RepositoryReadService + 'static,
+    R: RepositoryReadService + 'static,
+    W: RepositoryWriteService + 'static,
 {
-    ForgejoMcpServer::new(config, read_service)
+    ForgejoMcpServer::new(config, read_service, write_service)
         .serve(stdio())
         .await
         .map_err(Box::new)
@@ -163,7 +274,9 @@ mod tests {
     use std::sync::Arc;
 
     use async_trait::async_trait;
-    use domain::{ReadRepositoryFileResponse, ServiceError};
+    use domain::{
+        CommitPatchResponse, OpenChangeRequestResponse, ReadRepositoryFileResponse, ServiceError,
+    };
     use rmcp::{
         ClientHandler, ServiceExt,
         model::{CallToolRequestParams, ClientInfo},
@@ -188,6 +301,23 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl domain::RepositoryWriteService for FakeReadService {
+        async fn commit_patch(
+            &self,
+            _request: domain::CommitPatchRequest,
+        ) -> Result<CommitPatchResponse, ServiceError> {
+            unimplemented!()
+        }
+
+        async fn open_change_request(
+            &self,
+            _request: domain::OpenChangeRequestRequest,
+        ) -> Result<OpenChangeRequestResponse, ServiceError> {
+            unimplemented!()
+        }
+    }
+
     struct ValidationFailReadService;
 
     #[async_trait]
@@ -200,6 +330,23 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl domain::RepositoryWriteService for ValidationFailReadService {
+        async fn commit_patch(
+            &self,
+            _request: domain::CommitPatchRequest,
+        ) -> Result<CommitPatchResponse, ServiceError> {
+            unimplemented!()
+        }
+
+        async fn open_change_request(
+            &self,
+            _request: domain::OpenChangeRequestRequest,
+        ) -> Result<OpenChangeRequestResponse, ServiceError> {
+            unimplemented!()
+        }
+    }
+
     struct UpstreamFailReadService;
 
     #[async_trait]
@@ -209,6 +356,23 @@ mod tests {
             _request: domain::ReadRepositoryFileRequest,
         ) -> Result<ReadRepositoryFileResponse, ServiceError> {
             Err(ServiceError::Upstream("forge down".to_string()))
+        }
+    }
+
+    #[async_trait]
+    impl domain::RepositoryWriteService for UpstreamFailReadService {
+        async fn commit_patch(
+            &self,
+            _request: domain::CommitPatchRequest,
+        ) -> Result<CommitPatchResponse, ServiceError> {
+            unimplemented!()
+        }
+
+        async fn open_change_request(
+            &self,
+            _request: domain::OpenChangeRequestRequest,
+        ) -> Result<OpenChangeRequestResponse, ServiceError> {
+            unimplemented!()
         }
     }
 
@@ -244,7 +408,7 @@ mod tests {
     }
 
     async fn spawn_server_and_client<S>(
-        read_service: Arc<S>,
+        service: Arc<S>,
     ) -> Result<
         (
             rmcp::service::RunningService<rmcp::service::RoleClient, DummyClientHandler>,
@@ -253,13 +417,15 @@ mod tests {
         Box<dyn std::error::Error>,
     >
     where
-        S: domain::RepositoryReadService + 'static,
+        S: domain::RepositoryReadService + domain::RepositoryWriteService + 'static,
     {
         let (server_transport, client_transport) = tokio::io::duplex(4096);
         let config = test_config();
 
+        let read_service = Arc::clone(&service);
+        let write_service = service;
         let server_handle = tokio::spawn(async move {
-            ForgejoMcpServer::new(config, read_service)
+            ForgejoMcpServer::new(config, read_service, write_service)
                 .serve(server_transport)
                 .await
                 .map_err(Box::new)
