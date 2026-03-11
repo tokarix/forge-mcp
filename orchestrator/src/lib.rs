@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use audit::{AuditRecord, AuditSink};
 use domain::{
     ReadRepositoryFileRequest, ReadRepositoryFileResponse, RepositoryReadService, ServiceError,
+    validate_repository_path,
 };
 use forge::ForgeAdapter;
 
@@ -42,11 +43,7 @@ where
         &self,
         request: ReadRepositoryFileRequest,
     ) -> Result<ReadRepositoryFileResponse, ServiceError> {
-        if request.path.trim().is_empty() {
-            return Err(ServiceError::Validation(
-                "path must not be empty".to_string(),
-            ));
-        }
+        validate_repository_path(&request.path).map_err(ServiceError::Validation)?;
 
         let response = self
             .adapter
