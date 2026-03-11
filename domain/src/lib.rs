@@ -49,9 +49,11 @@ pub struct ReadRepositoryFileResponse {
 ///
 /// Returns a description of the violation if the path is unsafe.
 pub fn validate_repository_path(path: &str) -> Result<(), String> {
-    let path = path.trim();
     if path.is_empty() {
         return Err("path must not be empty".to_string());
+    }
+    if path != path.trim() {
+        return Err("path must not have leading or trailing whitespace".to_string());
     }
     if path.starts_with('/') {
         return Err("absolute paths are not allowed".to_string());
@@ -111,7 +113,13 @@ mod tests {
     #[test]
     fn rejects_empty_path() {
         assert!(validate_repository_path("").is_err());
+    }
+
+    #[test]
+    fn rejects_leading_or_trailing_whitespace() {
         assert!(validate_repository_path("   ").is_err());
+        assert!(validate_repository_path(" README.md").is_err());
+        assert!(validate_repository_path("README.md ").is_err());
     }
 
     #[test]
