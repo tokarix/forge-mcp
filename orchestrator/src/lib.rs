@@ -57,9 +57,9 @@ where
 
         self.audit_sink
             .record(AuditRecord {
-                agent_id: request.agent.agent_id,
+                agent: request.agent,
                 action: "read_repository_file".to_string(),
-                repository: format!("{}/{}", request.repository.owner, request.repository.name),
+                repository: request.repository,
                 target: request.path,
             })
             .await

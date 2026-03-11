@@ -3,13 +3,14 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use domain::{AgentIdentity, RepositoryRef};
 use thiserror::Error;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AuditRecord {
-    pub agent_id: String,
+    pub agent: AgentIdentity,
     pub action: String,
-    pub repository: String,
+    pub repository: RepositoryRef,
     pub target: String,
 }
 
@@ -40,12 +41,17 @@ impl InMemoryAuditSink {
         Self::default()
     }
 
+    /// Returns all recorded audit entries.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned.
     #[must_use]
     pub fn records(&self) -> Vec<AuditRecord> {
-        match self.records.lock() {
-            Ok(records) => records.clone(),
-            Err(_) => Vec::new(),
-        }
+        self.records
+            .lock()
+            .expect("audit mutex poisoned")
+            .clone()
     }
 }
 
