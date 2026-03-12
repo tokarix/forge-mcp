@@ -1,0 +1,39 @@
+# forge-mcp control plane configuration
+
+[server]
+listen = "0.0.0.0:8443"
+
+[forge.forgejo]
+base_url = "https://forge.example"
+token = "your-forgejo-api-token"
+
+# Each [[agents]] entry defines a bearer token that maps to an agent
+# identity and policy. Agents authenticate to the control plane with
+# their bearer token; the control plane never exposes forge credentials.
+#
+# allowed_repos: list of "owner/repo" the agent may access.
+#   Deny-by-default: omitting the field or setting [] denies all access.
+#   - ["*"]                    → allows all repositories (only wildcard form)
+#   - ["org/repo", "org/lib"]  → exact owner/repo match, case-sensitive
+#   - []                       → denies all access
+#   Partial globs like "org/*" are NOT supported and treated as literals.
+
+[[agents]]
+token = "bearer-token-for-codex"
+agent_id = "codex"
+session_id = "default"
+
+[agents.policy]
+allowed_repos = ["org/repo", "org/other-repo"]
+branch_prefix = "agent/codex/"
+protected_paths = [".forgejo/", ".github/"]
+
+[[agents]]
+token = "bearer-token-for-claude"
+agent_id = "claude"
+session_id = "default"
+
+[agents.policy]
+allowed_repos = ["org/repo"]
+branch_prefix = "agent/claude/"
+protected_paths = [".forgejo/", ".github/"]
