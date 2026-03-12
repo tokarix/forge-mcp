@@ -1,9 +1,10 @@
 //! HTTP API request and response types.
 
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 /// POST /api/v1/repos/{owner}/{repo}/patches
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct CommitPatchBody {
     pub base_branch: String,
     pub commit_message: String,
@@ -12,14 +13,14 @@ pub struct CommitPatchBody {
 }
 
 /// Response for POST /patches
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct CommitPatchResult {
     pub branch: String,
     pub commit_sha: String,
 }
 
 /// POST /api/v1/repos/{owner}/{repo}/pulls
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct OpenPullBody {
     pub base_branch: String,
     pub body: String,
@@ -35,7 +36,7 @@ pub struct ContentsQuery {
 }
 
 /// Response for GET /contents/{path}
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ContentsResult {
     pub content: String,
     pub git_ref: Option<String>,
@@ -43,7 +44,7 @@ pub struct ContentsResult {
 }
 
 /// GET /api/v1/repos/{owner}/{repo}/pulls
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct ListPullsQuery {
     pub state: Option<String>,
 }
@@ -73,7 +74,7 @@ pub struct ContentsPath {
 }
 
 /// Error response body.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ErrorBody {
     pub error: String,
 }

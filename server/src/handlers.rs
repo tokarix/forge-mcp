@@ -103,6 +103,21 @@ fn repo_ref(owner: &str, repo: &str, base_url: &str) -> RepositoryRef {
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/repos/{owner}/{repo}/contents/{path}",
+    params(
+        ("owner" = String, Path, description = "Repository owner"),
+        ("repo" = String, Path, description = "Repository name"),
+        ("path" = String, Path, description = "File path"),
+        ("ref" = Option<String>, Query, description = "Git ref"),
+    ),
+    responses(
+        (status = 200, description = "File contents", body = ContentsResult),
+        (status = 401, description = "Unauthorized", body = ErrorBody),
+    ),
+    security(("bearer" = []))
+)]
 /// GET /api/v1/repos/{owner}/{repo}/contents/{path}
 pub async fn get_contents(
     State(state): State<AppState>,
@@ -131,6 +146,20 @@ pub async fn get_contents(
     }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/repos/{owner}/{repo}/pulls/{index}",
+    params(
+        ("owner" = String, Path, description = "Repository owner"),
+        ("repo" = String, Path, description = "Repository name"),
+        ("index" = u64, Path, description = "Pull request index"),
+    ),
+    responses(
+        (status = 200, description = "Change request details"),
+        (status = 401, description = "Unauthorized", body = ErrorBody),
+    ),
+    security(("bearer" = []))
+)]
 /// GET /api/v1/repos/{owner}/{repo}/pulls/{index}
 pub async fn get_pull(
     State(state): State<AppState>,
@@ -155,6 +184,20 @@ pub async fn get_pull(
     ))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/repos/{owner}/{repo}/pulls",
+    params(
+        ("owner" = String, Path, description = "Repository owner"),
+        ("repo" = String, Path, description = "Repository name"),
+        ("state" = Option<String>, Query, description = "State filter: open, closed, merged"),
+    ),
+    responses(
+        (status = 200, description = "List of change requests"),
+        (status = 401, description = "Unauthorized", body = ErrorBody),
+    ),
+    security(("bearer" = []))
+)]
 /// GET /api/v1/repos/{owner}/{repo}/pulls
 pub async fn list_pulls(
     State(state): State<AppState>,
@@ -186,6 +229,20 @@ pub async fn list_pulls(
     ))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/repos/{owner}/{repo}/patches",
+    params(
+        ("owner" = String, Path, description = "Repository owner"),
+        ("repo" = String, Path, description = "Repository name"),
+    ),
+    request_body = CommitPatchBody,
+    responses(
+        (status = 201, description = "Patch committed", body = CommitPatchResult),
+        (status = 401, description = "Unauthorized", body = ErrorBody),
+    ),
+    security(("bearer" = []))
+)]
 /// POST /api/v1/repos/{owner}/{repo}/patches
 pub async fn post_patches(
     State(state): State<AppState>,
@@ -218,6 +275,20 @@ pub async fn post_patches(
     ))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/repos/{owner}/{repo}/pulls",
+    params(
+        ("owner" = String, Path, description = "Repository owner"),
+        ("repo" = String, Path, description = "Repository name"),
+    ),
+    request_body = OpenPullBody,
+    responses(
+        (status = 201, description = "Change request created"),
+        (status = 401, description = "Unauthorized", body = ErrorBody),
+    ),
+    security(("bearer" = []))
+)]
 /// POST /api/v1/repos/{owner}/{repo}/pulls
 pub async fn post_pulls(
     State(state): State<AppState>,
@@ -357,6 +428,21 @@ mod tests {
             read_service: Arc::new(FakeReadService),
             write_service: Arc::new(FakeWriteService),
         }
+    }
+
+    #[tokio::test]
+    async fn docs_route_absent_when_disabled() {
+        let app = crate::build_router(test_state(), false);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/docs")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
