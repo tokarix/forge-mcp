@@ -19,7 +19,7 @@ HTTP server built on axum. Responsibilities:
 - Exposes REST API at `/api/v1/`
 - Authenticates callers via bearer tokens
 - Maps each token to an agent identity and policy config
-- Serves OpenAPI docs via utoipa + utoipa-scalar at `/api/v1/docs`
+- Serves OpenAPI docs via utoipa + utoipa-scalar at `/api/v1/docs` (optional, can be disabled in config)
 - Loads configuration from a TOML file at startup
 
 ### MCP shim (`transport` crate)
@@ -30,7 +30,7 @@ Lightweight stdio MCP server using rmcp. Responsibilities:
 - Passes its bearer token in the `Authorization` header
 - Holds no forge credentials, no policy logic, no business logic
 - Configured via env var (`FORGE_MCP_GATEWAY_URL`) or CLI flag (`--gateway-url`)
-- Token via env var (`FORGE_MCP_TOKEN`) or CLI flag (`--token`)
+- Token via env var (`FORGE_MCP_TOKEN`) or file path (`--token-file`); never accepted as a CLI value to avoid leaking credentials in process listings and shell history
 
 ## REST API Surface
 
@@ -84,6 +84,7 @@ All endpoints require `Authorization: Bearer <token>`. The control plane resolve
 HTTP status codes:
 - 400: validation errors, policy denials
 - 401: missing or invalid bearer token
+- 403: agent not authorized for the requested repository
 - 502: upstream forge errors
 - 500: internal errors (audit failure, git-exec failure)
 
@@ -96,7 +97,8 @@ Token resolution flow:
 2. Look up token in the agent registry
 3. If not found → 401
 4. Inject the resolved `AgentIdentity` and `PolicyConfig` into the request context
-5. Pass to orchestrator
+5. Verify `{owner}/{repo}` from the URL is in the agent's `allowed_repos` list → 403 if not
+6. Pass to orchestrator with the agent's policy config
 
 ## Configuration
 
@@ -116,6 +118,7 @@ agent_id = "codex"
 session_id = "default"
 
 [agents.policy]
+allowed_repos = ["org/repo", "org/other-repo"]
 branch_prefix = "agent/codex/"
 protected_paths = [".forgejo/", ".github/"]
 
@@ -125,6 +128,7 @@ agent_id = "claude"
 session_id = "default"
 
 [agents.policy]
+allowed_repos = ["org/repo"]
 branch_prefix = "agent/claude/"
 protected_paths = [".forgejo/", ".github/"]
 ```
