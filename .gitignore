@@ -1,2 +1,4 @@
-/target/
 /.claude/
+/.worktrees/
+/forge-mcp.toml
+/target/
