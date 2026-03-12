@@ -8,5 +8,6 @@ audit = { version = "0.1.0", path = "../audit" }
 domain = { version = "0.1.0", path = "../domain" }
 forge = { version = "0.1.0", path = "../forge" }
 orchestrator = { version = "0.1.0", path = "../orchestrator" }
-tokio = { version = "1.50.0", features = ["macros", "rt-multi-thread"] }
-transport = { version = "0.1.0", path = "../transport" }
+serde = { version = "1.0.228", features = ["derive"] }
+tokio = { version = "1.50.0", features = ["macros", "net", "rt-multi-thread"] }
+toml = "0.8"
