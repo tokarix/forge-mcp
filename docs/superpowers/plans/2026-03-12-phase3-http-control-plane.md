@@ -220,10 +220,14 @@ impl AgentPolicyConfig {
     }
 
     /// Returns whether the agent is allowed to access the given `owner/repo`.
+    ///
+    /// - `["*"]` allows all repositories.
+    /// - An empty list denies all access (deny-by-default).
+    /// - Otherwise, `"owner/repo"` entries are matched exactly.
     #[must_use]
     pub fn is_repo_allowed(&self, owner: &str, repo: &str) -> bool {
-        if self.allowed_repos.is_empty() {
-            return true; // empty list = unrestricted (backwards compat)
+        if self.allowed_repos.iter().any(|r| r == "*") {
+            return true;
         }
         let full = format!("{owner}/{repo}");
         self.allowed_repos.iter().any(|r| r == &full)
@@ -305,9 +309,19 @@ protected_paths = [".forgejo/", ".github/"]
     }
 
     #[test]
-    fn empty_allowlist_permits_all() {
+    fn empty_allowlist_denies_all() {
         let policy = AgentPolicyConfig {
             allowed_repos: vec![],
+            branch_prefix: None,
+            protected_paths: vec![],
+        };
+        assert!(!policy.is_repo_allowed("any", "repo"));
+    }
+
+    #[test]
+    fn wildcard_allowlist_permits_all() {
+        let policy = AgentPolicyConfig {
+            allowed_repos: vec!["*".to_string()],
             branch_prefix: None,
             protected_paths: vec![],
         };
@@ -2540,6 +2554,10 @@ token = "your-forgejo-api-token"
 # Each [[agents]] entry defines a bearer token that maps to an agent
 # identity and policy. Agents authenticate to the control plane with
 # their bearer token; the control plane never exposes forge credentials.
+#
+# allowed_repos: list of "owner/repo" the agent may access.
+#   - ["*"] allows all repositories on the configured forge.
+#   - [] (empty) denies all access (deny-by-default).
 
 [[agents]]
 token = "bearer-token-for-codex"
