@@ -279,7 +279,7 @@ mod tests {
     };
     use rmcp::{
         ClientHandler, ServiceExt,
-        model::{CallToolRequestParams, ClientInfo},
+        model::{CallToolRequestParams, ClientInfo, ErrorCode},
     };
 
     use super::{ForgejoMcpConfig, ForgejoMcpServer, TransportError};
@@ -468,16 +468,19 @@ mod tests {
         let (client, server_handle) =
             spawn_server_and_client(Arc::new(ValidationFailReadService)).await?;
 
-        let result = client
+        let err = client
             .call_tool(
                 CallToolRequestParams::new("read_repository_file").with_arguments(read_file_args()),
             )
-            .await;
+            .await
+            .expect_err("validation error should propagate as MCP error");
 
-        assert!(
-            result.is_err(),
-            "validation error should propagate as MCP error"
-        );
+        match err {
+            rmcp::ServiceError::McpError(ref mcp_err) => {
+                assert_eq!(mcp_err.code, ErrorCode::INVALID_PARAMS);
+            }
+            other => panic!("expected McpError, got: {other}"),
+        }
 
         drop(client);
         // Server may exit with an error due to client disconnect; that's fine
@@ -490,16 +493,19 @@ mod tests {
         let (client, server_handle) =
             spawn_server_and_client(Arc::new(UpstreamFailReadService)).await?;
 
-        let result = client
+        let err = client
             .call_tool(
                 CallToolRequestParams::new("read_repository_file").with_arguments(read_file_args()),
             )
-            .await;
+            .await
+            .expect_err("upstream error should propagate as MCP error");
 
-        assert!(
-            result.is_err(),
-            "upstream error should propagate as MCP error"
-        );
+        match err {
+            rmcp::ServiceError::McpError(ref mcp_err) => {
+                assert_eq!(mcp_err.code, ErrorCode::INTERNAL_ERROR);
+            }
+            other => panic!("expected McpError, got: {other}"),
+        }
 
         drop(client);
         let _ = server_handle.await;
