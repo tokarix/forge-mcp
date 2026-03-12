@@ -5,9 +5,11 @@ edition = "2024"
 
 [dependencies]
 audit = { version = "0.1.0", path = "../audit" }
+axum = "0.8"
 domain = { version = "0.1.0", path = "../domain" }
 forge = { version = "0.1.0", path = "../forge" }
 orchestrator = { version = "0.1.0", path = "../orchestrator" }
 serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
 tokio = { version = "1.50.0", features = ["macros", "net", "rt-multi-thread"] }
 toml = "0.8"
