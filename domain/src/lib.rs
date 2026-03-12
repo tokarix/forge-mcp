@@ -1,19 +1,20 @@
 //! Canonical domain types and service traits for forge-mcp.
 
 use async_trait::async_trait;
+use serde::Serialize;
 use thiserror::Error;
 
 pub mod diff;
 pub mod policy;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum ForgeKind {
     Forgejo,
     GitHub,
     GitLab,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct RepositoryRef {
     pub forge: ForgeKind,
     pub host: String,
@@ -35,7 +36,7 @@ pub struct ReadRepositoryFileRequest {
     pub git_ref: Option<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ReadRepositoryFileResponse {
     pub repository: RepositoryRef,
     pub path: String,
@@ -43,7 +44,7 @@ pub struct ReadRepositoryFileResponse {
     pub content: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ChangeRequest {
     pub base_branch: String,
     pub body: String,
@@ -54,7 +55,7 @@ pub struct ChangeRequest {
     pub url: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum ChangeRequestState {
     Closed,
     Merged,
@@ -71,7 +72,7 @@ pub struct CommitPatchRequest {
     pub repository: RepositoryRef,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct CommitPatchResponse {
     pub branch: String,
     pub commit_sha: String,
@@ -102,7 +103,7 @@ pub struct OpenChangeRequestRequest {
     pub title: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct OpenChangeRequestResponse {
     pub change_request: ChangeRequest,
     pub repository: RepositoryRef,
@@ -194,6 +195,23 @@ pub trait RepositoryWriteService: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::validate_repository_path;
+    use super::{ChangeRequest, ChangeRequestState};
+
+    #[test]
+    fn change_request_serializes_to_json() {
+        let cr = ChangeRequest {
+            base_branch: "main".to_string(),
+            body: "fix".to_string(),
+            head_branch: "agent/fix".to_string(),
+            index: 1,
+            state: ChangeRequestState::Open,
+            title: "Fix".to_string(),
+            url: "https://example.com/pulls/1".to_string(),
+        };
+        let json = serde_json::to_value(&cr).expect("should serialize");
+        assert_eq!(json["index"], 1);
+        assert_eq!(json["state"], "Open");
+    }
 
     #[test]
     fn accepts_simple_relative_path() {
