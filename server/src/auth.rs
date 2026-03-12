@@ -13,9 +13,17 @@ pub struct ResolvedAgent {
 }
 
 /// Registry mapping bearer tokens to agent identities and policies.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct AgentRegistry {
     agents: HashMap<String, ResolvedAgent>,
+}
+
+impl std::fmt::Debug for AgentRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentRegistry")
+            .field("agents", &format_args!("[{} entries]", self.agents.len()))
+            .finish()
+    }
 }
 
 impl AgentRegistry {
@@ -83,5 +91,12 @@ mod tests {
     fn returns_none_for_empty_token() {
         let registry = AgentRegistry::from_configs(&test_configs());
         assert!(registry.resolve("").is_none());
+    }
+
+    #[test]
+    fn debug_redacts_tokens() {
+        let registry = AgentRegistry::from_configs(&test_configs());
+        let debug = format!("{registry:?}");
+        assert!(!debug.contains("test-token-123"));
     }
 }
