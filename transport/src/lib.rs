@@ -1,7 +1,5 @@
 //! MCP shim — translates MCP tool calls into HTTP requests to the control plane.
 
-use std::fmt::Write as _;
-
 use rmcp::{
     ErrorData as McpError, ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -14,12 +12,23 @@ use serde::Deserialize;
 use thiserror::Error;
 
 /// Configuration for the MCP shim.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ShimConfig {
     pub gateway_url: String,
     pub server_name: String,
     pub server_version: String,
     pub token: String,
+}
+
+impl std::fmt::Debug for ShimConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ShimConfig")
+            .field("gateway_url", &self.gateway_url)
+            .field("server_name", &self.server_name)
+            .field("server_version", &self.server_version)
+            .field("token", &"[REDACTED]")
+            .finish()
+    }
 }
 
 #[derive(Debug, Error)]
@@ -110,12 +119,46 @@ impl McpShim {
         }
     }
 
+    /// Parses the gateway base URL, returning an MCP error on failure.
+    fn base_url(&self) -> Result<reqwest::Url, McpError> {
+        let mut base = self.config.gateway_url.clone();
+        if !base.ends_with('/') {
+            base.push('/');
+        }
+        reqwest::Url::parse(&base)
+            .map_err(|e| McpError::internal_error(format!("invalid gateway URL: {e}"), None))
+    }
+
+    /// Builds a URL by appending percent-encoded path segments to the base.
+    fn build_url(&self, segments: &[&str]) -> Result<reqwest::Url, McpError> {
+        let mut url = self.base_url()?;
+        {
+            let mut path = url
+                .path_segments_mut()
+                .map_err(|()| McpError::internal_error("cannot-be-a-base URL".to_string(), None))?;
+            for segment in segments {
+                path.push(segment);
+            }
+        }
+        Ok(url)
+    }
+
+    /// Sends an HTTP response through the standard error-handling pipeline.
+    fn map_http_error(status: reqwest::StatusCode, body: String) -> McpError {
+        if status.as_u16() == 401 {
+            McpError::invalid_params("authentication failed".to_string(), None)
+        } else if status.is_client_error() {
+            McpError::invalid_params(body, None)
+        } else {
+            McpError::internal_error(body, None)
+        }
+    }
+
     /// Makes an HTTP GET request to the control plane.
-    async fn gateway_get(&self, path: &str) -> Result<String, McpError> {
-        let url = format!("{}{path}", self.config.gateway_url.trim_end_matches('/'));
+    async fn gateway_get(&self, url: reqwest::Url) -> Result<String, McpError> {
         let response = self
             .client
-            .get(&url)
+            .get(url)
             .bearer_auth(&self.config.token)
             .send()
             .await
@@ -128,13 +171,7 @@ impl McpShim {
             .map_err(|e| McpError::internal_error(format!("failed to read response: {e}"), None))?;
 
         if !status.is_success() {
-            return Err(if status.as_u16() == 401 {
-                McpError::invalid_params("authentication failed".to_string(), None)
-            } else if status.is_client_error() {
-                McpError::invalid_params(body, None)
-            } else {
-                McpError::internal_error(body, None)
-            });
+            return Err(Self::map_http_error(status, body));
         }
 
         Ok(body)
@@ -143,13 +180,12 @@ impl McpShim {
     /// Makes an HTTP POST request to the control plane.
     async fn gateway_post(
         &self,
-        path: &str,
+        url: reqwest::Url,
         json_body: &impl serde::Serialize,
     ) -> Result<String, McpError> {
-        let url = format!("{}{path}", self.config.gateway_url.trim_end_matches('/'));
         let response = self
             .client
-            .post(&url)
+            .post(url)
             .bearer_auth(&self.config.token)
             .json(json_body)
             .send()
@@ -163,13 +199,7 @@ impl McpShim {
             .map_err(|e| McpError::internal_error(format!("failed to read response: {e}"), None))?;
 
         if !status.is_success() {
-            return Err(if status.as_u16() == 401 {
-                McpError::invalid_params("authentication failed".to_string(), None)
-            } else if status.is_client_error() {
-                McpError::invalid_params(body, None)
-            } else {
-                McpError::internal_error(body, None)
-            });
+            return Err(Self::map_http_error(status, body));
         }
 
         Ok(body)
@@ -187,14 +217,21 @@ impl McpShim {
         &self,
         Parameters(request): Parameters<CommitPatchTool>,
     ) -> Result<String, McpError> {
-        let path = format!("/api/v1/repos/{}/{}/patches", request.owner, request.repo);
+        let url = self.build_url(&[
+            "api",
+            "v1",
+            "repos",
+            &request.owner,
+            &request.repo,
+            "patches",
+        ])?;
         let body = serde_json::json!({
             "base_branch": request.base_branch,
             "commit_message": request.commit_message,
             "new_branch": request.new_branch,
             "patch": request.patch,
         });
-        self.gateway_post(&path, &body).await
+        self.gateway_post(url, &body).await
     }
 
     /// Get a single change request by index.
@@ -206,11 +243,16 @@ impl McpShim {
         &self,
         Parameters(request): Parameters<GetChangeRequestTool>,
     ) -> Result<String, McpError> {
-        let path = format!(
-            "/api/v1/repos/{}/{}/pulls/{}",
-            request.owner, request.repo, request.index
-        );
-        self.gateway_get(&path).await
+        let url = self.build_url(&[
+            "api",
+            "v1",
+            "repos",
+            &request.owner,
+            &request.repo,
+            "pulls",
+            &request.index.to_string(),
+        ])?;
+        self.gateway_get(url).await
     }
 
     /// List change requests for a repository.
@@ -222,11 +264,12 @@ impl McpShim {
         &self,
         Parameters(request): Parameters<ListChangeRequestsTool>,
     ) -> Result<String, McpError> {
-        let mut path = format!("/api/v1/repos/{}/{}/pulls", request.owner, request.repo);
+        let mut url =
+            self.build_url(&["api", "v1", "repos", &request.owner, &request.repo, "pulls"])?;
         if let Some(state) = &request.state {
-            write!(path, "?state={state}").unwrap();
+            url.query_pairs_mut().append_pair("state", state);
         }
-        self.gateway_get(&path).await
+        self.gateway_get(url).await
     }
 
     /// Open a change request (pull request) on the forge.
@@ -238,14 +281,15 @@ impl McpShim {
         &self,
         Parameters(request): Parameters<OpenChangeRequestTool>,
     ) -> Result<String, McpError> {
-        let path = format!("/api/v1/repos/{}/{}/pulls", request.owner, request.repo);
+        let url =
+            self.build_url(&["api", "v1", "repos", &request.owner, &request.repo, "pulls"])?;
         let body = serde_json::json!({
             "base_branch": request.base_branch,
             "body": request.body,
             "head_branch": request.head_branch,
             "title": request.title,
         });
-        self.gateway_post(&path, &body).await
+        self.gateway_post(url, &body).await
     }
 
     /// Read a single UTF-8 text file from a repository.
@@ -257,15 +301,24 @@ impl McpShim {
         &self,
         Parameters(request): Parameters<ReadRepositoryFileTool>,
     ) -> Result<String, McpError> {
-        let encoded_path = request.path.replace('/', "%2F");
-        let mut path = format!(
-            "/api/v1/repos/{}/{}/contents/{encoded_path}",
-            request.owner, request.repo
-        );
+        // Each path component is pushed as a separate segment so reqwest
+        // percent-encodes reserved characters (?, #, &, etc.) automatically.
+        let mut segments: Vec<&str> = vec![
+            "api",
+            "v1",
+            "repos",
+            &request.owner,
+            &request.repo,
+            "contents",
+        ];
+        let path_parts: Vec<&str> = request.path.split('/').collect();
+        segments.extend(path_parts.iter());
+        let mut url = self.build_url(&segments)?;
+
         if let Some(git_ref) = &request.git_ref {
-            write!(path, "?ref={git_ref}").unwrap();
+            url.query_pairs_mut().append_pair("ref", git_ref);
         }
-        let response = self.gateway_get(&path).await?;
+        let response = self.gateway_get(url).await?;
 
         // Extract just the content field from the JSON response
         let parsed: serde_json::Value = serde_json::from_str(&response)
@@ -333,6 +386,62 @@ mod tests {
             server_version: "0.1.0-test".to_string(),
             token: "test-token".to_string(),
         }
+    }
+
+    #[test]
+    fn debug_redacts_token() {
+        let config = test_config("https://example.com");
+        let debug = format!("{config:?}");
+        assert!(!debug.contains("test-token"));
+        assert!(debug.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn build_url_encodes_reserved_characters() {
+        let shim = McpShim::new(test_config("https://example.com"));
+        let url = shim
+            .build_url(&["api", "v1", "repos", "org", "repo", "contents", "a?b#c"])
+            .unwrap();
+        let path = url.path();
+        // '?' and '#' change URL semantics and must be percent-encoded in paths
+        assert!(
+            !path.contains('?'),
+            "path should not contain raw '?': {path}"
+        );
+        assert!(
+            !path.contains('#'),
+            "path should not contain raw '#': {path}"
+        );
+        assert!(
+            path.contains("a%3Fb%23c"),
+            "path should encode ? and #: {path}"
+        );
+    }
+
+    #[test]
+    fn build_url_query_params_encoded() {
+        let shim = McpShim::new(test_config("https://example.com"));
+        let mut url = shim
+            .build_url(&["api", "v1", "repos", "org", "repo", "contents", "file"])
+            .unwrap();
+        url.query_pairs_mut()
+            .append_pair("ref", "feat/branch&evil=1");
+        let query = url.query().unwrap();
+        // The & in the ref value should be encoded, not treated as a separator
+        assert!(
+            !query.contains("evil=1"),
+            "query should encode & in values: {query}"
+        );
+    }
+
+    #[test]
+    fn build_url_nested_path_segments() {
+        let shim = McpShim::new(test_config("https://example.com"));
+        let path_parts: Vec<&str> = "src/main.rs".split('/').collect();
+        let mut segments: Vec<&str> = vec!["api", "v1", "repos", "org", "repo", "contents"];
+        segments.extend(path_parts.iter());
+        let url = shim.build_url(&segments).unwrap();
+        assert_eq!(url.path(), "/api/v1/repos/org/repo/contents/src/main.rs");
     }
 
     async fn spawn_shim_and_client(
