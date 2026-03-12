@@ -5,9 +5,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use audit::{AuditRecord, AuditSink};
 use domain::{
-    ChangeRequest, GetChangeRequestRequest, ListChangeRequestsRequest,
-    ReadRepositoryFileRequest, ReadRepositoryFileResponse, RepositoryReadService, ServiceError,
-    validate_repository_path,
+    ChangeRequest, GetChangeRequestRequest, ListChangeRequestsRequest, ReadRepositoryFileRequest,
+    ReadRepositoryFileResponse, RepositoryReadService, ServiceError, validate_repository_path,
 };
 use forge::ForgeAdapter;
 
