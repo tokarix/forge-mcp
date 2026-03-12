@@ -8,7 +8,7 @@ use orchestrator::{ReadOrchestrator, WriteOrchestrator};
 use server::{auth::AgentRegistry, build_router, config::parse_config, handlers::AppState};
 
 fn server_version() -> String {
-    let commit = option_env!("GIT_COMMIT_SHORT").unwrap_or("unknown");
+    let commit = env!("GIT_COMMIT_SHORT");
     format!("{}+{commit}", env!("CARGO_PKG_VERSION"))
 }
 

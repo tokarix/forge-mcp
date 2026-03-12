@@ -17,4 +17,5 @@ fn main() {
         .unwrap_or_else(|| "unknown".to_string());
 
     println!("cargo:rustc-env=GIT_COMMIT_SHORT={git_commit_short}");
+    println!("cargo:rerun-if-changed=../.git/HEAD");
 }
