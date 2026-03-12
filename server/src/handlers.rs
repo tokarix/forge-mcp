@@ -246,3 +246,311 @@ pub async fn post_pulls(
         Json(serde_json::to_value(&result.change_request).expect("serializable")),
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
+    use domain::{
+        ChangeRequest, ChangeRequestState, CommitPatchResponse, GetChangeRequestRequest,
+        ListChangeRequestsRequest, OpenChangeRequestResponse, ReadRepositoryFileResponse,
+        ServiceError,
+    };
+    use tower::ServiceExt;
+
+    use crate::auth::AgentRegistry;
+    use crate::config::AgentPolicyConfig;
+
+    use super::*;
+
+    struct FakeReadService;
+
+    #[async_trait::async_trait]
+    impl RepositoryReadService for FakeReadService {
+        async fn read_repository_file(
+            &self,
+            request: ReadRepositoryFileRequest,
+        ) -> Result<ReadRepositoryFileResponse, ServiceError> {
+            Ok(ReadRepositoryFileResponse {
+                content: "file-content".to_string(),
+                git_ref: request.git_ref,
+                path: request.path,
+                repository: request.repository,
+            })
+        }
+
+        async fn list_change_requests(
+            &self,
+            _request: ListChangeRequestsRequest,
+        ) -> Result<Vec<ChangeRequest>, ServiceError> {
+            Ok(vec![])
+        }
+
+        async fn get_change_request(
+            &self,
+            request: GetChangeRequestRequest,
+        ) -> Result<ChangeRequest, ServiceError> {
+            Ok(ChangeRequest {
+                base_branch: "main".to_string(),
+                body: "body".to_string(),
+                head_branch: "agent/fix".to_string(),
+                index: request.index,
+                state: ChangeRequestState::Open,
+                title: "Fix".to_string(),
+                url: "https://example.com/pulls/1".to_string(),
+            })
+        }
+    }
+
+    struct FakeWriteService;
+
+    #[async_trait::async_trait]
+    impl RepositoryWriteService for FakeWriteService {
+        async fn commit_patch(
+            &self,
+            request: CommitPatchRequest,
+        ) -> Result<CommitPatchResponse, ServiceError> {
+            Ok(CommitPatchResponse {
+                branch: request.new_branch.clone(),
+                commit_sha: "abc123".to_string(),
+                repository: request.repository,
+            })
+        }
+
+        async fn open_change_request(
+            &self,
+            request: OpenChangeRequestRequest,
+        ) -> Result<OpenChangeRequestResponse, ServiceError> {
+            Ok(OpenChangeRequestResponse {
+                change_request: ChangeRequest {
+                    base_branch: "main".to_string(),
+                    body: "body".to_string(),
+                    head_branch: "agent/fix".to_string(),
+                    index: 1,
+                    state: ChangeRequestState::Open,
+                    title: "Fix".to_string(),
+                    url: "https://example.com/pulls/1".to_string(),
+                },
+                repository: request.repository,
+            })
+        }
+    }
+
+    fn test_state() -> AppState {
+        let configs = vec![crate::config::AgentConfig {
+            agent_id: "codex".to_string(),
+            policy: AgentPolicyConfig {
+                allowed_repos: vec!["org/repo".to_string()],
+                branch_prefix: Some("agent/".to_string()),
+                protected_paths: vec![],
+            },
+            session_id: "default".to_string(),
+            token: "test-token".to_string(),
+        }];
+        AppState {
+            agent_registry: AgentRegistry::from_configs(&configs),
+            forgejo_base_url: "https://forge.example".to_string(),
+            read_service: Arc::new(FakeReadService),
+            write_service: Arc::new(FakeWriteService),
+        }
+    }
+
+    #[tokio::test]
+    async fn get_contents_returns_file() {
+        let app = crate::build_router(test_state(), false);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/repos/org/repo/contents/README.md")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["content"], "file-content");
+        assert_eq!(json["path"], "README.md");
+    }
+
+    #[tokio::test]
+    async fn returns_401_without_token() {
+        let app = crate::build_router(test_state(), false);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/repos/org/repo/contents/README.md")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn returns_403_for_unauthorized_repo() {
+        let configs = vec![crate::config::AgentConfig {
+            agent_id: "codex".to_string(),
+            policy: AgentPolicyConfig {
+                allowed_repos: vec!["org/allowed-repo".to_string()],
+                branch_prefix: Some("agent/".to_string()),
+                protected_paths: vec![],
+            },
+            session_id: "default".to_string(),
+            token: "test-token".to_string(),
+        }];
+        let state = AppState {
+            agent_registry: AgentRegistry::from_configs(&configs),
+            forgejo_base_url: "https://forge.example".to_string(),
+            read_service: Arc::new(FakeReadService),
+            write_service: Arc::new(FakeWriteService),
+        };
+        let app = crate::build_router(state, false);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/repos/org/secret-repo/contents/README.md")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn returns_401_with_bad_token() {
+        let app = crate::build_router(test_state(), false);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/repos/org/repo/contents/README.md")
+                    .header("authorization", "Bearer wrong-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn post_patches_returns_201() {
+        let app = crate::build_router(test_state(), false);
+        let body = serde_json::json!({
+            "base_branch": "main",
+            "commit_message": "fix",
+            "new_branch": "agent/fix",
+            "patch": "diff..."
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos/org/repo/patches")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["branch"], "agent/fix");
+        assert_eq!(json["commit_sha"], "abc123");
+    }
+
+    #[tokio::test]
+    async fn list_pulls_returns_array() {
+        let app = crate::build_router(test_state(), false);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/repos/org/repo/pulls")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json.as_array().expect("should be array").is_empty());
+    }
+
+    #[tokio::test]
+    async fn post_pulls_returns_201() {
+        let app = crate::build_router(test_state(), false);
+        let body = serde_json::json!({
+            "base_branch": "main",
+            "body": "Fix description",
+            "head_branch": "agent/fix",
+            "title": "Fix bug"
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos/org/repo/pulls")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["index"], 1);
+        assert_eq!(json["state"], "Open");
+    }
+
+    #[tokio::test]
+    async fn get_pull_returns_change_request() {
+        let app = crate::build_router(test_state(), false);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/repos/org/repo/pulls/1")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["index"], 1);
+    }
+}
