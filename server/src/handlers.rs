@@ -250,8 +250,39 @@ pub async fn post_patches(
     headers: HeaderMap,
     Json(body): Json<CommitPatchBody>,
 ) -> impl IntoResponse {
-    let (identity, _policy) =
+    let (identity, policy) =
         resolve_agent(&headers, &state.agent_registry, &path.owner, &path.repo)?;
+
+    // Per-agent policy check
+    let diff_result = domain::diff::validate_diff(&body.patch)
+        .map_err(|e| map_service_error(ServiceError::Validation(e.to_string())))?;
+
+    let touched_paths: Vec<String> = diff_result
+        .files
+        .iter()
+        .flat_map(|f| {
+            let mut paths = vec![f.path.clone()];
+            if let Some(ref source) = f.source_path {
+                paths.push(source.clone());
+            }
+            paths
+        })
+        .collect();
+
+    let policy_context = domain::policy::PolicyContext {
+        action: "commit_patch".to_string(),
+        agent: identity.clone(),
+        repository: repo_ref(&path.owner, &path.repo, &state.forgejo_base_url),
+        target_branch: body.new_branch.clone(),
+        touched_paths,
+    };
+    let decision = domain::policy::evaluate(&policy, &policy_context)
+        .map_err(|e| map_service_error(ServiceError::Validation(e.to_string())))?;
+    if !decision.is_allowed() {
+        return Err(map_service_error(ServiceError::PolicyDenied {
+            reasons: decision.reasons.join("; "),
+        }));
+    }
 
     let result = state
         .write_service
@@ -296,8 +327,24 @@ pub async fn post_pulls(
     headers: HeaderMap,
     Json(body): Json<OpenPullBody>,
 ) -> impl IntoResponse {
-    let (identity, _policy) =
+    let (identity, policy) =
         resolve_agent(&headers, &state.agent_registry, &path.owner, &path.repo)?;
+
+    // Per-agent branch prefix check for the head branch
+    let policy_context = domain::policy::PolicyContext {
+        action: "open_change_request".to_string(),
+        agent: identity.clone(),
+        repository: repo_ref(&path.owner, &path.repo, &state.forgejo_base_url),
+        target_branch: body.head_branch.clone(),
+        touched_paths: vec![],
+    };
+    let decision = domain::policy::evaluate(&policy, &policy_context)
+        .map_err(|e| map_service_error(ServiceError::Validation(e.to_string())))?;
+    if !decision.is_allowed() {
+        return Err(map_service_error(ServiceError::PolicyDenied {
+            reasons: decision.reasons.join("; "),
+        }));
+    }
 
     let result = state
         .write_service
@@ -541,7 +588,7 @@ mod tests {
             "base_branch": "main",
             "commit_message": "fix",
             "new_branch": "agent/fix",
-            "patch": "diff..."
+            "patch": "diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,2 @@\n # Hello\n+World\n"
         });
         let response = app
             .oneshot(
@@ -638,5 +685,57 @@ mod tests {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["index"], 1);
+    }
+
+    #[tokio::test]
+    async fn post_patches_rejects_wrong_branch_per_agent_policy() {
+        let configs = vec![crate::config::AgentConfig {
+            agent_id: "codex".to_string(),
+            policy: AgentPolicyConfig {
+                allowed_repos: vec!["org/repo".to_string()],
+                branch_prefix: Some("agent/codex/".to_string()),
+                protected_paths: vec![],
+            },
+            session_id: "default".to_string(),
+            token: "test-token".to_string(),
+        }];
+        let state = AppState {
+            agent_registry: AgentRegistry::from_configs(&configs),
+            forgejo_base_url: "https://forge.example".to_string(),
+            read_service: Arc::new(FakeReadService),
+            write_service: Arc::new(FakeWriteService),
+        };
+        let app = crate::build_router(state, false);
+
+        let body = serde_json::json!({
+            "base_branch": "main",
+            "commit_message": "fix",
+            "new_branch": "agent/claude/fix",
+            "patch": "diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,2 @@\n # Hello\n+World\n"
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos/org/repo/patches")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            json["error"]
+                .as_str()
+                .unwrap()
+                .contains("does not start with")
+        );
     }
 }
