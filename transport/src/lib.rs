@@ -288,6 +288,20 @@ mod tests {
 
     #[async_trait]
     impl domain::RepositoryReadService for FakeReadService {
+        async fn get_change_request(
+            &self,
+            _request: domain::GetChangeRequestRequest,
+        ) -> Result<domain::ChangeRequest, ServiceError> {
+            unimplemented!()
+        }
+
+        async fn list_change_requests(
+            &self,
+            _request: domain::ListChangeRequestsRequest,
+        ) -> Result<Vec<domain::ChangeRequest>, ServiceError> {
+            unimplemented!()
+        }
+
         async fn read_repository_file(
             &self,
             request: domain::ReadRepositoryFileRequest,
@@ -322,6 +336,20 @@ mod tests {
 
     #[async_trait]
     impl domain::RepositoryReadService for ValidationFailReadService {
+        async fn get_change_request(
+            &self,
+            _request: domain::GetChangeRequestRequest,
+        ) -> Result<domain::ChangeRequest, ServiceError> {
+            unimplemented!()
+        }
+
+        async fn list_change_requests(
+            &self,
+            _request: domain::ListChangeRequestsRequest,
+        ) -> Result<Vec<domain::ChangeRequest>, ServiceError> {
+            unimplemented!()
+        }
+
         async fn read_repository_file(
             &self,
             _request: domain::ReadRepositoryFileRequest,
@@ -351,6 +379,20 @@ mod tests {
 
     #[async_trait]
     impl domain::RepositoryReadService for UpstreamFailReadService {
+        async fn get_change_request(
+            &self,
+            _request: domain::GetChangeRequestRequest,
+        ) -> Result<domain::ChangeRequest, ServiceError> {
+            unimplemented!()
+        }
+
+        async fn list_change_requests(
+            &self,
+            _request: domain::ListChangeRequestsRequest,
+        ) -> Result<Vec<domain::ChangeRequest>, ServiceError> {
+            unimplemented!()
+        }
+
         async fn read_repository_file(
             &self,
             _request: domain::ReadRepositoryFileRequest,

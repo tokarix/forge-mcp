@@ -157,6 +157,28 @@ pub enum ServiceError {
 
 #[async_trait]
 pub trait RepositoryReadService: Send + Sync {
+    /// Retrieves a single change request by index.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the upstream forge request fails or audit
+    /// recording fails.
+    async fn get_change_request(
+        &self,
+        request: GetChangeRequestRequest,
+    ) -> Result<ChangeRequest, ServiceError>;
+
+    /// Lists change requests, optionally filtered by state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the upstream forge request fails or audit
+    /// recording fails.
+    async fn list_change_requests(
+        &self,
+        request: ListChangeRequestsRequest,
+    ) -> Result<Vec<ChangeRequest>, ServiceError>;
+
     /// Reads a single text file from a repository through the control plane.
     ///
     /// # Errors

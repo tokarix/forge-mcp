@@ -5,6 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use audit::{AuditRecord, AuditSink};
 use domain::{
+    ChangeRequest, GetChangeRequestRequest, ListChangeRequestsRequest,
     ReadRepositoryFileRequest, ReadRepositoryFileResponse, RepositoryReadService, ServiceError,
     validate_repository_path,
 };
@@ -39,6 +40,49 @@ where
     A: ForgeAdapter,
     S: AuditSink,
 {
+    async fn get_change_request(
+        &self,
+        request: GetChangeRequestRequest,
+    ) -> Result<ChangeRequest, ServiceError> {
+        self.audit_sink
+            .record(AuditRecord {
+                agent: request.agent,
+                action: "get_change_request".to_string(),
+                repository: request.repository.clone(),
+                target: request.index.to_string(),
+            })
+            .await
+            .map_err(|e| ServiceError::Audit(e.to_string()))?;
+
+        self.adapter
+            .get_change_request(&request.repository, request.index)
+            .await
+            .map_err(|e| ServiceError::Upstream(e.to_string()))
+    }
+
+    async fn list_change_requests(
+        &self,
+        request: ListChangeRequestsRequest,
+    ) -> Result<Vec<ChangeRequest>, ServiceError> {
+        self.audit_sink
+            .record(AuditRecord {
+                agent: request.agent,
+                action: "list_change_requests".to_string(),
+                repository: request.repository.clone(),
+                target: request
+                    .state
+                    .as_ref()
+                    .map_or("all".to_string(), |s| format!("{s:?}")),
+            })
+            .await
+            .map_err(|e| ServiceError::Audit(e.to_string()))?;
+
+        self.adapter
+            .list_change_requests(&request.repository, request.state.as_ref())
+            .await
+            .map_err(|e| ServiceError::Upstream(e.to_string()))
+    }
+
     async fn read_repository_file(
         &self,
         request: ReadRepositoryFileRequest,
