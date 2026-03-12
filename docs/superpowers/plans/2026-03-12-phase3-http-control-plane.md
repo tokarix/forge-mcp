@@ -221,9 +221,14 @@ impl AgentPolicyConfig {
 
     /// Returns whether the agent is allowed to access the given `owner/repo`.
     ///
-    /// - `["*"]` allows all repositories.
-    /// - An empty list denies all access (deny-by-default).
-    /// - Otherwise, `"owner/repo"` entries are matched exactly.
+    /// Semantics (deny-by-default):
+    /// - `[]` or field omitted → denies all access.
+    /// - `["*"]` → allows all repositories (only wildcard form supported).
+    /// - `["owner/repo", ...]` → exact `owner/repo` matching, case-sensitive.
+    /// - `["*"]` combined with explicit entries is valid but redundant (the
+    ///   wildcard dominates).
+    /// - No glob patterns beyond `*` are supported. Entries like `org/*`
+    ///   are treated as literal strings and will never match.
     #[must_use]
     pub fn is_repo_allowed(&self, owner: &str, repo: &str) -> bool {
         if self.allowed_repos.iter().any(|r| r == "*") {
@@ -326,6 +331,27 @@ protected_paths = [".forgejo/", ".github/"]
             protected_paths: vec![],
         };
         assert!(policy.is_repo_allowed("any", "repo"));
+    }
+
+    #[test]
+    fn wildcard_with_explicit_entries_still_permits_all() {
+        let policy = AgentPolicyConfig {
+            allowed_repos: vec!["org/repo".to_string(), "*".to_string()],
+            branch_prefix: None,
+            protected_paths: vec![],
+        };
+        assert!(policy.is_repo_allowed("other", "thing"));
+    }
+
+    #[test]
+    fn partial_glob_treated_as_literal() {
+        let policy = AgentPolicyConfig {
+            allowed_repos: vec!["org/*".to_string()],
+            branch_prefix: None,
+            protected_paths: vec![],
+        };
+        // "org/*" is a literal string, not a glob — should not match "org/repo"
+        assert!(!policy.is_repo_allowed("org", "repo"));
     }
 
     #[test]
@@ -2556,8 +2582,11 @@ token = "your-forgejo-api-token"
 # their bearer token; the control plane never exposes forge credentials.
 #
 # allowed_repos: list of "owner/repo" the agent may access.
-#   - ["*"] allows all repositories on the configured forge.
-#   - [] (empty) denies all access (deny-by-default).
+#   Deny-by-default: omitting the field or setting [] denies all access.
+#   - ["*"]                    → allows all repositories (only wildcard form)
+#   - ["org/repo", "org/lib"]  → exact owner/repo match, case-sensitive
+#   - []                       → denies all access
+#   Partial globs like "org/*" are NOT supported and treated as literals.
 
 [[agents]]
 token = "bearer-token-for-codex"

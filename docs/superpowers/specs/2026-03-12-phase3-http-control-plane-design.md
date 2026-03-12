@@ -97,7 +97,7 @@ Token resolution flow:
 2. Look up token in the agent registry
 3. If not found → 401
 4. Inject the resolved `AgentIdentity` and `PolicyConfig` into the request context
-5. Verify `{owner}/{repo}` from the URL is in the agent's `allowed_repos` list → 403 if not. Use `["*"]` to allow all repositories; an empty list denies all access.
+5. Verify `{owner}/{repo}` from the URL is in the agent's `allowed_repos` list → 403 if not. Deny-by-default: omitted or empty `allowed_repos` denies all access. Use `["*"]` as the only wildcard form to allow all repositories. Entries are exact `owner/repo` matches (case-sensitive, no glob patterns beyond `*`).
 6. Pass to orchestrator with the agent's policy config
 
 ## Configuration
