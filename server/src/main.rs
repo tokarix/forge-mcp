@@ -47,7 +47,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         adapter,
         audit_sink,
         forge_config.token.clone(),
-        domain::policy::PolicyConfig::default(),
     ));
 
     let agent_registry = AgentRegistry::from_configs(&config.agents);

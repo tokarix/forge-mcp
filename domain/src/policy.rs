@@ -57,6 +57,14 @@ pub enum PolicyError {
     Configuration(String),
 }
 
+/// Proof that the handler layer evaluated policy for this write operation.
+/// The orchestrator uses the contained policy config for write-side invariant
+/// checks (diff validation, branch prefix, protected paths).
+#[derive(Clone, Debug)]
+pub struct AuthorizedWrite {
+    pub policy: PolicyConfig,
+}
+
 /// Policy rule configuration.
 #[derive(Clone, Debug)]
 pub struct PolicyConfig {

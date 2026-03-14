@@ -117,7 +117,6 @@ where
     adapter: Arc<A>,
     audit_sink: Arc<S>,
     forge_token: Option<String>,
-    policy_config: domain::policy::PolicyConfig,
 }
 
 impl<A, S> WriteOrchestrator<A, S>
@@ -126,17 +125,11 @@ where
     S: AuditSink + 'static,
 {
     #[must_use]
-    pub fn new(
-        adapter: Arc<A>,
-        audit_sink: Arc<S>,
-        forge_token: Option<String>,
-        policy_config: domain::policy::PolicyConfig,
-    ) -> Self {
+    pub fn new(adapter: Arc<A>, audit_sink: Arc<S>, forge_token: Option<String>) -> Self {
         Self {
             adapter,
             audit_sink,
             forge_token,
-            policy_config,
         }
     }
 }
@@ -150,6 +143,7 @@ where
     async fn commit_patch(
         &self,
         request: domain::CommitPatchRequest,
+        authorized: domain::policy::AuthorizedWrite,
     ) -> Result<domain::CommitPatchResponse, ServiceError> {
         // 1. Validate the diff
         let diff_result = domain::diff::validate_diff(&request.patch)
@@ -175,7 +169,7 @@ where
             target_branch: request.new_branch.clone(),
             touched_paths,
         };
-        let decision = domain::policy::evaluate(&self.policy_config, &policy_context)
+        let decision = domain::policy::evaluate(&authorized.policy, &policy_context)
             .map_err(|e| ServiceError::Validation(e.to_string()))?;
 
         if !decision.is_allowed() {
@@ -233,6 +227,7 @@ where
     async fn open_change_request(
         &self,
         request: domain::OpenChangeRequestRequest,
+        authorized: domain::policy::AuthorizedWrite,
     ) -> Result<domain::OpenChangeRequestResponse, ServiceError> {
         // 1. Evaluate policy — enforce branch constraints
         let policy_context = domain::policy::PolicyContext {
@@ -242,7 +237,7 @@ where
             target_branch: request.head_branch.clone(),
             touched_paths: Vec::new(),
         };
-        let decision = domain::policy::evaluate(&self.policy_config, &policy_context)
+        let decision = domain::policy::evaluate(&authorized.policy, &policy_context)
             .map_err(|e| ServiceError::Validation(e.to_string()))?;
 
         if !decision.is_allowed() {
@@ -567,16 +562,17 @@ diff --git a/README.md b/README.md
         }
     }
 
-    fn default_policy() -> domain::policy::PolicyConfig {
-        domain::policy::PolicyConfig::default()
+    fn default_authorized() -> domain::policy::AuthorizedWrite {
+        domain::policy::AuthorizedWrite {
+            policy: domain::policy::PolicyConfig::default(),
+        }
     }
 
     #[tokio::test]
     async fn commit_patch_rejects_invalid_diff() {
         let adapter = Arc::new(WriteTestForgeAdapter);
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator =
-            WriteOrchestrator::new(adapter, Arc::clone(&audit), None, default_policy());
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit), None);
 
         let mut request = write_test_request();
         request.patch = "\
@@ -586,7 +582,7 @@ Binary files /dev/null and b/image.png differ
         .to_string();
 
         let err = orchestrator
-            .commit_patch(request)
+            .commit_patch(request, default_authorized())
             .await
             .expect_err("binary diff should be rejected");
 
@@ -598,14 +594,13 @@ Binary files /dev/null and b/image.png differ
     async fn commit_patch_rejects_wrong_branch_prefix() {
         let adapter = Arc::new(WriteTestForgeAdapter);
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator =
-            WriteOrchestrator::new(adapter, Arc::clone(&audit), None, default_policy());
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit), None);
 
         let mut request = write_test_request();
         request.new_branch = "main".to_string();
 
         let err = orchestrator
-            .commit_patch(request)
+            .commit_patch(request, default_authorized())
             .await
             .expect_err("wrong branch prefix should be rejected");
 
@@ -617,8 +612,7 @@ Binary files /dev/null and b/image.png differ
     async fn commit_patch_rejects_protected_paths() {
         let adapter = Arc::new(WriteTestForgeAdapter);
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator =
-            WriteOrchestrator::new(adapter, Arc::clone(&audit), None, default_policy());
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit), None);
 
         let mut request = write_test_request();
         request.patch = "\
@@ -632,7 +626,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
         .to_string();
 
         let err = orchestrator
-            .commit_patch(request)
+            .commit_patch(request, default_authorized())
             .await
             .expect_err("protected path should be rejected");
 
@@ -644,8 +638,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
     async fn open_change_request_rejects_wrong_branch_prefix() {
         let adapter = Arc::new(WriteTestForgeAdapter);
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator =
-            WriteOrchestrator::new(adapter, Arc::clone(&audit), None, default_policy());
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit), None);
 
         let request = OpenChangeRequestRequest {
             agent: AgentIdentity {
@@ -666,7 +659,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
         };
 
         let err = orchestrator
-            .open_change_request(request)
+            .open_change_request(request, default_authorized())
             .await
             .expect_err("wrong branch prefix should be rejected");
 
@@ -678,8 +671,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
     async fn open_change_request_records_audit_and_creates() {
         let adapter = Arc::new(WriteTestForgeAdapter);
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator =
-            WriteOrchestrator::new(adapter, Arc::clone(&audit), None, default_policy());
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit), None);
 
         let request = OpenChangeRequestRequest {
             agent: AgentIdentity {
@@ -700,7 +692,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
         };
 
         let response = orchestrator
-            .open_change_request(request)
+            .open_change_request(request, default_authorized())
             .await
             .expect("should succeed");
 

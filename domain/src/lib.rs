@@ -202,6 +202,7 @@ pub trait RepositoryWriteService: Send + Sync {
     async fn commit_patch(
         &self,
         request: CommitPatchRequest,
+        authorized: policy::AuthorizedWrite,
     ) -> Result<CommitPatchResponse, ServiceError>;
 
     /// Opens a change request (pull request) on the forge.
@@ -212,6 +213,7 @@ pub trait RepositoryWriteService: Send + Sync {
     async fn open_change_request(
         &self,
         request: OpenChangeRequestRequest,
+        authorized: policy::AuthorizedWrite,
     ) -> Result<OpenChangeRequestResponse, ServiceError>;
 }
 

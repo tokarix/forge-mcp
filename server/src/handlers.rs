@@ -289,16 +289,21 @@ pub async fn post_patches(
         }));
     }
 
+    let authorized = domain::policy::AuthorizedWrite { policy };
+
     let result = state
         .write_service
-        .commit_patch(CommitPatchRequest {
-            agent: identity,
-            base_branch: body.base_branch,
-            commit_message: body.commit_message,
-            new_branch: body.new_branch,
-            patch: body.patch,
-            repository: repo_ref(&path.owner, &path.repo, &state.forgejo_base_url),
-        })
+        .commit_patch(
+            CommitPatchRequest {
+                agent: identity,
+                base_branch: body.base_branch,
+                commit_message: body.commit_message,
+                new_branch: body.new_branch,
+                patch: body.patch,
+                repository: repo_ref(&path.owner, &path.repo, &state.forgejo_base_url),
+            },
+            authorized,
+        )
         .await
         .map_err(map_service_error)?;
 
@@ -351,16 +356,21 @@ pub async fn post_pulls(
         }));
     }
 
+    let authorized = domain::policy::AuthorizedWrite { policy };
+
     let result = state
         .write_service
-        .open_change_request(OpenChangeRequestRequest {
-            agent: identity,
-            base_branch: body.base_branch,
-            body: body.body,
-            head_branch: body.head_branch,
-            repository: repo_ref(&path.owner, &path.repo, &state.forgejo_base_url),
-            title: body.title,
-        })
+        .open_change_request(
+            OpenChangeRequestRequest {
+                agent: identity,
+                base_branch: body.base_branch,
+                body: body.body,
+                head_branch: body.head_branch,
+                repository: repo_ref(&path.owner, &path.repo, &state.forgejo_base_url),
+                title: body.title,
+            },
+            authorized,
+        )
         .await
         .map_err(map_service_error)?;
 
@@ -436,6 +446,7 @@ mod tests {
         async fn commit_patch(
             &self,
             request: CommitPatchRequest,
+            _authorized: domain::policy::AuthorizedWrite,
         ) -> Result<CommitPatchResponse, ServiceError> {
             Ok(CommitPatchResponse {
                 branch: request.new_branch.clone(),
@@ -447,6 +458,7 @@ mod tests {
         async fn open_change_request(
             &self,
             request: OpenChangeRequestRequest,
+            _authorized: domain::policy::AuthorizedWrite,
         ) -> Result<OpenChangeRequestResponse, ServiceError> {
             Ok(OpenChangeRequestResponse {
                 change_request: ChangeRequest {
