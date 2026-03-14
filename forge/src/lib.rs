@@ -13,8 +13,6 @@ static INSTALL_RING_PROVIDER: Once = Once::new();
 
 #[derive(Debug, Error)]
 pub enum ForgeError {
-    #[error("unsupported forge for this adapter: {0:?}")]
-    UnsupportedForge(domain::ForgeKind),
     #[error("upstream request failed: {0}")]
     Http(#[from] reqwest::Error),
     #[error("unexpected upstream status {status}: {body}")]
@@ -151,18 +149,14 @@ impl ForgeAdapter for ForgejoAdapter {
     ///
     /// # Errors
     ///
-    /// Returns an error if the forge kind is not Forgejo, the HTTP request
-    /// fails, or the response body cannot be decoded as base64 UTF-8 content.
+    /// Returns an error if the HTTP request fails, or the response body cannot
+    /// be decoded as base64 UTF-8 content.
     async fn read_repository_file(
         &self,
         repository: &RepositoryRef,
         path: &str,
         git_ref: Option<&str>,
     ) -> Result<ReadRepositoryFileResponse, ForgeError> {
-        if repository.forge != domain::ForgeKind::Forgejo {
-            return Err(ForgeError::UnsupportedForge(repository.forge.clone()));
-        }
-
         let encoded_path = path.trim_start_matches('/').replace('/', "%2F");
         let url = format!(
             "{}/api/v1/repos/{}/{}/contents/{}",
@@ -224,10 +218,6 @@ impl ForgeAdapter for ForgejoAdapter {
         head_branch: &str,
         base_branch: &str,
     ) -> Result<ChangeRequest, ForgeError> {
-        if repository.forge != domain::ForgeKind::Forgejo {
-            return Err(ForgeError::UnsupportedForge(repository.forge.clone()));
-        }
-
         let url = format!(
             "{}/api/v1/repos/{}/{}/pulls",
             self.config.base_url.trim_end_matches('/'),
@@ -261,10 +251,6 @@ impl ForgeAdapter for ForgejoAdapter {
         repository: &RepositoryRef,
         state: Option<&ChangeRequestState>,
     ) -> Result<Vec<ChangeRequest>, ForgeError> {
-        if repository.forge != domain::ForgeKind::Forgejo {
-            return Err(ForgeError::UnsupportedForge(repository.forge.clone()));
-        }
-
         let url = format!(
             "{}/api/v1/repos/{}/{}/pulls",
             self.config.base_url.trim_end_matches('/'),
@@ -304,10 +290,6 @@ impl ForgeAdapter for ForgejoAdapter {
         repository: &RepositoryRef,
         index: u64,
     ) -> Result<ChangeRequest, ForgeError> {
-        if repository.forge != domain::ForgeKind::Forgejo {
-            return Err(ForgeError::UnsupportedForge(repository.forge.clone()));
-        }
-
         let url = format!(
             "{}/api/v1/repos/{}/{}/pulls/{index}",
             self.config.base_url.trim_end_matches('/'),
