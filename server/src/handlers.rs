@@ -96,6 +96,7 @@ fn resolve_agent(
 
 fn repo_ref(owner: &str, repo: &str, base_url: &str) -> RepositoryRef {
     RepositoryRef {
+        alias: String::new(),
         forge: ForgeKind::Forgejo,
         host: base_url.to_string(),
         name: repo.to_string(),

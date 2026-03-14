@@ -134,6 +134,7 @@ mod tests {
                 session_id: "test-session".to_string(),
             },
             repository: RepositoryRef {
+                alias: "test".to_string(),
                 forge: ForgeKind::Forgejo,
                 host: "https://forge.example".to_string(),
                 name: "repo".to_string(),

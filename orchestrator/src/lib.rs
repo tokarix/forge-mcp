@@ -303,10 +303,11 @@ mod tests {
                 session_id: "test".to_string(),
             },
             repository: RepositoryRef {
+                alias: "test".to_string(),
                 forge: ForgeKind::Forgejo,
                 host: "https://forge.example".to_string(),
-                owner: "org".to_string(),
                 name: "repo".to_string(),
+                owner: "org".to_string(),
             },
             path: path.to_string(),
             git_ref: Some("main".to_string()),
@@ -557,6 +558,7 @@ diff --git a/README.md b/README.md
 "
             .to_string(),
             repository: RepositoryRef {
+                alias: "test".to_string(),
                 forge: ForgeKind::Forgejo,
                 host: "https://forge.example".to_string(),
                 name: "repo".to_string(),
@@ -654,6 +656,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             body: "Fix things".to_string(),
             head_branch: "unauthorized-branch".to_string(),
             repository: RepositoryRef {
+                alias: "test".to_string(),
                 forge: ForgeKind::Forgejo,
                 host: "https://forge.example".to_string(),
                 name: "repo".to_string(),
@@ -687,6 +690,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             body: "Fix things".to_string(),
             head_branch: "agent/fix".to_string(),
             repository: RepositoryRef {
+                alias: "test".to_string(),
                 forge: ForgeKind::Forgejo,
                 host: "https://forge.example".to_string(),
                 name: "repo".to_string(),

@@ -16,10 +16,11 @@ pub enum ForgeKind {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct RepositoryRef {
+    pub alias: String,
     pub forge: ForgeKind,
     pub host: String,
-    pub owner: String,
     pub name: String,
+    pub owner: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
