@@ -30,9 +30,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.server.listen
     );
 
+    let forge_config = config.forges.first().expect("at least one forge required");
+
     let adapter = Arc::new(ForgejoAdapter::new(ForgejoConfig {
-        base_url: config.forge.forgejo.base_url.clone(),
-        token: Some(config.forge.forgejo.token.clone()),
+        base_url: forge_config.base_url.clone(),
+        token: forge_config.token.clone(),
     }));
     let audit_sink = Arc::new(InMemoryAuditSink::new());
 
@@ -44,14 +46,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let write_service = Arc::new(WriteOrchestrator::new(
         adapter,
         audit_sink,
-        Some(config.forge.forgejo.token.clone()),
+        forge_config.token.clone(),
         domain::policy::PolicyConfig::default(),
     ));
 
     let agent_registry = AgentRegistry::from_configs(&config.agents);
     let state = AppState {
         agent_registry,
-        forgejo_base_url: config.forge.forgejo.base_url,
+        forgejo_base_url: forge_config.base_url.clone(),
         read_service,
         write_service,
     };

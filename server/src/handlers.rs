@@ -58,6 +58,7 @@ fn map_service_error(err: ServiceError) -> (StatusCode, Json<ErrorBody>) {
 fn resolve_agent(
     headers: &HeaderMap,
     registry: &AgentRegistry,
+    forge_alias: &str,
     owner: &str,
     repo: &str,
 ) -> Result<(AgentIdentity, domain::policy::PolicyConfig), (StatusCode, Json<ErrorBody>)> {
@@ -79,7 +80,10 @@ fn resolve_agent(
     })?;
 
     // Check repository authorization
-    if !agent.policy_config.is_repo_allowed(owner, repo) {
+    if !agent
+        .policy_config
+        .is_repo_allowed(forge_alias, owner, repo)
+    {
         return Err((
             StatusCode::FORBIDDEN,
             Json(ErrorBody {
@@ -127,7 +131,7 @@ pub async fn get_contents(
     headers: HeaderMap,
 ) -> impl IntoResponse {
     let (identity, _policy) =
-        resolve_agent(&headers, &state.agent_registry, &path.owner, &path.repo)?;
+        resolve_agent(&headers, &state.agent_registry, "", &path.owner, &path.repo)?;
 
     let result = state
         .read_service
@@ -168,7 +172,7 @@ pub async fn get_pull(
     headers: HeaderMap,
 ) -> impl IntoResponse {
     let (identity, _policy) =
-        resolve_agent(&headers, &state.agent_registry, &path.owner, &path.repo)?;
+        resolve_agent(&headers, &state.agent_registry, "", &path.owner, &path.repo)?;
 
     let result = state
         .read_service
@@ -207,7 +211,7 @@ pub async fn list_pulls(
     headers: HeaderMap,
 ) -> impl IntoResponse {
     let (identity, _policy) =
-        resolve_agent(&headers, &state.agent_registry, &path.owner, &path.repo)?;
+        resolve_agent(&headers, &state.agent_registry, "", &path.owner, &path.repo)?;
 
     let state_filter = query.state.as_deref().map(|s| match s {
         "closed" => domain::ChangeRequestState::Closed,
@@ -252,7 +256,7 @@ pub async fn post_patches(
     Json(body): Json<CommitPatchBody>,
 ) -> impl IntoResponse {
     let (identity, policy) =
-        resolve_agent(&headers, &state.agent_registry, &path.owner, &path.repo)?;
+        resolve_agent(&headers, &state.agent_registry, "", &path.owner, &path.repo)?;
 
     // Per-agent policy check
     let diff_result = domain::diff::validate_diff(&body.patch)
@@ -329,7 +333,7 @@ pub async fn post_pulls(
     Json(body): Json<OpenPullBody>,
 ) -> impl IntoResponse {
     let (identity, policy) =
-        resolve_agent(&headers, &state.agent_registry, &path.owner, &path.repo)?;
+        resolve_agent(&headers, &state.agent_registry, "", &path.owner, &path.repo)?;
 
     // Per-agent branch prefix check for the head branch
     let policy_context = domain::policy::PolicyContext {
@@ -463,7 +467,7 @@ mod tests {
         let configs = vec![crate::config::AgentConfig {
             agent_id: "codex".to_string(),
             policy: AgentPolicyConfig {
-                allowed_repos: vec!["org/repo".to_string()],
+                allowed_repos: vec!["*".to_string()],
                 branch_prefix: Some("agent/".to_string()),
                 protected_paths: vec![],
             },
@@ -537,7 +541,7 @@ mod tests {
         let configs = vec![crate::config::AgentConfig {
             agent_id: "codex".to_string(),
             policy: AgentPolicyConfig {
-                allowed_repos: vec!["org/allowed-repo".to_string()],
+                allowed_repos: vec!["/org/allowed-repo".to_string()],
                 branch_prefix: Some("agent/".to_string()),
                 protected_paths: vec![],
             },
@@ -693,7 +697,7 @@ mod tests {
         let configs = vec![crate::config::AgentConfig {
             agent_id: "codex".to_string(),
             policy: AgentPolicyConfig {
-                allowed_repos: vec!["org/repo".to_string()],
+                allowed_repos: vec!["*".to_string()],
                 branch_prefix: Some("agent/codex/".to_string()),
                 protected_paths: vec![],
             },

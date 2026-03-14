@@ -63,7 +63,7 @@ mod tests {
         vec![AgentConfig {
             agent_id: "codex".to_string(),
             policy: AgentPolicyConfig {
-                allowed_repos: vec!["org/repo".to_string()],
+                allowed_repos: vec!["test/org/repo".to_string()],
                 branch_prefix: Some("agent/codex/".to_string()),
                 protected_paths: vec![".github/".to_string()],
             },
