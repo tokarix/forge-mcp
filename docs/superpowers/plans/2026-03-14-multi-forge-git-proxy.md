@@ -29,7 +29,7 @@ cargo fmt --check && cargo clippy --all-features --all-targets --no-deps -- -D c
 - **`orchestrator/src/lib.rs`** — replace constructor-held policy with per-request `AuthorizedWrite`; update test helpers
 - **`server/src/auth.rs`** — move `extract_bearer_token` here; update test `allowed_repos` patterns
 - **`server/src/config.rs`** — rewrite: `[[forges]]` array, glob `allowed_repos`, alias validation
-- **`server/src/handlers.rs`** — add `{forge}` to routes, `ForgeRegistry` lookup, new `AppState`
+- **`server/src/handlers.rs`** — add `{forge}` to routes, `ForgeRegistry` lookup, new `AppState` with `audit_sink`
 - **`server/src/lib.rs`** — update route paths, add new modules
 - **`server/src/main.rs`** — build `ForgeRegistry` from config, new startup wiring
 - **`server/src/api.rs`** — add `forge` to path parameter structs
@@ -1132,6 +1132,7 @@ In `server/src/handlers.rs`:
 #[derive(Clone)]
 pub struct AppState {
     pub agent_registry: AgentRegistry,
+    pub audit_sink: Arc<dyn audit::AuditSink>,
     pub forge_registry: Arc<crate::registry::ForgeRegistry>,
 }
 ```
@@ -1319,6 +1320,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let agent_registry = AgentRegistry::from_configs(&config.agents);
     let state = AppState {
         agent_registry,
+        audit_sink,
         forge_registry: Arc::new(ForgeRegistry::new(forges)),
     };
 
@@ -1408,6 +1410,7 @@ fn test_state() -> AppState {
 
     AppState {
         agent_registry: AgentRegistry::from_configs(&configs),
+        audit_sink: Arc::new(audit::InMemoryAuditSink::new()),
         forge_registry: Arc::new(crate::registry::ForgeRegistry::new(forges)),
     }
 }
@@ -1683,6 +1686,29 @@ pub async fn info_refs(
         }
     };
 
+    // Audit
+    if let Err(e) = state
+        .audit_sink
+        .record(audit::AuditRecord {
+            agent: agent.identity.clone(),
+            action: "git_read".to_string(),
+            repository: domain::RepositoryRef {
+                alias: path.forge.clone(),
+                forge: domain::ForgeKind::Forgejo,
+                host: forge.base_url.clone(),
+                name: repo_name.to_string(),
+                owner: path.owner.clone(),
+            },
+            target: "info/refs".to_string(),
+        })
+        .await
+    {
+        return error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("audit failure: {e}"),
+        );
+    }
+
     // Build upstream URL
     let upstream_url = format!(
         "{}/{}/{}.git/info/refs?service={service}",
@@ -1766,6 +1792,29 @@ pub async fn upload_pack(
             )
         }
     };
+
+    // Audit
+    if let Err(e) = state
+        .audit_sink
+        .record(audit::AuditRecord {
+            agent: agent.identity.clone(),
+            action: "git_read".to_string(),
+            repository: domain::RepositoryRef {
+                alias: path.forge.clone(),
+                forge: domain::ForgeKind::Forgejo,
+                host: forge.base_url.clone(),
+                name: repo_name.to_string(),
+                owner: path.owner.clone(),
+            },
+            target: "git-upload-pack".to_string(),
+        })
+        .await
+    {
+        return error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("audit failure: {e}"),
+        );
+    }
 
     // Build upstream URL
     let upstream_url = format!(
@@ -1962,7 +2011,9 @@ impl domain::RepositoryWriteService for FakeWriteService {
     async fn open_change_request(&self, _: domain::OpenChangeRequestRequest) -> Result<domain::OpenChangeRequestResponse, domain::ServiceError> { unimplemented!() }
 }
 
-fn test_state_with_forge(base_url: &str) -> AppState {
+fn test_state_with_forge(
+    base_url: &str,
+) -> (AppState, Arc<audit::InMemoryAuditSink>) {
     use crate::auth::AgentRegistry;
     use crate::config::AgentPolicyConfig;
     use std::collections::HashMap;
@@ -1977,6 +2028,8 @@ fn test_state_with_forge(base_url: &str) -> AppState {
         session_id: "default".to_string(),
         token: "test-token".to_string(),
     }];
+
+    let audit_sink = Arc::new(audit::InMemoryAuditSink::new());
 
     let mut forges = HashMap::new();
     forges.insert(
@@ -1993,10 +2046,12 @@ fn test_state_with_forge(base_url: &str) -> AppState {
         },
     );
 
-    AppState {
+    let state = AppState {
         agent_registry: AgentRegistry::from_configs(&configs),
+        audit_sink: Arc::clone(&audit_sink) as Arc<dyn audit::AuditSink>,
         forge_registry: Arc::new(crate::registry::ForgeRegistry::new(forges)),
-    }
+    };
+    (state, audit_sink)
 }
 
 fn git_proxy_router(state: AppState) -> Router {
@@ -2034,7 +2089,7 @@ async fn info_refs_proxies_to_upstream() {
         .mount(&mock)
         .await;
 
-    let state = test_state_with_forge(&mock.uri());
+    let (state, audit_sink) = test_state_with_forge(&mock.uri());
     let app = git_proxy_router(state);
 
     let response = app
@@ -2056,11 +2111,16 @@ async fn info_refs_proxies_to_upstream() {
         .to_str()
         .unwrap();
     assert!(ct.contains("git-upload-pack"));
+
+    // Verify audit record was emitted
+    let records = audit_sink.records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].action, "git_read");
 }
 
 #[tokio::test]
 async fn receive_pack_rejected_returns_403() {
-    let state = test_state_with_forge("http://unused");
+    let (state, _audit) = test_state_with_forge("http://unused");
     let app = git_proxy_router(state);
 
     let response = app
@@ -2080,7 +2140,7 @@ async fn receive_pack_rejected_returns_403() {
 
 #[tokio::test]
 async fn info_refs_rejects_receive_pack_service() {
-    let state = test_state_with_forge("http://unused");
+    let (state, _audit) = test_state_with_forge("http://unused");
     let app = git_proxy_router(state);
 
     let response = app
@@ -2099,7 +2159,7 @@ async fn info_refs_rejects_receive_pack_service() {
 
 #[tokio::test]
 async fn info_refs_rejects_unauthorized() {
-    let state = test_state_with_forge("http://unused");
+    let (state, _audit) = test_state_with_forge("http://unused");
     let app = git_proxy_router(state);
 
     let response = app
