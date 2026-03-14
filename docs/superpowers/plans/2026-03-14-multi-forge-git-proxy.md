@@ -2,9 +2,11 @@
 
 > **For agentic workers:** REQUIRED: Use superpowers:subagent-driven-development (if subagents available) or superpowers:executing-plans to implement this plan. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Evolve the gateway from single-Forgejo to multi-forge with glob-style repo authorization and a read-only git smart HTTP proxy for transparent `git clone`/`fetch`.
+**Goal:** Evolve the gateway from single-Forgejo to multi-instance support for Forgejo/GitHub-shaped forges (owner/repo path model) with glob-style repo authorization and a read-only git smart HTTP proxy for transparent `git clone`/`fetch`.
 
-**Architecture:** A `ForgeRegistry` maps short aliases to per-forge instances (adapter + orchestrators). All REST and git proxy routes include a `{forge}` path segment. `allowed_repos` patterns use `forge/owner/repo` triplets with wildcard support. The git proxy streams `git-upload-pack` requests to upstream forges without buffering.
+**Scope:** This phase targets forges using the two-segment `owner/repo` path model (Forgejo, GitHub). GitLab subgroup namespaces are not supported and will require route/config changes in a future phase.
+
+**Architecture:** A `ForgeRegistry` maps short aliases to per-forge instances (adapter + orchestrators). All REST and git proxy routes include a `{forge}` path segment. `allowed_repos` patterns use `forge/owner/repo` triplets with wildcard support. The git proxy streams `git-upload-pack` requests to upstream forges without buffering, using HTTP Basic auth (not Bearer) for upstream git transport.
 
 **Tech Stack:** Rust, axum 0.8, reqwest (streaming), tokio, serde, toml, utoipa
 
@@ -21,10 +23,10 @@ cargo fmt --check && cargo clippy --all-features --all-targets --no-deps -- -D c
 
 ### Modified
 
-- **`domain/src/lib.rs`** — add `alias` field to `RepositoryRef`
-- **`domain/src/policy.rs`** — update test helpers for new `RepositoryRef` field
+- **`domain/src/lib.rs`** — add `alias` field to `RepositoryRef`; update `RepositoryWriteService` trait for `AuthorizedWrite`
+- **`domain/src/policy.rs`** — add `AuthorizedWrite` type; update test helpers for new `RepositoryRef` field
 - **`forge/src/lib.rs`** — remove `ForgeKind` checks and `UnsupportedForge` variant
-- **`orchestrator/src/lib.rs`** — remove `policy_config` from `WriteOrchestrator`; update test helpers
+- **`orchestrator/src/lib.rs`** — replace constructor-held policy with per-request `AuthorizedWrite`; update test helpers
 - **`server/src/auth.rs`** — move `extract_bearer_token` here; update test `allowed_repos` patterns
 - **`server/src/config.rs`** — rewrite: `[[forges]]` array, glob `allowed_repos`, alias validation
 - **`server/src/handlers.rs`** — add `{forge}` to routes, `ForgeRegistry` lookup, new `AppState`
@@ -129,6 +131,11 @@ pub struct ForgeConfig {
     pub base_url: String,
     #[serde(rename = "type")]
     pub forge_type: String,
+    /// Username for git smart HTTP Basic auth (default: empty string).
+    /// Forgejo uses empty username with token as password.
+    /// GitHub uses "x-access-token" as username.
+    #[serde(default)]
+    pub git_auth_user: String,
     pub token: Option<String>,
 }
 
@@ -138,6 +145,7 @@ impl std::fmt::Debug for ForgeConfig {
             .field("alias", &self.alias)
             .field("base_url", &self.base_url)
             .field("forge_type", &self.forge_type)
+            .field("git_auth_user", &self.git_auth_user)
             .field("token", &self.token.as_ref().map(|_| "[REDACTED]"))
             .finish()
     }
@@ -611,15 +619,53 @@ and config validation. Update all is_repo_allowed call sites."
 
 ---
 
-### Task 3: Remove policy from `WriteOrchestrator`
+### Task 3: Refactor `WriteOrchestrator` — `AuthorizedWrite` pattern
 
 **Files:**
-- Modify: `orchestrator/src/lib.rs`
+- Modify: `domain/src/policy.rs` (add `AuthorizedWrite` type)
+- Modify: `domain/src/lib.rs` (update `RepositoryWriteService` trait)
+- Modify: `orchestrator/src/lib.rs` (consume `AuthorizedWrite`, remove constructor-held policy)
+- Modify: `server/src/handlers.rs` (construct `AuthorizedWrite` after policy check)
 - Modify: `server/src/main.rs` (update constructor call)
 
-- [ ] **Step 1: Update `WriteOrchestrator` struct and constructor**
+The orchestrator keeps write-side invariant checks (diff validation, branch prefix, protected paths) but no longer stores a per-agent policy. Instead, handlers pass an `AuthorizedWrite` proof carrying the evaluated `PolicyConfig` into each write method.
 
-In `orchestrator/src/lib.rs`, remove `policy_config` from the struct and constructor:
+- [ ] **Step 1: Add `AuthorizedWrite` to `domain/src/policy.rs`**
+
+```rust
+/// Proof that the handler layer evaluated policy for this write operation.
+/// The orchestrator uses the contained policy config for write-side invariant
+/// checks (diff validation, branch prefix, protected paths).
+#[derive(Clone, Debug)]
+pub struct AuthorizedWrite {
+    pub policy: PolicyConfig,
+}
+```
+
+- [ ] **Step 2: Update `RepositoryWriteService` trait in `domain/src/lib.rs`**
+
+Add `authorized: domain::policy::AuthorizedWrite` parameter to both trait methods:
+
+```rust
+#[async_trait]
+pub trait RepositoryWriteService: Send + Sync {
+    async fn commit_patch(
+        &self,
+        request: CommitPatchRequest,
+        authorized: policy::AuthorizedWrite,
+    ) -> Result<CommitPatchResponse, ServiceError>;
+
+    async fn open_change_request(
+        &self,
+        request: OpenChangeRequestRequest,
+        authorized: policy::AuthorizedWrite,
+    ) -> Result<OpenChangeRequestResponse, ServiceError>;
+}
+```
+
+- [ ] **Step 3: Update `WriteOrchestrator` — remove constructor-held policy, consume `AuthorizedWrite`**
+
+In `orchestrator/src/lib.rs`:
 
 ```rust
 pub struct WriteOrchestrator<A, S>
@@ -648,16 +694,48 @@ where
 }
 ```
 
-- [ ] **Step 2: Simplify `commit_patch` — remove diff validation and policy checks**
-
-The handler already validates diff and checks policy. The orchestrator only needs audit + git:
+Update `commit_patch` to accept and use `AuthorizedWrite`:
 
 ```rust
 async fn commit_patch(
     &self,
     request: domain::CommitPatchRequest,
+    authorized: domain::policy::AuthorizedWrite,
 ) -> Result<domain::CommitPatchResponse, ServiceError> {
-    // 1. Audit intent
+    // 1. Validate the diff (data integrity invariant)
+    let diff_result = domain::diff::validate_diff(&request.patch)
+        .map_err(|e| ServiceError::Validation(e.to_string()))?;
+
+    let touched_paths: Vec<String> = diff_result
+        .files
+        .iter()
+        .flat_map(|f| {
+            let mut paths = vec![f.path.clone()];
+            if let Some(ref source) = f.source_path {
+                paths.push(source.clone());
+            }
+            paths
+        })
+        .collect();
+
+    // 2. Enforce policy using the AuthorizedWrite proof
+    let policy_context = domain::policy::PolicyContext {
+        action: "commit_patch".to_string(),
+        agent: request.agent.clone(),
+        repository: request.repository.clone(),
+        target_branch: request.new_branch.clone(),
+        touched_paths,
+    };
+    let decision = domain::policy::evaluate(&authorized.policy, &policy_context)
+        .map_err(|e| ServiceError::Validation(e.to_string()))?;
+
+    if !decision.is_allowed() {
+        return Err(ServiceError::PolicyDenied {
+            reasons: decision.reasons.join("; "),
+        });
+    }
+
+    // 3. Audit intent
     self.audit_sink
         .record(AuditRecord {
             agent: request.agent.clone(),
@@ -668,7 +746,7 @@ async fn commit_patch(
         .await
         .map_err(|e| ServiceError::Audit(e.to_string()))?;
 
-    // 2. Execute git operations
+    // 4. Execute git operations
     let clone_url = format!(
         "{}/{}/{}.git",
         request.repository.host.trim_end_matches('/'),
@@ -704,14 +782,32 @@ async fn commit_patch(
 }
 ```
 
-- [ ] **Step 3: Simplify `open_change_request` — remove policy check**
+Update `open_change_request` similarly:
 
 ```rust
 async fn open_change_request(
     &self,
     request: domain::OpenChangeRequestRequest,
+    authorized: domain::policy::AuthorizedWrite,
 ) -> Result<domain::OpenChangeRequestResponse, ServiceError> {
-    // 1. Audit intent
+    // 1. Enforce branch policy using AuthorizedWrite proof
+    let policy_context = domain::policy::PolicyContext {
+        action: "open_change_request".to_string(),
+        agent: request.agent.clone(),
+        repository: request.repository.clone(),
+        target_branch: request.head_branch.clone(),
+        touched_paths: Vec::new(),
+    };
+    let decision = domain::policy::evaluate(&authorized.policy, &policy_context)
+        .map_err(|e| ServiceError::Validation(e.to_string()))?;
+
+    if !decision.is_allowed() {
+        return Err(ServiceError::PolicyDenied {
+            reasons: decision.reasons.join("; "),
+        });
+    }
+
+    // 2. Audit intent
     self.audit_sink
         .record(AuditRecord {
             agent: request.agent.clone(),
@@ -722,7 +818,7 @@ async fn open_change_request(
         .await
         .map_err(|e| ServiceError::Audit(e.to_string()))?;
 
-    // 2. Create on forge
+    // 3. Create on forge
     let change_request = self
         .adapter
         .create_change_request(
@@ -742,20 +838,47 @@ async fn open_change_request(
 }
 ```
 
-- [ ] **Step 4: Remove policy tests from orchestrator, update constructors**
+- [ ] **Step 4: Update handler call sites to pass `AuthorizedWrite`**
 
-Remove these tests:
-- `commit_patch_rejects_invalid_diff`
-- `commit_patch_rejects_wrong_branch_prefix`
-- `commit_patch_rejects_protected_paths`
-- `open_change_request_rejects_wrong_branch_prefix`
+In `server/src/handlers.rs`, the `resolve_agent` function already returns a `PolicyConfig`. Update write handlers to construct `AuthorizedWrite` and pass it:
 
-Update remaining test constructors to use new 3-arg `new()`:
+```rust
+// In commit_patch handler:
+let (identity, policy) =
+    resolve_agent(&headers, &state.agent_registry, "", &path.owner, &path.repo)?;
+let authorized = domain::policy::AuthorizedWrite { policy };
+
+let result = state
+    .write_service
+    .commit_patch(request, authorized)
+    .await
+    .map_err(map_service_error)?;
+```
+
+Same pattern for `open_pull` handler.
+
+- [ ] **Step 5: Update orchestrator tests**
+
+Update test constructors to use new 3-arg `new()`:
 ```rust
 WriteOrchestrator::new(adapter, Arc::clone(&audit), None)
 ```
 
-- [ ] **Step 5: Update `server/src/main.rs` constructor call**
+Update test calls to pass `AuthorizedWrite`:
+```rust
+let authorized = domain::policy::AuthorizedWrite {
+    policy: default_policy(),
+};
+orchestrator.commit_patch(request, authorized).await
+```
+
+Keep all existing policy tests (they now test the orchestrator's inner boundary via `AuthorizedWrite`):
+- `commit_patch_rejects_invalid_diff` — still valid (diff validation)
+- `commit_patch_rejects_wrong_branch_prefix` — still valid (branch policy via AuthorizedWrite)
+- `commit_patch_rejects_protected_paths` — still valid (path policy via AuthorizedWrite)
+- `open_change_request_rejects_wrong_branch_prefix` — still valid (branch policy via AuthorizedWrite)
+
+- [ ] **Step 6: Update `server/src/main.rs` constructor call**
 
 Change from 4 args to 3 args:
 
@@ -775,20 +898,24 @@ let write_service = Arc::new(WriteOrchestrator::new(
 ));
 ```
 
-- [ ] **Step 6: Run verification**
+- [ ] **Step 7: Run verification**
 
 ```bash
 cargo fmt --check && cargo clippy --all-features --all-targets --no-deps -- -D clippy::pedantic -D warnings && cargo test --all-features --all-targets
 ```
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
-git add orchestrator/src/lib.rs server/src/main.rs
-git commit -m "orchestrator: remove policy evaluation from WriteOrchestrator
+git add domain/src/policy.rs domain/src/lib.rs orchestrator/src/lib.rs server/src/handlers.rs server/src/main.rs
+git commit -m "orchestrator: replace constructor-held policy with AuthorizedWrite
 
-Policy enforcement is done in the handler layer. Removing the duplicate
-simplifies the orchestrator for per-forge instance sharing."
+WriteOrchestrator no longer stores a per-agent PolicyConfig. Instead,
+write methods accept an AuthorizedWrite proof carrying the evaluated
+policy. Handlers construct it after policy checks; the orchestrator
+uses it for write-side invariant enforcement (diff validation, branch
+prefix, protected paths). This maintains defense-in-depth while
+enabling per-forge-instance orchestrator sharing."
 ```
 
 ---
@@ -854,6 +981,8 @@ pub struct ForgeInstance {
     pub alias: String,
     pub base_url: String,
     pub client: reqwest::Client,
+    /// Username for git smart HTTP Basic auth (empty string for Forgejo).
+    pub git_auth_user: String,
     pub read_service: Arc<dyn RepositoryReadService>,
     pub token: Option<String>,
     pub write_service: Arc<dyn RepositoryWriteService>,
@@ -1174,6 +1303,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 alias: forge_config.alias.clone(),
                 base_url: forge_config.base_url.clone(),
                 client: client.clone(),
+                git_auth_user: forge_config.git_auth_user.clone(),
                 read_service,
                 token: forge_config.token.clone(),
                 write_service,
@@ -1269,6 +1399,7 @@ fn test_state() -> AppState {
             alias: "test-forge".to_string(),
             base_url: "https://forge.example".to_string(),
             client: reqwest::Client::new(),
+            git_auth_user: String::new(),
             read_service: Arc::new(FakeReadService),
             token: None,
             write_service: Arc::new(FakeWriteService),
@@ -1319,16 +1450,19 @@ listen = "0.0.0.0:8443"
 # enable_docs = true
 
 # Each [[forges]] entry defines a forge instance the gateway can proxy to.
-# alias:    short name used in URLs and allowed_repos patterns (lowercase, hyphens ok)
-# type:     forge software type ("forgejo" for now; "github", "gitlab" planned)
-# base_url: upstream forge base URL
-# token:    API token for the upstream forge (optional for public instances)
+# alias:         short name used in URLs and allowed_repos patterns (lowercase, hyphens ok)
+# type:          forge software type ("forgejo" for now; "github" planned)
+# base_url:      upstream forge base URL
+# token:         API token for the upstream forge (optional for public instances)
+# git_auth_user: username for git smart HTTP Basic auth (default: "", for Forgejo;
+#                use "x-access-token" for GitHub)
 
 [[forges]]
 alias = "internal"
 type = "forgejo"
 base_url = "https://forge.example"
 token = "your-forgejo-api-token"
+# git_auth_user = ""  # default: empty (Forgejo uses token as password with empty user)
 
 # Each [[agents]] entry defines a bearer token that maps to an agent
 # identity and policy.
@@ -1557,10 +1691,10 @@ pub async fn info_refs(
         repo_name,
     );
 
-    // Proxy request
+    // Proxy request — use HTTP Basic auth for git smart HTTP transport
     let mut upstream_req = forge.client.get(&upstream_url);
     if let Some(ref token) = forge.token {
-        upstream_req = upstream_req.bearer_auth(token);
+        upstream_req = upstream_req.basic_auth(&forge.git_auth_user, Some(token));
     }
 
     let upstream_resp = match upstream_req.send().await {
@@ -1645,13 +1779,14 @@ pub async fn upload_pack(
     let body_stream = body.into_data_stream();
     let reqwest_body = reqwest::Body::wrap_stream(body_stream);
 
+    // Use HTTP Basic auth for git smart HTTP transport
     let mut upstream_req = forge
         .client
         .post(&upstream_url)
         .header("content-type", "application/x-git-upload-pack-request")
         .body(reqwest_body);
     if let Some(ref token) = forge.token {
-        upstream_req = upstream_req.bearer_auth(token);
+        upstream_req = upstream_req.basic_auth(&forge.git_auth_user, Some(token));
     }
 
     let upstream_resp = match upstream_req.send().await {
@@ -1851,6 +1986,7 @@ fn test_state_with_forge(base_url: &str) -> AppState {
             alias: "test-forge".to_string(),
             base_url: base_url.to_string(),
             client: reqwest::Client::new(),
+            git_auth_user: String::new(),
             read_service: Arc::new(FakeReadService),
             token: Some("upstream-token".to_string()),
             write_service: Arc::new(FakeWriteService),
@@ -1885,7 +2021,7 @@ async fn info_refs_proxies_to_upstream() {
         .and(wiremock::matchers::query_param("service", "git-upload-pack"))
         .and(wiremock::matchers::header(
             "authorization",
-            "Bearer upstream-token",
+            "Basic OnVwc3RyZWFtLXRva2Vu", // base64(":upstream-token")
         ))
         .respond_with(
             wiremock::ResponseTemplate::new(200)
@@ -2004,6 +2140,7 @@ async fn info_refs_rejects_disallowed_repo() {
             alias: "test-forge".to_string(),
             base_url: "http://unused".to_string(),
             client: reqwest::Client::new(),
+            git_auth_user: String::new(),
             read_service: Arc::new(FakeReadService),
             token: None,
             write_service: Arc::new(FakeWriteService),

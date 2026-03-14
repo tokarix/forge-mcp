@@ -2,13 +2,17 @@
 
 ## Goal
 
-Evolve the gateway from a single-Forgejo control plane into a multi-forge, policy-enforcing gateway with a read-only git smart HTTP proxy — enabling transparent `git clone`/`fetch` through the gateway so that tools like `cargo` with git dependencies work seamlessly without direct access to upstream forges.
+Evolve the gateway from a single-Forgejo control plane into a multi-instance gateway for Forgejo/GitHub-shaped forges (owner/repo path model) with a read-only git smart HTTP proxy — enabling transparent `git clone`/`fetch` through the gateway so that tools like `cargo` with git dependencies work seamlessly without direct access to upstream forges.
+
+## Scope
+
+This phase targets forges that use the two-segment `owner/repo` repository path model (Forgejo, GitHub). GitLab's nested subgroup namespaces (`group/subgroup/repo`) are not supported — adding GitLab will require route and config changes in a future phase (see Non-Goals).
 
 ## Architecture
 
 The gateway gains three capabilities:
 
-1. **Multi-forge routing** — a `ForgeRegistry` maps short aliases to forge instances, each with its own adapter, credentials, and base URL.
+1. **Multi-instance routing** — a `ForgeRegistry` maps short aliases to forge instances, each with its own adapter, credentials, and base URL. Multiple instances of the same forge type are supported.
 2. **Glob-style repo authorization** — `allowed_repos` patterns use a `forge/owner/repo` triplet with wildcard support at any trailing level.
 3. **Git smart HTTP proxy** — read-only (`git-upload-pack`) proxy endpoints that authenticate agents, enforce policy, and stream git protocol to/from upstream forges.
 
@@ -31,6 +35,7 @@ alias = "client-a"
 type = "forgejo"
 base_url = "https://git.client-a.example"
 token = "client-a-token"
+# git_auth_user = ""  # optional, for git smart HTTP Basic auth username (default: empty)
 
 [[agents]]
 token = "bearer-token-for-codex"
@@ -90,7 +95,9 @@ Each `ForgeInstance` holds its own `ReadOrchestrator` and `WriteOrchestrator`, c
 
 The current `WriteOrchestrator` takes a per-agent `PolicyConfig` and `forge_token` in its constructor. This is incompatible with the per-forge-instance model where orchestrators are shared across agents. Required changes:
 
-- **Remove `policy_config` from `WriteOrchestrator`** — policy evaluation is already done in the handler layer (handlers.rs validates branch prefix, protected paths, and allowed repos before calling the orchestrator). The duplicate policy check inside `WriteOrchestrator` should be removed.
+- **Remove constructor-held `PolicyConfig`** — the orchestrator no longer stores a per-agent policy. Instead, write methods accept a per-request `AuthorizedWrite` proof object computed by the handler after policy evaluation.
+- **Keep write-side invariant checks** — the orchestrator continues to validate diffs (data integrity) and enforce branch prefix / protected path rules using the policy config carried inside `AuthorizedWrite`. This maintains defense-in-depth: even if a handler omits a check, the orchestrator rejects unauthorized writes.
+- **`AuthorizedWrite`** — a domain type containing the evaluated `PolicyConfig` for the request. Handlers construct it after their policy checks pass, and pass it to the orchestrator. The orchestrator cannot be called without one.
 - **Move `forge_token` to `ForgeInstance`** — the orchestrator receives the token from its owning `ForgeInstance` rather than its constructor. Alternatively, `WriteOrchestrator` keeps the token but drops the policy field.
 
 ### `RepositoryRef` changes
@@ -163,7 +170,7 @@ The `.git` suffix in the proxy path is mandatory and stripped when constructing 
 2. Look up forge alias in the registry — 404 if not found.
 3. Check `allowed_repos` against `forge/owner/repo` — 403 if denied.
 4. Rewrite the URL path to the upstream forge's base URL.
-5. Add the upstream forge token to the proxied request (skip if the forge has no token configured).
+5. Authenticate to the upstream forge using HTTP Basic auth (not Bearer). Forgejo and GitHub git smart HTTP endpoints use Basic auth — typically empty username with token as password (Forgejo) or `x-access-token` as username (GitHub). The `ForgeConfig` gains an optional `git_auth_user` field (defaults to empty string). Skip auth if the forge has no token configured.
 6. Stream the upstream response back to the agent using axum's streaming body support and reqwest's streaming response. No buffering of pack data — bytes are proxied as they arrive. The POST endpoint (`git-upload-pack`) requires bidirectional streaming since the request body is also a stream in the git protocol.
 7. Record audit entry (agent, action=`git_read`, repository). A single `git_read` action is used because clone and fetch are indistinguishable at the smart HTTP protocol level (both use `git-upload-pack`).
 
@@ -193,7 +200,7 @@ After this, `cargo` with git dependencies pointing at `https://git.dev.adlevio.n
 ## Non-Goals
 
 - **Git push through proxy** — `commit_patch` covers writes with full policy enforcement.
-- **GitHub / GitLab adapters** — config supports the `type` field, but only `"forgejo"` is implemented in this phase.
+- **GitHub / GitLab adapters** — config supports the `type` field, but only `"forgejo"` is implemented in this phase. The `owner/repo` path model targets Forgejo and GitHub; GitLab's nested subgroup namespaces (`group/subgroup/repo`) will require route and config changes when a GitLab adapter is added.
 - **Fork-and-PR workflow** — future feature.
 - **Agent-side tooling** — skills or scripts for alias discovery are a separate concern.
 - **Local repo caching / mirroring** — not needed; connections are fast enough.
