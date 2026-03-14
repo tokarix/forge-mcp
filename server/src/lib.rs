@@ -6,6 +6,7 @@ pub mod api;
 pub mod auth;
 pub mod config;
 pub mod handlers;
+pub mod registry;
 
 use axum::{Router, routing::get, routing::post};
 use handlers::AppState;
