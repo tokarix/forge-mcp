@@ -370,7 +370,10 @@ impl ServerHandler for McpShim {
                  git push is blocked -- use the commit_patch tool instead.\n\
                  \n\
                  Write workflow: clone via git proxy, make changes, generate a unified diff,\n\
-                 submit via commit_patch, then open a PR via open_change_request.",
+                 submit via commit_patch, then open a PR via open_change_request.\n\
+                 \n\
+                 Never commit to the default branch directly. Work on agent/ branches\n\
+                 and submit all changes via commit_patch + open_change_request.",
                 gateway_url = self.config.gateway_url.trim_end_matches('/'),
             ))
             .with_server_info(Implementation::new(
