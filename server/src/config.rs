@@ -61,6 +61,15 @@ impl std::fmt::Debug for AgentConfig {
     }
 }
 
+/// Result of extracting forge aliases from an agent's `allowed_repos` patterns.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AllowedForges {
+    /// Agent has a `"*"` pattern -- access to all forges.
+    All,
+    /// Agent has access to specific forge aliases only.
+    Specific(std::collections::HashSet<String>),
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct AgentPolicyConfig {
     #[serde(default)]
@@ -78,6 +87,27 @@ impl AgentPolicyConfig {
             branch_prefix: self.branch_prefix.clone(),
             protected_paths: self.protected_paths.clone(),
         }
+    }
+
+    /// Returns the set of forge aliases this agent may access.
+    ///
+    /// Extracts unique forge aliases from `allowed_repos` patterns.
+    /// A `"*"` pattern grants access to all forges.
+    #[must_use]
+    pub fn allowed_forge_aliases(&self) -> AllowedForges {
+        let mut aliases = std::collections::HashSet::new();
+        for pattern in &self.allowed_repos {
+            if pattern == "*" {
+                return AllowedForges::All;
+            }
+            if let Some(alias) = pattern.split('/').next()
+                && alias != "*"
+                && !alias.is_empty()
+            {
+                aliases.insert(alias.to_string());
+            }
+        }
+        AllowedForges::Specific(aliases)
     }
 
     /// Returns whether the agent is allowed to access the given repo.
@@ -442,6 +472,51 @@ session_id = "s"
         let err = validate_config(&config).expect_err("should reject unknown type");
         assert!(err.contains("unsupported forge type 'gitlab'"));
         assert!(err.contains("internal"));
+    }
+
+    #[test]
+    fn allowed_forge_aliases_global_wildcard() {
+        let policy = AgentPolicyConfig {
+            allowed_repos: vec!["*".to_string()],
+            branch_prefix: None,
+            protected_paths: vec![],
+        };
+        assert_eq!(policy.allowed_forge_aliases(), AllowedForges::All);
+    }
+
+    #[test]
+    fn allowed_forge_aliases_specific() {
+        let policy = AgentPolicyConfig {
+            allowed_repos: vec![
+                "internal/org/repo".to_string(),
+                "internal/org/other".to_string(),
+                "external/*".to_string(),
+            ],
+            branch_prefix: None,
+            protected_paths: vec![],
+        };
+        let result = policy.allowed_forge_aliases();
+        match result {
+            AllowedForges::Specific(set) => {
+                assert_eq!(set.len(), 2);
+                assert!(set.contains("internal"));
+                assert!(set.contains("external"));
+            }
+            AllowedForges::All => panic!("expected Specific"),
+        }
+    }
+
+    #[test]
+    fn allowed_forge_aliases_empty() {
+        let policy = AgentPolicyConfig {
+            allowed_repos: vec![],
+            branch_prefix: None,
+            protected_paths: vec![],
+        };
+        assert_eq!(
+            policy.allowed_forge_aliases(),
+            AllowedForges::Specific(std::collections::HashSet::new())
+        );
     }
 
     #[test]

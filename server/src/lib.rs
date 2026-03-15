@@ -58,6 +58,7 @@ fn add_docs_routes(router: Router<AppState>) -> Router<AppState> {
 /// When `enable_docs` is true, serves Scalar UI at `/api/v1/docs`.
 pub fn build_router(state: AppState, enable_docs: bool) -> Router {
     let mut router = Router::new()
+        .route("/api/v1/agent/info", get(handlers::agent_info))
         .route(
             "/api/v1/repos/{forge}/{owner}/{repo}/contents/{*path}",
             get(handlers::get_contents),

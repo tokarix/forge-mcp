@@ -12,6 +12,8 @@ pub struct ForgeInstance {
     pub alias: String,
     pub base_url: String,
     pub client: reqwest::Client,
+    /// Forge software type (e.g. "forgejo").
+    pub forge_type: String,
     /// Username for git smart HTTP Basic auth (empty string for Forgejo).
     pub git_auth_user: String,
     pub read_service: Arc<dyn RepositoryReadService>,
@@ -58,6 +60,12 @@ impl ForgeRegistry {
     #[must_use]
     pub fn len(&self) -> usize {
         self.forges.len()
+    }
+
+    /// Returns all registered forge aliases.
+    #[must_use]
+    pub fn aliases(&self) -> Vec<&String> {
+        self.forges.keys().collect()
     }
 
     /// Returns true if no forges are registered.

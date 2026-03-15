@@ -425,6 +425,66 @@ pub async fn post_pulls(
     ))
 }
 
+/// GET /api/v1/agent/info
+pub async fn agent_info(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    let token = extract_bearer_token(&headers).ok_or_else(|| {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorBody {
+                error: "missing or invalid Authorization header".to_string(),
+            }),
+        )
+    })?;
+    let agent = state.agent_registry.resolve(token).ok_or_else(|| {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorBody {
+                error: "invalid bearer token".to_string(),
+            }),
+        )
+    })?;
+
+    // Audit
+    state
+        .audit_sink
+        .record(audit::AuditRecord {
+            action: "agent_info".to_string(),
+            agent: agent.identity.clone(),
+            repository: RepositoryRef {
+                alias: String::new(),
+                forge: ForgeKind::Forgejo,
+                host: String::new(),
+                name: String::new(),
+                owner: String::new(),
+            },
+            target: "self".to_string(),
+        })
+        .await
+        .map_err(|e| map_service_error(ServiceError::Audit(e.to_string())))?;
+
+    // Determine accessible forges
+    let allowed = agent.policy_config.allowed_forge_aliases();
+    let mut forges: Vec<crate::api::AgentForgeInfo> = Vec::new();
+    for alias in state.forge_registry.aliases() {
+        let visible = match &allowed {
+            crate::config::AllowedForges::All => true,
+            crate::config::AllowedForges::Specific(set) => set.contains(alias),
+        };
+        if visible && let Some(instance) = state.forge_registry.get(alias) {
+            forges.push(crate::api::AgentForgeInfo {
+                alias: alias.clone(),
+                forge_type: instance.forge_type.clone(),
+            });
+        }
+    }
+    forges.sort_by(|a, b| a.alias.cmp(&b.alias));
+
+    Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(crate::api::AgentInfoResult {
+        agent_id: agent.identity.agent_id.clone(),
+        forges,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -578,6 +638,7 @@ mod tests {
                 alias: "test-forge".to_string(),
                 base_url: "https://forge.example".to_string(),
                 client: reqwest::Client::new(),
+                forge_type: "forgejo".to_string(),
                 git_auth_user: String::new(),
                 read_service: Arc::new(FakeReadService),
                 token: None,
@@ -667,6 +728,7 @@ mod tests {
                 alias: "test-forge".to_string(),
                 base_url: "https://forge.example".to_string(),
                 client: reqwest::Client::new(),
+                forge_type: "forgejo".to_string(),
                 git_auth_user: String::new(),
                 read_service: Arc::new(FakeReadService),
                 token: None,
@@ -838,6 +900,7 @@ mod tests {
                 alias: "test-forge".to_string(),
                 base_url: "https://forge.example".to_string(),
                 client: reqwest::Client::new(),
+                forge_type: "forgejo".to_string(),
                 git_auth_user: String::new(),
                 read_service: Arc::new(FakeReadService),
                 token: None,
@@ -898,5 +961,158 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn agent_info_returns_accessible_forges() {
+        let app = crate::build_router(test_state(), false);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/agent/info")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["agent_id"], "codex");
+        let forges = json["forges"].as_array().unwrap();
+        assert_eq!(forges.len(), 1);
+        assert_eq!(forges[0]["alias"], "test-forge");
+        assert_eq!(forges[0]["type"], "forgejo");
+    }
+
+    #[tokio::test]
+    async fn agent_info_returns_401_without_token() {
+        let app = crate::build_router(test_state(), false);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/agent/info")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn agent_info_filters_inaccessible_forges() {
+        // Agent only has access to "test-forge/org/allowed-repo", not "other-forge"
+        let configs = vec![crate::config::AgentConfig {
+            agent_id: "restricted".to_string(),
+            policy: AgentPolicyConfig {
+                allowed_repos: vec!["test-forge/org/repo".to_string()],
+                branch_prefix: Some("agent/".to_string()),
+                protected_paths: vec![],
+            },
+            session_id: "default".to_string(),
+            token: "restricted-token".to_string(),
+        }];
+
+        let mut forges = std::collections::HashMap::new();
+        forges.insert(
+            "test-forge".to_string(),
+            crate::registry::ForgeInstance {
+                adapter: Arc::new(FakeForgeAdapter),
+                alias: "test-forge".to_string(),
+                base_url: "https://forge.example".to_string(),
+                client: reqwest::Client::new(),
+                forge_type: "forgejo".to_string(),
+                git_auth_user: String::new(),
+                read_service: Arc::new(FakeReadService),
+                token: None,
+                write_service: Arc::new(FakeWriteService),
+            },
+        );
+        forges.insert(
+            "other-forge".to_string(),
+            crate::registry::ForgeInstance {
+                adapter: Arc::new(FakeForgeAdapter),
+                alias: "other-forge".to_string(),
+                base_url: "https://other.example".to_string(),
+                client: reqwest::Client::new(),
+                forge_type: "forgejo".to_string(),
+                git_auth_user: String::new(),
+                read_service: Arc::new(FakeReadService),
+                token: None,
+                write_service: Arc::new(FakeWriteService),
+            },
+        );
+
+        let state = AppState {
+            agent_registry: AgentRegistry::from_configs(&configs),
+            audit_sink: Arc::new(audit::InMemoryAuditSink::new()),
+            forge_registry: Arc::new(crate::registry::ForgeRegistry::new(forges)),
+        };
+
+        let app = crate::build_router(state, false);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/agent/info")
+                    .header("authorization", "Bearer restricted-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let forges = json["forges"].as_array().unwrap();
+        // Only test-forge should be visible, not other-forge
+        assert_eq!(forges.len(), 1);
+        assert_eq!(forges[0]["alias"], "test-forge");
+    }
+
+    #[tokio::test]
+    async fn agent_info_records_audit() {
+        let audit_sink = Arc::new(audit::InMemoryAuditSink::new());
+        let configs = vec![crate::config::AgentConfig {
+            agent_id: "codex".to_string(),
+            policy: AgentPolicyConfig {
+                allowed_repos: vec!["*".to_string()],
+                branch_prefix: Some("agent/".to_string()),
+                protected_paths: vec![],
+            },
+            session_id: "default".to_string(),
+            token: "test-token".to_string(),
+        }];
+
+        let state = AppState {
+            agent_registry: AgentRegistry::from_configs(&configs),
+            audit_sink: Arc::clone(&audit_sink) as Arc<dyn audit::AuditSink>,
+            forge_registry: Arc::new(crate::registry::ForgeRegistry::new(
+                std::collections::HashMap::new(),
+            )),
+        };
+
+        let app = crate::build_router(state, false);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/agent/info")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let records = audit_sink.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].action, "agent_info");
+        assert_eq!(records[0].target, "self");
     }
 }

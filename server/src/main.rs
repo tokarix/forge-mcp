@@ -69,6 +69,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         alias: forge_config.alias.clone(),
                         base_url: forge_config.base_url.clone(),
                         client: client.clone(),
+                        forge_type: forge_config.forge_type.clone(),
                         git_auth_user: forge_config.git_auth_user.clone(),
                         read_service,
                         token: forge_config.token.clone(),

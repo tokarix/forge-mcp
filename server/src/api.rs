@@ -76,6 +76,21 @@ pub struct ContentsPath {
     pub repo: String,
 }
 
+/// Response for GET /api/v1/agent/info
+#[derive(Debug, Serialize)]
+pub struct AgentInfoResult {
+    pub agent_id: String,
+    pub forges: Vec<AgentForgeInfo>,
+}
+
+/// A forge instance the agent has access to.
+#[derive(Debug, Serialize)]
+pub struct AgentForgeInfo {
+    pub alias: String,
+    #[serde(rename = "type")]
+    pub forge_type: String,
+}
+
 /// Error response body.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ErrorBody {
