@@ -52,6 +52,7 @@ pub struct ListPullsQuery {
 /// Shared path parameters for repo-scoped endpoints.
 #[derive(Debug, Deserialize)]
 pub struct RepoPath {
+    pub forge: String,
     pub owner: String,
     pub repo: String,
 }
@@ -59,6 +60,7 @@ pub struct RepoPath {
 /// Path parameters for pull request endpoints.
 #[derive(Debug, Deserialize)]
 pub struct PullPath {
+    pub forge: String,
     pub index: u64,
     pub owner: String,
     pub repo: String,
@@ -68,6 +70,7 @@ pub struct PullPath {
 /// the remainder of the URL path after `/contents/`.
 #[derive(Debug, Deserialize)]
 pub struct ContentsPath {
+    pub forge: String,
     pub owner: String,
     pub path: String,
     pub repo: String,

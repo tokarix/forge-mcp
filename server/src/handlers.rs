@@ -11,31 +11,36 @@ use axum::{
 };
 use domain::{
     AgentIdentity, CommitPatchRequest, ForgeKind, GetChangeRequestRequest,
-    ListChangeRequestsRequest, OpenChangeRequestRequest, ReadRepositoryFileRequest,
-    RepositoryReadService, RepositoryRef, RepositoryWriteService, ServiceError,
+    ListChangeRequestsRequest, OpenChangeRequestRequest, ReadRepositoryFileRequest, RepositoryRef,
+    ServiceError,
 };
 
 use crate::api::{
     CommitPatchBody, CommitPatchResult, ContentsPath, ContentsQuery, ContentsResult, ErrorBody,
     ListPullsQuery, OpenPullBody, PullPath, RepoPath,
 };
-use crate::auth::AgentRegistry;
+use crate::auth::{AgentRegistry, extract_bearer_token};
 
 /// Shared application state.
 #[derive(Clone)]
 pub struct AppState {
     pub agent_registry: AgentRegistry,
-    pub forgejo_base_url: String,
-    pub read_service: Arc<dyn RepositoryReadService>,
-    pub write_service: Arc<dyn RepositoryWriteService>,
+    pub audit_sink: Arc<dyn audit::AuditSink>,
+    pub forge_registry: Arc<crate::registry::ForgeRegistry>,
 }
 
-/// Extracts the bearer token from the Authorization header.
-fn extract_bearer_token(headers: &HeaderMap) -> Option<&str> {
-    headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
+fn resolve_forge<'a>(
+    registry: &'a crate::registry::ForgeRegistry,
+    alias: &str,
+) -> Result<&'a crate::registry::ForgeInstance, (StatusCode, Json<ErrorBody>)> {
+    registry.get(alias).ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorBody {
+                error: format!("unknown forge alias '{alias}'"),
+            }),
+        )
+    })
 }
 
 /// Maps a `ServiceError` to an HTTP status code and error body.
@@ -98,11 +103,16 @@ fn resolve_agent(
     Ok((agent.identity.clone(), agent.policy.clone()))
 }
 
-fn repo_ref(owner: &str, repo: &str, base_url: &str) -> RepositoryRef {
+fn repo_ref(
+    forge_alias: &str,
+    owner: &str,
+    repo: &str,
+    forge: &crate::registry::ForgeInstance,
+) -> RepositoryRef {
     RepositoryRef {
-        alias: String::new(),
-        forge: ForgeKind::Forgejo,
-        host: base_url.to_string(),
+        alias: forge_alias.to_string(),
+        forge: ForgeKind::Forgejo, // TODO: derive from config type field
+        host: forge.base_url.clone(),
         name: repo.to_string(),
         owner: owner.to_string(),
     }
@@ -110,8 +120,9 @@ fn repo_ref(owner: &str, repo: &str, base_url: &str) -> RepositoryRef {
 
 #[utoipa::path(
     get,
-    path = "/api/v1/repos/{owner}/{repo}/contents/{path}",
+    path = "/api/v1/repos/{forge}/{owner}/{repo}/contents/{path}",
     params(
+        ("forge" = String, Path, description = "Forge alias"),
         ("owner" = String, Path, description = "Repository owner"),
         ("repo" = String, Path, description = "Repository name"),
         ("path" = String, Path, description = "File path"),
@@ -123,23 +134,29 @@ fn repo_ref(owner: &str, repo: &str, base_url: &str) -> RepositoryRef {
     ),
     security(("bearer" = []))
 )]
-/// GET /api/v1/repos/{owner}/{repo}/contents/{path}
+/// GET /api/v1/repos/{forge}/{owner}/{repo}/contents/{path}
 pub async fn get_contents(
     State(state): State<AppState>,
     Path(path): Path<ContentsPath>,
     Query(query): Query<ContentsQuery>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let (identity, _policy) =
-        resolve_agent(&headers, &state.agent_registry, "", &path.owner, &path.repo)?;
+    let forge = resolve_forge(&state.forge_registry, &path.forge)?;
+    let (identity, _policy) = resolve_agent(
+        &headers,
+        &state.agent_registry,
+        &path.forge,
+        &path.owner,
+        &path.repo,
+    )?;
 
-    let result = state
+    let result = forge
         .read_service
         .read_repository_file(ReadRepositoryFileRequest {
             agent: identity,
             git_ref: query.git_ref.clone(),
             path: path.path.clone(),
-            repository: repo_ref(&path.owner, &path.repo, &state.forgejo_base_url),
+            repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
         })
         .await
         .map_err(map_service_error)?;
@@ -153,8 +170,9 @@ pub async fn get_contents(
 
 #[utoipa::path(
     get,
-    path = "/api/v1/repos/{owner}/{repo}/pulls/{index}",
+    path = "/api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}",
     params(
+        ("forge" = String, Path, description = "Forge alias"),
         ("owner" = String, Path, description = "Repository owner"),
         ("repo" = String, Path, description = "Repository name"),
         ("index" = u64, Path, description = "Pull request index"),
@@ -165,21 +183,27 @@ pub async fn get_contents(
     ),
     security(("bearer" = []))
 )]
-/// GET /api/v1/repos/{owner}/{repo}/pulls/{index}
+/// GET /api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}
 pub async fn get_pull(
     State(state): State<AppState>,
     Path(path): Path<PullPath>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let (identity, _policy) =
-        resolve_agent(&headers, &state.agent_registry, "", &path.owner, &path.repo)?;
+    let forge = resolve_forge(&state.forge_registry, &path.forge)?;
+    let (identity, _policy) = resolve_agent(
+        &headers,
+        &state.agent_registry,
+        &path.forge,
+        &path.owner,
+        &path.repo,
+    )?;
 
-    let result = state
+    let result = forge
         .read_service
         .get_change_request(GetChangeRequestRequest {
             agent: identity,
             index: path.index,
-            repository: repo_ref(&path.owner, &path.repo, &state.forgejo_base_url),
+            repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
         })
         .await
         .map_err(map_service_error)?;
@@ -191,8 +215,9 @@ pub async fn get_pull(
 
 #[utoipa::path(
     get,
-    path = "/api/v1/repos/{owner}/{repo}/pulls",
+    path = "/api/v1/repos/{forge}/{owner}/{repo}/pulls",
     params(
+        ("forge" = String, Path, description = "Forge alias"),
         ("owner" = String, Path, description = "Repository owner"),
         ("repo" = String, Path, description = "Repository name"),
         ("state" = Option<String>, Query, description = "State filter: open, closed, merged"),
@@ -203,15 +228,21 @@ pub async fn get_pull(
     ),
     security(("bearer" = []))
 )]
-/// GET /api/v1/repos/{owner}/{repo}/pulls
+/// GET /api/v1/repos/{forge}/{owner}/{repo}/pulls
 pub async fn list_pulls(
     State(state): State<AppState>,
     Path(path): Path<RepoPath>,
     Query(query): Query<ListPullsQuery>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let (identity, _policy) =
-        resolve_agent(&headers, &state.agent_registry, "", &path.owner, &path.repo)?;
+    let forge = resolve_forge(&state.forge_registry, &path.forge)?;
+    let (identity, _policy) = resolve_agent(
+        &headers,
+        &state.agent_registry,
+        &path.forge,
+        &path.owner,
+        &path.repo,
+    )?;
 
     let state_filter = query.state.as_deref().map(|s| match s {
         "closed" => domain::ChangeRequestState::Closed,
@@ -219,11 +250,11 @@ pub async fn list_pulls(
         _ => domain::ChangeRequestState::Open,
     });
 
-    let result = state
+    let result = forge
         .read_service
         .list_change_requests(ListChangeRequestsRequest {
             agent: identity,
-            repository: repo_ref(&path.owner, &path.repo, &state.forgejo_base_url),
+            repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
             state: state_filter,
         })
         .await
@@ -236,8 +267,9 @@ pub async fn list_pulls(
 
 #[utoipa::path(
     post,
-    path = "/api/v1/repos/{owner}/{repo}/patches",
+    path = "/api/v1/repos/{forge}/{owner}/{repo}/patches",
     params(
+        ("forge" = String, Path, description = "Forge alias"),
         ("owner" = String, Path, description = "Repository owner"),
         ("repo" = String, Path, description = "Repository name"),
     ),
@@ -248,15 +280,21 @@ pub async fn list_pulls(
     ),
     security(("bearer" = []))
 )]
-/// POST /api/v1/repos/{owner}/{repo}/patches
+/// POST /api/v1/repos/{forge}/{owner}/{repo}/patches
 pub async fn post_patches(
     State(state): State<AppState>,
     Path(path): Path<RepoPath>,
     headers: HeaderMap,
     Json(body): Json<CommitPatchBody>,
 ) -> impl IntoResponse {
-    let (identity, policy) =
-        resolve_agent(&headers, &state.agent_registry, "", &path.owner, &path.repo)?;
+    let forge = resolve_forge(&state.forge_registry, &path.forge)?;
+    let (identity, policy) = resolve_agent(
+        &headers,
+        &state.agent_registry,
+        &path.forge,
+        &path.owner,
+        &path.repo,
+    )?;
 
     // Per-agent policy check
     let diff_result = domain::diff::validate_diff(&body.patch)
@@ -277,7 +315,7 @@ pub async fn post_patches(
     let policy_context = domain::policy::PolicyContext {
         action: "commit_patch".to_string(),
         agent: identity.clone(),
-        repository: repo_ref(&path.owner, &path.repo, &state.forgejo_base_url),
+        repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
         target_branch: body.new_branch.clone(),
         touched_paths,
     };
@@ -291,7 +329,7 @@ pub async fn post_patches(
 
     let authorized = domain::policy::AuthorizedWrite { policy };
 
-    let result = state
+    let result = forge
         .write_service
         .commit_patch(
             CommitPatchRequest {
@@ -300,7 +338,7 @@ pub async fn post_patches(
                 commit_message: body.commit_message,
                 new_branch: body.new_branch,
                 patch: body.patch,
-                repository: repo_ref(&path.owner, &path.repo, &state.forgejo_base_url),
+                repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
             },
             authorized,
         )
@@ -318,8 +356,9 @@ pub async fn post_patches(
 
 #[utoipa::path(
     post,
-    path = "/api/v1/repos/{owner}/{repo}/pulls",
+    path = "/api/v1/repos/{forge}/{owner}/{repo}/pulls",
     params(
+        ("forge" = String, Path, description = "Forge alias"),
         ("owner" = String, Path, description = "Repository owner"),
         ("repo" = String, Path, description = "Repository name"),
     ),
@@ -330,21 +369,27 @@ pub async fn post_patches(
     ),
     security(("bearer" = []))
 )]
-/// POST /api/v1/repos/{owner}/{repo}/pulls
+/// POST /api/v1/repos/{forge}/{owner}/{repo}/pulls
 pub async fn post_pulls(
     State(state): State<AppState>,
     Path(path): Path<RepoPath>,
     headers: HeaderMap,
     Json(body): Json<OpenPullBody>,
 ) -> impl IntoResponse {
-    let (identity, policy) =
-        resolve_agent(&headers, &state.agent_registry, "", &path.owner, &path.repo)?;
+    let forge = resolve_forge(&state.forge_registry, &path.forge)?;
+    let (identity, policy) = resolve_agent(
+        &headers,
+        &state.agent_registry,
+        &path.forge,
+        &path.owner,
+        &path.repo,
+    )?;
 
     // Per-agent branch prefix check for the head branch
     let policy_context = domain::policy::PolicyContext {
         action: "open_change_request".to_string(),
         agent: identity.clone(),
-        repository: repo_ref(&path.owner, &path.repo, &state.forgejo_base_url),
+        repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
         target_branch: body.head_branch.clone(),
         touched_paths: vec![],
     };
@@ -358,7 +403,7 @@ pub async fn post_pulls(
 
     let authorized = domain::policy::AuthorizedWrite { policy };
 
-    let result = state
+    let result = forge
         .write_service
         .open_change_request(
             OpenChangeRequestRequest {
@@ -366,7 +411,7 @@ pub async fn post_pulls(
                 base_branch: body.base_branch,
                 body: body.body,
                 head_branch: body.head_branch,
-                repository: repo_ref(&path.owner, &path.repo, &state.forgejo_base_url),
+                repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
                 title: body.title,
             },
             authorized,
@@ -400,10 +445,48 @@ mod tests {
 
     use super::*;
 
+    struct FakeForgeAdapter;
+
+    #[async_trait::async_trait]
+    impl forge::ForgeAdapter for FakeForgeAdapter {
+        async fn read_repository_file(
+            &self,
+            _: &domain::RepositoryRef,
+            _: &str,
+            _: Option<&str>,
+        ) -> Result<domain::ReadRepositoryFileResponse, forge::ForgeError> {
+            unimplemented!()
+        }
+        async fn create_change_request(
+            &self,
+            _: &domain::RepositoryRef,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+        ) -> Result<domain::ChangeRequest, forge::ForgeError> {
+            unimplemented!()
+        }
+        async fn list_change_requests(
+            &self,
+            _: &domain::RepositoryRef,
+            _: Option<&domain::ChangeRequestState>,
+        ) -> Result<Vec<domain::ChangeRequest>, forge::ForgeError> {
+            unimplemented!()
+        }
+        async fn get_change_request(
+            &self,
+            _: &domain::RepositoryRef,
+            _: u64,
+        ) -> Result<domain::ChangeRequest, forge::ForgeError> {
+            unimplemented!()
+        }
+    }
+
     struct FakeReadService;
 
     #[async_trait::async_trait]
-    impl RepositoryReadService for FakeReadService {
+    impl domain::RepositoryReadService for FakeReadService {
         async fn read_repository_file(
             &self,
             request: ReadRepositoryFileRequest,
@@ -442,7 +525,7 @@ mod tests {
     struct FakeWriteService;
 
     #[async_trait::async_trait]
-    impl RepositoryWriteService for FakeWriteService {
+    impl domain::RepositoryWriteService for FakeWriteService {
         async fn commit_patch(
             &self,
             request: CommitPatchRequest,
@@ -479,18 +562,33 @@ mod tests {
         let configs = vec![crate::config::AgentConfig {
             agent_id: "codex".to_string(),
             policy: AgentPolicyConfig {
-                allowed_repos: vec!["*".to_string()],
+                allowed_repos: vec!["test-forge/org/repo".to_string()],
                 branch_prefix: Some("agent/".to_string()),
                 protected_paths: vec![],
             },
             session_id: "default".to_string(),
             token: "test-token".to_string(),
         }];
+
+        let mut forges = std::collections::HashMap::new();
+        forges.insert(
+            "test-forge".to_string(),
+            crate::registry::ForgeInstance {
+                adapter: Arc::new(FakeForgeAdapter),
+                alias: "test-forge".to_string(),
+                base_url: "https://forge.example".to_string(),
+                client: reqwest::Client::new(),
+                git_auth_user: String::new(),
+                read_service: Arc::new(FakeReadService),
+                token: None,
+                write_service: Arc::new(FakeWriteService),
+            },
+        );
+
         AppState {
             agent_registry: AgentRegistry::from_configs(&configs),
-            forgejo_base_url: "https://forge.example".to_string(),
-            read_service: Arc::new(FakeReadService),
-            write_service: Arc::new(FakeWriteService),
+            audit_sink: Arc::new(audit::InMemoryAuditSink::new()),
+            forge_registry: Arc::new(crate::registry::ForgeRegistry::new(forges)),
         }
     }
 
@@ -515,7 +613,7 @@ mod tests {
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri("/api/v1/repos/org/repo/contents/README.md")
+                    .uri("/api/v1/repos/test-forge/org/repo/contents/README.md")
                     .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
@@ -538,7 +636,7 @@ mod tests {
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri("/api/v1/repos/org/repo/contents/README.md")
+                    .uri("/api/v1/repos/test-forge/org/repo/contents/README.md")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -553,24 +651,39 @@ mod tests {
         let configs = vec![crate::config::AgentConfig {
             agent_id: "codex".to_string(),
             policy: AgentPolicyConfig {
-                allowed_repos: vec!["/org/allowed-repo".to_string()],
+                allowed_repos: vec!["test-forge/org/allowed-repo".to_string()],
                 branch_prefix: Some("agent/".to_string()),
                 protected_paths: vec![],
             },
             session_id: "default".to_string(),
             token: "test-token".to_string(),
         }];
+
+        let mut forges = std::collections::HashMap::new();
+        forges.insert(
+            "test-forge".to_string(),
+            crate::registry::ForgeInstance {
+                adapter: Arc::new(FakeForgeAdapter),
+                alias: "test-forge".to_string(),
+                base_url: "https://forge.example".to_string(),
+                client: reqwest::Client::new(),
+                git_auth_user: String::new(),
+                read_service: Arc::new(FakeReadService),
+                token: None,
+                write_service: Arc::new(FakeWriteService),
+            },
+        );
+
         let state = AppState {
             agent_registry: AgentRegistry::from_configs(&configs),
-            forgejo_base_url: "https://forge.example".to_string(),
-            read_service: Arc::new(FakeReadService),
-            write_service: Arc::new(FakeWriteService),
+            audit_sink: Arc::new(audit::InMemoryAuditSink::new()),
+            forge_registry: Arc::new(crate::registry::ForgeRegistry::new(forges)),
         };
         let app = crate::build_router(state, false);
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri("/api/v1/repos/org/secret-repo/contents/README.md")
+                    .uri("/api/v1/repos/test-forge/org/secret-repo/contents/README.md")
                     .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
@@ -587,7 +700,7 @@ mod tests {
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri("/api/v1/repos/org/repo/contents/README.md")
+                    .uri("/api/v1/repos/test-forge/org/repo/contents/README.md")
                     .header("authorization", "Bearer wrong-token")
                     .body(Body::empty())
                     .unwrap(),
@@ -611,7 +724,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/v1/repos/org/repo/patches")
+                    .uri("/api/v1/repos/test-forge/org/repo/patches")
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -635,7 +748,7 @@ mod tests {
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri("/api/v1/repos/org/repo/pulls")
+                    .uri("/api/v1/repos/test-forge/org/repo/pulls")
                     .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
@@ -664,7 +777,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/v1/repos/org/repo/pulls")
+                    .uri("/api/v1/repos/test-forge/org/repo/pulls")
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -688,7 +801,7 @@ mod tests {
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri("/api/v1/repos/org/repo/pulls/1")
+                    .uri("/api/v1/repos/test-forge/org/repo/pulls/1")
                     .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
@@ -709,18 +822,33 @@ mod tests {
         let configs = vec![crate::config::AgentConfig {
             agent_id: "codex".to_string(),
             policy: AgentPolicyConfig {
-                allowed_repos: vec!["*".to_string()],
+                allowed_repos: vec!["test-forge/org/repo".to_string()],
                 branch_prefix: Some("agent/codex/".to_string()),
                 protected_paths: vec![],
             },
             session_id: "default".to_string(),
             token: "test-token".to_string(),
         }];
+
+        let mut forges = std::collections::HashMap::new();
+        forges.insert(
+            "test-forge".to_string(),
+            crate::registry::ForgeInstance {
+                adapter: Arc::new(FakeForgeAdapter),
+                alias: "test-forge".to_string(),
+                base_url: "https://forge.example".to_string(),
+                client: reqwest::Client::new(),
+                git_auth_user: String::new(),
+                read_service: Arc::new(FakeReadService),
+                token: None,
+                write_service: Arc::new(FakeWriteService),
+            },
+        );
+
         let state = AppState {
             agent_registry: AgentRegistry::from_configs(&configs),
-            forgejo_base_url: "https://forge.example".to_string(),
-            read_service: Arc::new(FakeReadService),
-            write_service: Arc::new(FakeWriteService),
+            audit_sink: Arc::new(audit::InMemoryAuditSink::new()),
+            forge_registry: Arc::new(crate::registry::ForgeRegistry::new(forges)),
         };
         let app = crate::build_router(state, false);
 
@@ -734,7 +862,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/v1/repos/org/repo/patches")
+                    .uri("/api/v1/repos/test-forge/org/repo/patches")
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -754,5 +882,21 @@ mod tests {
                 .unwrap()
                 .contains("does not start with")
         );
+    }
+
+    #[tokio::test]
+    async fn returns_404_for_unknown_forge() {
+        let app = crate::build_router(test_state(), false);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/repos/nonexistent/org/repo/contents/README.md")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 }

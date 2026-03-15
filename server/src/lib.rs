@@ -58,19 +58,19 @@ fn add_docs_routes(router: Router<AppState>) -> Router<AppState> {
 pub fn build_router(state: AppState, enable_docs: bool) -> Router {
     let mut router = Router::new()
         .route(
-            "/api/v1/repos/{owner}/{repo}/contents/{*path}",
+            "/api/v1/repos/{forge}/{owner}/{repo}/contents/{*path}",
             get(handlers::get_contents),
         )
         .route(
-            "/api/v1/repos/{owner}/{repo}/patches",
+            "/api/v1/repos/{forge}/{owner}/{repo}/patches",
             post(handlers::post_patches),
         )
         .route(
-            "/api/v1/repos/{owner}/{repo}/pulls",
+            "/api/v1/repos/{forge}/{owner}/{repo}/pulls",
             get(handlers::list_pulls).post(handlers::post_pulls),
         )
         .route(
-            "/api/v1/repos/{owner}/{repo}/pulls/{index}",
+            "/api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}",
             get(handlers::get_pull),
         );
 

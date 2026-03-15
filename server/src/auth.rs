@@ -4,6 +4,15 @@ use std::collections::HashMap;
 
 use domain::{AgentIdentity, policy::PolicyConfig};
 
+/// Extracts the bearer token from the Authorization header.
+#[must_use]
+pub fn extract_bearer_token(headers: &axum::http::HeaderMap) -> Option<&str> {
+    headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+}
+
 /// Resolved agent identity and policy from a bearer token.
 #[derive(Clone, Debug)]
 pub struct ResolvedAgent {

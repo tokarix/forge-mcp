@@ -2,21 +2,32 @@
 
 [server]
 listen = "0.0.0.0:8443"
+# enable_docs = true
 
-[forge.forgejo]
+# Each [[forges]] entry defines a forge instance the gateway can proxy to.
+# alias:         short name used in URLs and allowed_repos patterns (lowercase, hyphens ok)
+# type:          forge software type ("forgejo" for now; "github" planned)
+# base_url:      upstream forge base URL
+# token:         API token for the upstream forge (optional for public instances)
+# git_auth_user: username for git smart HTTP Basic auth (default: "", for Forgejo;
+#                use "x-access-token" for GitHub)
+
+[[forges]]
+alias = "internal"
+type = "forgejo"
 base_url = "https://forge.example"
 token = "your-forgejo-api-token"
+# git_auth_user = ""  # default: empty (Forgejo uses token as password with empty user)
 
 # Each [[agents]] entry defines a bearer token that maps to an agent
-# identity and policy. Agents authenticate to the control plane with
-# their bearer token; the control plane never exposes forge credentials.
+# identity and policy.
 #
-# allowed_repos: list of "owner/repo" the agent may access.
-#   Deny-by-default: omitting the field or setting [] denies all access.
-#   - ["*"]                    → allows all repositories (only wildcard form)
-#   - ["org/repo", "org/lib"]  → exact owner/repo match, case-sensitive
-#   - []                       → denies all access
-#   Partial globs like "org/*" are NOT supported and treated as literals.
+# allowed_repos patterns:
+#   ["*"]                           → all repos on all forges
+#   ["internal/*"]                  → all repos on the 'internal' forge
+#   ["internal/org/*"]              → all repos under 'org' on 'internal'
+#   ["internal/org/repo"]           → exact match
+#   Partial globs like "internal/org/repo-*" are NOT supported.
 
 [[agents]]
 token = "bearer-token-for-codex"
@@ -24,7 +35,7 @@ agent_id = "codex"
 session_id = "default"
 
 [agents.policy]
-allowed_repos = ["org/repo", "org/other-repo"]
+allowed_repos = ["internal/org/repo", "internal/org/other-repo"]
 branch_prefix = "agent/codex/"
 protected_paths = [".forgejo/", ".github/"]
 
@@ -34,6 +45,6 @@ agent_id = "claude"
 session_id = "default"
 
 [agents.policy]
-allowed_repos = ["org/repo"]
+allowed_repos = ["internal/org/repo"]
 branch_prefix = "agent/claude/"
 protected_paths = [".forgejo/", ".github/"]
