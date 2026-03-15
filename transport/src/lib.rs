@@ -45,6 +45,8 @@ pub struct CommitPatchTool {
     pub base_branch: String,
     /// Commit message.
     pub commit_message: String,
+    /// Forge alias (e.g. "internal").
+    pub forge: String,
     /// New branch name (must start with "agent/").
     pub new_branch: String,
     /// Repository owner or organization.
@@ -57,6 +59,8 @@ pub struct CommitPatchTool {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct GetChangeRequestTool {
+    /// Forge alias (e.g. "internal").
+    pub forge: String,
     /// Change request index number.
     pub index: u64,
     /// Repository owner or organization.
@@ -67,6 +71,8 @@ pub struct GetChangeRequestTool {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ListChangeRequestsTool {
+    /// Forge alias (e.g. "internal").
+    pub forge: String,
     /// Repository owner or organization.
     pub owner: String,
     /// Repository name.
@@ -81,6 +87,8 @@ pub struct OpenChangeRequestTool {
     pub base_branch: String,
     /// Description body.
     pub body: String,
+    /// Forge alias (e.g. "internal").
+    pub forge: String,
     /// Head branch with the changes.
     pub head_branch: String,
     /// Repository owner or organization.
@@ -93,6 +101,8 @@ pub struct OpenChangeRequestTool {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ReadRepositoryFileTool {
+    /// Forge alias (e.g. "internal").
+    pub forge: String,
     /// Optional git ref such as a branch, tag, or commit SHA.
     pub git_ref: Option<String>,
     /// Repository owner or organization.
@@ -221,6 +231,7 @@ impl McpShim {
             "api",
             "v1",
             "repos",
+            &request.forge,
             &request.owner,
             &request.repo,
             "patches",
@@ -247,6 +258,7 @@ impl McpShim {
             "api",
             "v1",
             "repos",
+            &request.forge,
             &request.owner,
             &request.repo,
             "pulls",
@@ -264,8 +276,15 @@ impl McpShim {
         &self,
         Parameters(request): Parameters<ListChangeRequestsTool>,
     ) -> Result<String, McpError> {
-        let mut url =
-            self.build_url(&["api", "v1", "repos", &request.owner, &request.repo, "pulls"])?;
+        let mut url = self.build_url(&[
+            "api",
+            "v1",
+            "repos",
+            &request.forge,
+            &request.owner,
+            &request.repo,
+            "pulls",
+        ])?;
         if let Some(state) = &request.state {
             url.query_pairs_mut().append_pair("state", state);
         }
@@ -281,8 +300,15 @@ impl McpShim {
         &self,
         Parameters(request): Parameters<OpenChangeRequestTool>,
     ) -> Result<String, McpError> {
-        let url =
-            self.build_url(&["api", "v1", "repos", &request.owner, &request.repo, "pulls"])?;
+        let url = self.build_url(&[
+            "api",
+            "v1",
+            "repos",
+            &request.forge,
+            &request.owner,
+            &request.repo,
+            "pulls",
+        ])?;
         let body = serde_json::json!({
             "base_branch": request.base_branch,
             "body": request.body,
@@ -307,6 +333,7 @@ impl McpShim {
             "api",
             "v1",
             "repos",
+            &request.forge,
             &request.owner,
             &request.repo,
             "contents",
@@ -476,7 +503,7 @@ mod tests {
         let mock_server = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("GET"))
             .and(wiremock::matchers::path_regex(
-                r"/api/v1/repos/.+/contents/.+",
+                r"/api/v1/repos/.+/.+/.+/contents/.+",
             ))
             .and(wiremock::matchers::header(
                 "authorization",
@@ -496,6 +523,7 @@ mod tests {
             spawn_shim_and_client(test_config(&mock_server.uri())).await?;
 
         let args = serde_json::json!({
+            "forge": "test-forge",
             "owner": "org",
             "repo": "repo",
             "path": "README.md",
@@ -526,7 +554,9 @@ mod tests {
     async fn commit_patch_calls_gateway() -> Result<(), Box<dyn std::error::Error>> {
         let mock_server = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("POST"))
-            .and(wiremock::matchers::path_regex(r"/api/v1/repos/.+/patches"))
+            .and(wiremock::matchers::path_regex(
+                r"/api/v1/repos/.+/.+/.+/patches",
+            ))
             .and(wiremock::matchers::header(
                 "authorization",
                 "Bearer test-token",
@@ -544,6 +574,7 @@ mod tests {
             spawn_shim_and_client(test_config(&mock_server.uri())).await?;
 
         let args = serde_json::json!({
+            "forge": "test-forge",
             "owner": "org",
             "repo": "repo",
             "base_branch": "main",
