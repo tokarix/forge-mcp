@@ -300,4 +300,338 @@ mod tests {
         };
         assert_eq!(path.repo_name(), "repo");
     }
+
+    use std::sync::Arc;
+
+    use axum::{body::Body, http::Request};
+    use domain::{
+        ChangeRequest, ChangeRequestState, CommitPatchResponse, GetChangeRequestRequest,
+        ListChangeRequestsRequest, OpenChangeRequestResponse, ReadRepositoryFileResponse,
+        ServiceError,
+    };
+    use tower::ServiceExt;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path_regex, query_param},
+    };
+
+    use crate::auth::AgentRegistry;
+    use crate::config::AgentPolicyConfig;
+
+    struct FakeForgeAdapter;
+
+    #[async_trait::async_trait]
+    impl forge::ForgeAdapter for FakeForgeAdapter {
+        async fn read_repository_file(
+            &self,
+            _: &domain::RepositoryRef,
+            _: &str,
+            _: Option<&str>,
+        ) -> Result<domain::ReadRepositoryFileResponse, forge::ForgeError> {
+            unimplemented!()
+        }
+        async fn create_change_request(
+            &self,
+            _: &domain::RepositoryRef,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+        ) -> Result<domain::ChangeRequest, forge::ForgeError> {
+            unimplemented!()
+        }
+        async fn list_change_requests(
+            &self,
+            _: &domain::RepositoryRef,
+            _: Option<&domain::ChangeRequestState>,
+        ) -> Result<Vec<domain::ChangeRequest>, forge::ForgeError> {
+            unimplemented!()
+        }
+        async fn get_change_request(
+            &self,
+            _: &domain::RepositoryRef,
+            _: u64,
+        ) -> Result<domain::ChangeRequest, forge::ForgeError> {
+            unimplemented!()
+        }
+    }
+
+    struct FakeReadService;
+
+    #[async_trait::async_trait]
+    impl domain::RepositoryReadService for FakeReadService {
+        async fn read_repository_file(
+            &self,
+            request: domain::ReadRepositoryFileRequest,
+        ) -> Result<ReadRepositoryFileResponse, ServiceError> {
+            Ok(ReadRepositoryFileResponse {
+                content: "file-content".to_string(),
+                git_ref: request.git_ref,
+                path: request.path,
+                repository: request.repository,
+            })
+        }
+
+        async fn list_change_requests(
+            &self,
+            _request: ListChangeRequestsRequest,
+        ) -> Result<Vec<ChangeRequest>, ServiceError> {
+            Ok(vec![])
+        }
+
+        async fn get_change_request(
+            &self,
+            request: GetChangeRequestRequest,
+        ) -> Result<ChangeRequest, ServiceError> {
+            Ok(ChangeRequest {
+                base_branch: "main".to_string(),
+                body: "body".to_string(),
+                head_branch: "agent/fix".to_string(),
+                index: request.index,
+                state: ChangeRequestState::Open,
+                title: "Fix".to_string(),
+                url: "https://example.com/pulls/1".to_string(),
+            })
+        }
+    }
+
+    struct FakeWriteService;
+
+    #[async_trait::async_trait]
+    impl domain::RepositoryWriteService for FakeWriteService {
+        async fn commit_patch(
+            &self,
+            request: domain::CommitPatchRequest,
+            _authorized: domain::policy::AuthorizedWrite,
+        ) -> Result<CommitPatchResponse, ServiceError> {
+            Ok(CommitPatchResponse {
+                branch: request.new_branch.clone(),
+                commit_sha: "abc123".to_string(),
+                repository: request.repository,
+            })
+        }
+
+        async fn open_change_request(
+            &self,
+            request: domain::OpenChangeRequestRequest,
+            _authorized: domain::policy::AuthorizedWrite,
+        ) -> Result<OpenChangeRequestResponse, ServiceError> {
+            Ok(OpenChangeRequestResponse {
+                change_request: ChangeRequest {
+                    base_branch: "main".to_string(),
+                    body: "body".to_string(),
+                    head_branch: "agent/fix".to_string(),
+                    index: 1,
+                    state: ChangeRequestState::Open,
+                    title: "Fix".to_string(),
+                    url: "https://example.com/pulls/1".to_string(),
+                },
+                repository: request.repository,
+            })
+        }
+    }
+
+    fn test_state_with_forge(base_url: &str) -> (AppState, Arc<audit::InMemoryAuditSink>) {
+        let configs = vec![crate::config::AgentConfig {
+            agent_id: "codex".to_string(),
+            policy: AgentPolicyConfig {
+                allowed_repos: vec!["test-forge/*".to_string()],
+                branch_prefix: Some("agent/".to_string()),
+                protected_paths: vec![],
+            },
+            session_id: "default".to_string(),
+            token: "test-token".to_string(),
+        }];
+
+        let audit_sink = Arc::new(audit::InMemoryAuditSink::new());
+
+        let mut forges = std::collections::HashMap::new();
+        forges.insert(
+            "test-forge".to_string(),
+            crate::registry::ForgeInstance {
+                adapter: Arc::new(FakeForgeAdapter),
+                alias: "test-forge".to_string(),
+                base_url: base_url.to_string(),
+                client: reqwest::Client::new(),
+                git_auth_user: String::new(),
+                read_service: Arc::new(FakeReadService),
+                token: Some("upstream-token".to_string()),
+                write_service: Arc::new(FakeWriteService),
+            },
+        );
+
+        let state = AppState {
+            agent_registry: AgentRegistry::from_configs(&configs),
+            audit_sink: Arc::clone(&audit_sink) as Arc<dyn audit::AuditSink>,
+            forge_registry: Arc::new(crate::registry::ForgeRegistry::new(forges)),
+        };
+        (state, audit_sink)
+    }
+
+    fn git_proxy_router(state: AppState) -> axum::Router {
+        crate::build_router(state, false)
+    }
+
+    #[tokio::test]
+    async fn info_refs_proxies_to_upstream() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/org/repo\.git/info/refs"))
+            .and(query_param("service", "git-upload-pack"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_bytes(b"001e# service=git-upload-pack\n" as &[u8])
+                    .insert_header(
+                        "content-type",
+                        "application/x-git-upload-pack-advertisement",
+                    ),
+            )
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let (state, audit_sink) = test_state_with_forge(&mock_server.uri());
+        let app = git_proxy_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/git/test-forge/org/repo.git/info/refs?service=git-upload-pack")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get("content-type").unwrap(),
+            "application/x-git-upload-pack-advertisement"
+        );
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(body.as_ref(), b"001e# service=git-upload-pack\n");
+
+        let records = audit_sink.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].action, "git_read");
+        assert_eq!(records[0].target, "info/refs");
+        assert_eq!(records[0].agent.agent_id, "codex");
+    }
+
+    #[tokio::test]
+    async fn receive_pack_rejected_returns_403() {
+        let mock_server = MockServer::start().await;
+        let (state, _) = test_state_with_forge(&mock_server.uri());
+        let app = git_proxy_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/git/test-forge/org/repo.git/git-receive-pack")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn info_refs_rejects_receive_pack_service() {
+        let mock_server = MockServer::start().await;
+        let (state, _) = test_state_with_forge(&mock_server.uri());
+        let app = git_proxy_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/git/test-forge/org/repo.git/info/refs?service=git-receive-pack")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn info_refs_rejects_unauthorized() {
+        let mock_server = MockServer::start().await;
+        let (state, _) = test_state_with_forge(&mock_server.uri());
+        let app = git_proxy_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/git/test-forge/org/repo.git/info/refs?service=git-upload-pack")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn info_refs_rejects_disallowed_repo() {
+        let configs = vec![crate::config::AgentConfig {
+            agent_id: "codex".to_string(),
+            policy: AgentPolicyConfig {
+                allowed_repos: vec!["test-forge/org/allowed-only".to_string()],
+                branch_prefix: Some("agent/".to_string()),
+                protected_paths: vec![],
+            },
+            session_id: "default".to_string(),
+            token: "test-token".to_string(),
+        }];
+
+        let mock_server = MockServer::start().await;
+        let audit_sink = Arc::new(audit::InMemoryAuditSink::new());
+
+        let mut forges = std::collections::HashMap::new();
+        forges.insert(
+            "test-forge".to_string(),
+            crate::registry::ForgeInstance {
+                adapter: Arc::new(FakeForgeAdapter),
+                alias: "test-forge".to_string(),
+                base_url: mock_server.uri(),
+                client: reqwest::Client::new(),
+                git_auth_user: String::new(),
+                read_service: Arc::new(FakeReadService),
+                token: Some("upstream-token".to_string()),
+                write_service: Arc::new(FakeWriteService),
+            },
+        );
+
+        let state = AppState {
+            agent_registry: AgentRegistry::from_configs(&configs),
+            audit_sink: Arc::clone(&audit_sink) as Arc<dyn audit::AuditSink>,
+            forge_registry: Arc::new(crate::registry::ForgeRegistry::new(forges)),
+        };
+        let app = git_proxy_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/git/test-forge/org/secret-repo.git/info/refs?service=git-upload-pack")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
 }
