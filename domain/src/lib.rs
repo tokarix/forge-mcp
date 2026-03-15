@@ -49,11 +49,21 @@ pub struct ReadRepositoryFileResponse {
 pub struct ChangeRequest {
     pub base_branch: String,
     pub body: String,
+    pub changed_files_count: Option<u64>,
+    pub commit_count: Option<u64>,
     pub head_branch: String,
+    pub head_sha: Option<String>,
     pub index: u64,
+    pub merge_base_sha: Option<String>,
     pub state: ChangeRequestState,
     pub title: String,
     pub url: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ChangeRequestDiff {
+    pub index: u64,
+    pub patch: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -77,6 +87,13 @@ pub struct CommitPatchRequest {
 pub struct CommitPatchResponse {
     pub branch: String,
     pub commit_sha: String,
+    pub repository: RepositoryRef,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GetChangeRequestDiffRequest {
+    pub agent: AgentIdentity,
+    pub index: u64,
     pub repository: RepositoryRef,
 }
 
@@ -158,6 +175,17 @@ pub enum ServiceError {
 
 #[async_trait]
 pub trait RepositoryReadService: Send + Sync {
+    /// Retrieves the unified diff for a change request.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the upstream forge request fails or audit
+    /// recording fails.
+    async fn get_change_request_diff(
+        &self,
+        request: GetChangeRequestDiffRequest,
+    ) -> Result<ChangeRequestDiff, ServiceError>;
+
     /// Retrieves a single change request by index.
     ///
     /// # Errors
@@ -227,8 +255,12 @@ mod tests {
         let cr = ChangeRequest {
             base_branch: "main".to_string(),
             body: "fix".to_string(),
+            changed_files_count: None,
+            commit_count: None,
             head_branch: "agent/fix".to_string(),
+            head_sha: None,
             index: 1,
+            merge_base_sha: None,
             state: ChangeRequestState::Open,
             title: "Fix".to_string(),
             url: "https://example.com/pulls/1".to_string(),

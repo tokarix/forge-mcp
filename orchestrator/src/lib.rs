@@ -5,8 +5,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use audit::{AuditRecord, AuditSink};
 use domain::{
-    ChangeRequest, GetChangeRequestRequest, ListChangeRequestsRequest, ReadRepositoryFileRequest,
-    ReadRepositoryFileResponse, RepositoryReadService, ServiceError, validate_repository_path,
+    ChangeRequest, ChangeRequestDiff, GetChangeRequestDiffRequest, GetChangeRequestRequest,
+    ListChangeRequestsRequest, ReadRepositoryFileRequest, ReadRepositoryFileResponse,
+    RepositoryReadService, ServiceError, validate_repository_path,
 };
 use forge::ForgeAdapter;
 
@@ -39,6 +40,32 @@ where
     A: ForgeAdapter,
     S: AuditSink,
 {
+    async fn get_change_request_diff(
+        &self,
+        request: GetChangeRequestDiffRequest,
+    ) -> Result<ChangeRequestDiff, ServiceError> {
+        self.audit_sink
+            .record(AuditRecord {
+                agent: request.agent,
+                action: "get_change_request_diff".to_string(),
+                repository: request.repository.clone(),
+                target: request.index.to_string(),
+            })
+            .await
+            .map_err(|e| ServiceError::Audit(e.to_string()))?;
+
+        let patch = self
+            .adapter
+            .get_change_request_diff(&request.repository, request.index)
+            .await
+            .map_err(|e| ServiceError::Upstream(e.to_string()))?;
+
+        Ok(ChangeRequestDiff {
+            index: request.index,
+            patch,
+        })
+    }
+
     async fn get_change_request(
         &self,
         request: GetChangeRequestRequest,
@@ -338,6 +365,14 @@ mod tests {
             unimplemented!()
         }
 
+        async fn get_change_request_diff(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+        ) -> Result<String, ForgeError> {
+            unimplemented!()
+        }
+
         async fn list_change_requests(
             &self,
             _repository: &RepositoryRef,
@@ -376,6 +411,14 @@ mod tests {
             _head_branch: &str,
             _base_branch: &str,
         ) -> Result<ChangeRequest, ForgeError> {
+            unimplemented!()
+        }
+
+        async fn get_change_request_diff(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+        ) -> Result<String, ForgeError> {
             unimplemented!()
         }
 
@@ -506,8 +549,12 @@ mod tests {
             Ok(ChangeRequest {
                 base_branch: base_branch.to_string(),
                 body: body.to_string(),
+                changed_files_count: None,
+                commit_count: None,
                 head_branch: head_branch.to_string(),
+                head_sha: None,
                 index: 1,
+                merge_base_sha: None,
                 state: ChangeRequestState::Open,
                 title: title.to_string(),
                 url: format!(
@@ -515,6 +562,14 @@ mod tests {
                     repository.owner, repository.name
                 ),
             })
+        }
+
+        async fn get_change_request_diff(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+        ) -> Result<String, ForgeError> {
+            unimplemented!()
         }
 
         async fn list_change_requests(

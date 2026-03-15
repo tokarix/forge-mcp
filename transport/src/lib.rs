@@ -45,7 +45,7 @@ pub struct CommitPatchTool {
     pub base_branch: String,
     /// Commit message.
     pub commit_message: String,
-    /// Forge alias (e.g. "internal").
+    /// Forge alias -- use `forge_info` to discover available aliases.
     pub forge: String,
     /// New branch name (must start with "agent/").
     pub new_branch: String,
@@ -58,8 +58,20 @@ pub struct CommitPatchTool {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct GetChangeRequestDiffTool {
+    /// Forge alias -- use `forge_info` to discover available aliases.
+    pub forge: String,
+    /// Change request index number.
+    pub index: u64,
+    /// Repository owner or organization.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct GetChangeRequestTool {
-    /// Forge alias (e.g. "internal").
+    /// Forge alias -- use `forge_info` to discover available aliases.
     pub forge: String,
     /// Change request index number.
     pub index: u64,
@@ -71,7 +83,7 @@ pub struct GetChangeRequestTool {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ListChangeRequestsTool {
-    /// Forge alias (e.g. "internal").
+    /// Forge alias -- use `forge_info` to discover available aliases.
     pub forge: String,
     /// Repository owner or organization.
     pub owner: String,
@@ -87,7 +99,7 @@ pub struct OpenChangeRequestTool {
     pub base_branch: String,
     /// Description body.
     pub body: String,
-    /// Forge alias (e.g. "internal").
+    /// Forge alias -- use `forge_info` to discover available aliases.
     pub forge: String,
     /// Head branch with the changes.
     pub head_branch: String,
@@ -101,7 +113,7 @@ pub struct OpenChangeRequestTool {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ReadRepositoryFileTool {
-    /// Forge alias (e.g. "internal").
+    /// Forge alias -- use `forge_info` to discover available aliases.
     pub forge: String,
     /// Optional git ref such as a branch, tag, or commit SHA.
     pub git_ref: Option<String>,
@@ -243,6 +255,29 @@ impl McpShim {
             "patch": request.patch,
         });
         self.gateway_post(url, &body).await
+    }
+
+    /// Get the unified diff for a change request.
+    #[tool(
+        name = "get_change_request_diff",
+        description = "Get the unified diff (patch) for a change request (pull request)."
+    )]
+    async fn get_change_request_diff(
+        &self,
+        Parameters(request): Parameters<GetChangeRequestDiffTool>,
+    ) -> Result<String, McpError> {
+        let url = self.build_url(&[
+            "api",
+            "v1",
+            "repos",
+            &request.forge,
+            &request.owner,
+            &request.repo,
+            "pulls",
+            &request.index.to_string(),
+            "diff",
+        ])?;
+        self.gateway_get(url).await
     }
 
     /// Get a single change request by index.

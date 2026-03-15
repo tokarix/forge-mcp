@@ -422,6 +422,13 @@ mod tests {
         ) -> Result<domain::ChangeRequest, forge::ForgeError> {
             unimplemented!()
         }
+        async fn get_change_request_diff(
+            &self,
+            _: &domain::RepositoryRef,
+            _: u64,
+        ) -> Result<String, forge::ForgeError> {
+            unimplemented!()
+        }
         async fn list_change_requests(
             &self,
             _: &domain::RepositoryRef,
@@ -454,6 +461,13 @@ mod tests {
             })
         }
 
+        async fn get_change_request_diff(
+            &self,
+            _request: domain::GetChangeRequestDiffRequest,
+        ) -> Result<domain::ChangeRequestDiff, ServiceError> {
+            unimplemented!()
+        }
+
         async fn list_change_requests(
             &self,
             _request: ListChangeRequestsRequest,
@@ -468,8 +482,12 @@ mod tests {
             Ok(ChangeRequest {
                 base_branch: "main".to_string(),
                 body: "body".to_string(),
+                changed_files_count: None,
+                commit_count: None,
                 head_branch: "agent/fix".to_string(),
+                head_sha: None,
                 index: request.index,
+                merge_base_sha: None,
                 state: ChangeRequestState::Open,
                 title: "Fix".to_string(),
                 url: "https://example.com/pulls/1".to_string(),
@@ -502,8 +520,12 @@ mod tests {
                 change_request: ChangeRequest {
                     base_branch: "main".to_string(),
                     body: "body".to_string(),
+                    changed_files_count: None,
+                    commit_count: None,
                     head_branch: "agent/fix".to_string(),
+                    head_sha: None,
                     index: 1,
+                    merge_base_sha: None,
                     state: ChangeRequestState::Open,
                     title: "Fix".to_string(),
                     url: "https://example.com/pulls/1".to_string(),

@@ -170,6 +170,51 @@ pub async fn get_contents(
 
 #[utoipa::path(
     get,
+    path = "/api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}/diff",
+    params(
+        ("forge" = String, Path, description = "Forge alias"),
+        ("owner" = String, Path, description = "Repository owner"),
+        ("repo" = String, Path, description = "Repository name"),
+        ("index" = u64, Path, description = "Pull request index"),
+    ),
+    responses(
+        (status = 200, description = "Unified diff for the change request"),
+        (status = 401, description = "Unauthorized", body = ErrorBody),
+    ),
+    security(("bearer" = []))
+)]
+/// GET /api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}/diff
+pub async fn get_pull_diff(
+    State(state): State<AppState>,
+    Path(path): Path<PullPath>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let forge = resolve_forge(&state.forge_registry, &path.forge)?;
+    let (identity, _policy) = resolve_agent(
+        &headers,
+        &state.agent_registry,
+        &path.forge,
+        &path.owner,
+        &path.repo,
+    )?;
+
+    let result = forge
+        .read_service
+        .get_change_request_diff(domain::GetChangeRequestDiffRequest {
+            agent: identity,
+            index: path.index,
+            repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
+        })
+        .await
+        .map_err(map_service_error)?;
+
+    Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(
+        serde_json::to_value(&result).expect("serializable"),
+    ))
+}
+
+#[utoipa::path(
+    get,
     path = "/api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}",
     params(
         ("forge" = String, Path, description = "Forge alias"),
@@ -527,6 +572,13 @@ mod tests {
         ) -> Result<domain::ChangeRequest, forge::ForgeError> {
             unimplemented!()
         }
+        async fn get_change_request_diff(
+            &self,
+            _: &domain::RepositoryRef,
+            _: u64,
+        ) -> Result<String, forge::ForgeError> {
+            unimplemented!()
+        }
         async fn list_change_requests(
             &self,
             _: &domain::RepositoryRef,
@@ -559,6 +611,13 @@ mod tests {
             })
         }
 
+        async fn get_change_request_diff(
+            &self,
+            _request: domain::GetChangeRequestDiffRequest,
+        ) -> Result<domain::ChangeRequestDiff, ServiceError> {
+            unimplemented!()
+        }
+
         async fn list_change_requests(
             &self,
             _request: ListChangeRequestsRequest,
@@ -573,8 +632,12 @@ mod tests {
             Ok(ChangeRequest {
                 base_branch: "main".to_string(),
                 body: "body".to_string(),
+                changed_files_count: None,
+                commit_count: None,
                 head_branch: "agent/fix".to_string(),
+                head_sha: None,
                 index: request.index,
+                merge_base_sha: None,
                 state: ChangeRequestState::Open,
                 title: "Fix".to_string(),
                 url: "https://example.com/pulls/1".to_string(),
@@ -607,8 +670,12 @@ mod tests {
                 change_request: ChangeRequest {
                     base_branch: "main".to_string(),
                     body: "body".to_string(),
+                    changed_files_count: None,
+                    commit_count: None,
                     head_branch: "agent/fix".to_string(),
+                    head_sha: None,
                     index: 1,
+                    merge_base_sha: None,
                     state: ChangeRequestState::Open,
                     title: "Fix".to_string(),
                     url: "https://example.com/pulls/1".to_string(),

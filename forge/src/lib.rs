@@ -53,6 +53,13 @@ pub trait ForgeAdapter: Send + Sync {
         state: Option<&ChangeRequestState>,
     ) -> Result<Vec<ChangeRequest>, ForgeError>;
 
+    /// Gets the unified diff for a change request.
+    async fn get_change_request_diff(
+        &self,
+        repository: &RepositoryRef,
+        index: u64,
+    ) -> Result<String, ForgeError>;
+
     /// Gets a single change request by index.
     async fn get_change_request(
         &self,
@@ -107,14 +114,17 @@ struct ForgejoContentsResponse {
 struct ForgejoPullBranch {
     #[serde(rename = "ref")]
     ref_name: String,
+    sha: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct ForgejoPullRequest {
     base: ForgejoPullBranch,
     body: Option<String>,
+    changed_files: Option<u64>,
     head: ForgejoPullBranch,
     html_url: String,
+    merge_base: Option<String>,
     merged: bool,
     number: u64,
     state: String,
@@ -134,8 +144,12 @@ impl ForgejoPullRequest {
         ChangeRequest {
             base_branch: self.base.ref_name,
             body: self.body.unwrap_or_default(),
+            changed_files_count: self.changed_files,
+            commit_count: None,
             head_branch: self.head.ref_name,
+            head_sha: Some(self.head.sha),
             index: self.number,
+            merge_base_sha: self.merge_base,
             state,
             title: self.title,
             url: self.html_url,
@@ -283,6 +297,36 @@ impl ForgeAdapter for ForgejoAdapter {
             .into_iter()
             .map(ForgejoPullRequest::into_change_request)
             .collect())
+    }
+
+    async fn get_change_request_diff(
+        &self,
+        repository: &RepositoryRef,
+        index: u64,
+    ) -> Result<String, ForgeError> {
+        let url = format!(
+            "{}/api/v1/repos/{}/{}/pulls/{index}.diff",
+            self.config.base_url.trim_end_matches('/'),
+            repository.owner,
+            repository.name,
+        );
+
+        let mut request = self.client.get(&url);
+        if let Some(token) = &self.config.token {
+            request = request.bearer_auth(token);
+        }
+
+        let response = request.send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(ForgeError::UnexpectedStatus { status, body });
+        }
+
+        response
+            .text()
+            .await
+            .map_err(|e| ForgeError::InvalidPayload(format!("failed to read diff body: {e}")))
     }
 
     async fn get_change_request(

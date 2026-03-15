@@ -19,6 +19,7 @@ use utoipa_scalar::{Scalar, Servable};
     paths(
         handlers::get_contents,
         handlers::get_pull,
+        handlers::get_pull_diff,
         handlers::list_pulls,
         handlers::post_patches,
         handlers::post_pulls,
@@ -74,6 +75,10 @@ pub fn build_router(state: AppState, enable_docs: bool) -> Router {
         .route(
             "/api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}",
             get(handlers::get_pull),
+        )
+        .route(
+            "/api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}/diff",
+            get(handlers::get_pull_diff),
         )
         .route(
             "/git/{forge}/{owner}/{repo}/git-receive-pack",
