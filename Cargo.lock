@@ -1628,6 +1628,7 @@ dependencies = [
  "tower",
  "utoipa",
  "utoipa-scalar",
+ "wiremock",
 ]
 
 [[package]]
