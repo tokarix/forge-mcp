@@ -189,7 +189,19 @@ pub fn validate_config(config: &ServerConfig) -> Result<(), String> {
             if pattern == "*" {
                 continue;
             }
-            let forge_part = pattern.split('/').next().unwrap_or("");
+            // Validate pattern shape: alias/*, alias/owner/*, or alias/owner/repo
+            let parts: Vec<&str> = pattern.splitn(3, '/').collect();
+            match parts.as_slice() {
+                [_alias, _] | [_alias, _, _] => {}
+                _ => {
+                    return Err(format!(
+                        "agent '{}' has malformed allowed_repos pattern '{pattern}' \
+                         (expected alias/*, alias/owner/*, or alias/owner/repo)",
+                        agent.agent_id
+                    ));
+                }
+            }
+            let forge_part = parts[0];
             if forge_part != "*" && !seen_aliases.contains(&forge_part.to_string()) {
                 return Err(format!(
                     "agent '{}' references unknown forge alias '{forge_part}' in allowed_repos pattern '{pattern}'",
@@ -517,6 +529,31 @@ session_id = "s"
             policy.allowed_forge_aliases(),
             AllowedForges::Specific(std::collections::HashSet::new())
         );
+    }
+
+    #[test]
+    fn rejects_malformed_allowed_repos_pattern() {
+        let toml_str = r#"
+[server]
+listen = "0.0.0.0:8443"
+
+[[forges]]
+alias = "internal"
+type = "forgejo"
+base_url = "https://a.example"
+
+[[agents]]
+token = "t"
+agent_id = "a"
+session_id = "s"
+
+[agents.policy]
+allowed_repos = ["internal"]
+"#;
+        let config = parse_config(toml_str).expect("should parse");
+        let err = validate_config(&config).expect_err("should reject bare alias");
+        assert!(err.contains("malformed"));
+        assert!(err.contains("internal"));
     }
 
     #[test]
