@@ -361,9 +361,18 @@ impl McpShim {
 impl ServerHandler for McpShim {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_instructions(
-                "MCP shim for forge-mcp control plane. Proxies tool calls to the HTTP API.",
-            )
+            .with_instructions(format!(
+                "MCP shim for forge-mcp control plane. Proxies tool calls to the HTTP API.\n\
+                 \n\
+                 Git clone/fetch: the gateway provides a read-only git smart HTTP proxy.\n\
+                 URL: {gateway_url}/git/{{forge}}/{{owner}}/{{repo}}\n\
+                 Auth: HTTP Basic -- any non-empty username, password is your agent token.\n\
+                 git push is blocked -- use the commit_patch tool instead.\n\
+                 \n\
+                 Write workflow: clone via git proxy, make changes, generate a unified diff,\n\
+                 submit via commit_patch, then open a PR via open_change_request.",
+                gateway_url = self.config.gateway_url.trim_end_matches('/'),
+            ))
             .with_server_info(Implementation::new(
                 self.config.server_name.clone(),
                 self.config.server_version.clone(),
