@@ -14,7 +14,7 @@ use axum::{
 use serde::Deserialize;
 
 use crate::api::ErrorBody;
-use crate::auth::{ResolvedAgent, extract_bearer_token};
+use crate::auth::{ResolvedAgent, extract_token};
 use crate::handlers::AppState;
 use crate::registry::ForgeInstance;
 
@@ -84,13 +84,13 @@ fn resolve_agent_and_forge<'a>(
     path: &GitRepoPath,
     repo_name: &str,
 ) -> Result<(&'a ResolvedAgent, &'a ForgeInstance), Response> {
-    let Some(token) = extract_bearer_token(headers) else {
+    let Some(token) = extract_token(headers) else {
         return Err(error_response(
             StatusCode::UNAUTHORIZED,
             "missing Authorization header",
         ));
     };
-    let Some(agent) = state.agent_registry.resolve(token) else {
+    let Some(agent) = state.agent_registry.resolve(&token) else {
         return Err(error_response(
             StatusCode::UNAUTHORIZED,
             "invalid bearer token",

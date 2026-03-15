@@ -1617,6 +1617,7 @@ dependencies = [
  "async-trait",
  "audit",
  "axum",
+ "base64",
  "domain",
  "forge",
  "orchestrator",

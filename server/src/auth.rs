@@ -13,6 +13,37 @@ pub fn extract_bearer_token(headers: &axum::http::HeaderMap) -> Option<&str> {
         .and_then(|v| v.strip_prefix("Bearer "))
 }
 
+/// Extracts an agent token from either Bearer or Basic auth.
+///
+/// Git clients send Basic auth (`Authorization: Basic base64(user:pass)`),
+/// so the git proxy needs to accept the password field as the agent token.
+/// Returns an owned `String` because the Basic auth password is decoded
+/// from base64, not borrowed from the header value.
+#[must_use]
+pub fn extract_token(headers: &axum::http::HeaderMap) -> Option<String> {
+    let value = headers.get("authorization").and_then(|v| v.to_str().ok())?;
+
+    if let Some(bearer) = value.strip_prefix("Bearer ") {
+        return Some(bearer.to_string());
+    }
+
+    if let Some(basic) = value.strip_prefix("Basic ") {
+        use base64::Engine;
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(basic.trim())
+            .ok()?;
+        let decoded_str = String::from_utf8(decoded).ok()?;
+        // Format is "user:password" — the password is the agent token
+        let password = decoded_str.split_once(':').map(|(_, p)| p)?;
+        if password.is_empty() {
+            return None;
+        }
+        return Some(password.to_string());
+    }
+
+    None
+}
+
 /// Resolved agent identity and policy from a bearer token.
 #[derive(Clone, Debug)]
 pub struct ResolvedAgent {
@@ -100,6 +131,38 @@ mod tests {
     fn returns_none_for_empty_token() {
         let registry = AgentRegistry::from_configs(&test_configs());
         assert!(registry.resolve("").is_none());
+    }
+
+    #[test]
+    fn extract_token_from_bearer() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("authorization", "Bearer my-token".parse().unwrap());
+        assert_eq!(extract_token(&headers).as_deref(), Some("my-token"));
+    }
+
+    #[test]
+    fn extract_token_from_basic_auth() {
+        use base64::Engine;
+        // Git sends Basic auth with user:password — password is the agent token
+        let encoded = base64::engine::general_purpose::STANDARD.encode("git:my-token");
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("authorization", format!("Basic {encoded}").parse().unwrap());
+        assert_eq!(extract_token(&headers).as_deref(), Some("my-token"));
+    }
+
+    #[test]
+    fn extract_token_rejects_basic_with_empty_password() {
+        use base64::Engine;
+        let encoded = base64::engine::general_purpose::STANDARD.encode("git:");
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("authorization", format!("Basic {encoded}").parse().unwrap());
+        assert!(extract_token(&headers).is_none());
+    }
+
+    #[test]
+    fn extract_token_returns_none_without_header() {
+        let headers = axum::http::HeaderMap::new();
+        assert!(extract_token(&headers).is_none());
     }
 
     #[test]
