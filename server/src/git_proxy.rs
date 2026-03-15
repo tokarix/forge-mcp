@@ -38,6 +38,32 @@ pub struct InfoRefsQuery {
     pub service: Option<String>,
 }
 
+/// Builds an upstream git URL using safe path-segment encoding.
+///
+/// Constructs `{base_url}/{owner}/{repo}.git/{suffix_segments...}` using
+/// `reqwest::Url::path_segments_mut()` to prevent path injection from
+/// user-controlled owner/repo values.
+fn build_upstream_url(
+    base_url: &str,
+    owner: &str,
+    repo_name: &str,
+    suffix_segments: &[&str],
+) -> Result<reqwest::Url, String> {
+    let mut url =
+        reqwest::Url::parse(base_url).map_err(|e| format!("invalid forge base URL: {e}"))?;
+    {
+        let mut segments = url
+            .path_segments_mut()
+            .map_err(|()| "forge base URL cannot-be-a-base".to_string())?;
+        segments.push(owner);
+        segments.push(&format!("{repo_name}.git"));
+        for s in suffix_segments {
+            segments.push(s);
+        }
+    }
+    Ok(url)
+}
+
 fn error_response(status: StatusCode, message: &str) -> Response {
     let body = serde_json::to_string(&ErrorBody {
         error: message.to_string(),
@@ -162,16 +188,21 @@ pub async fn info_refs(
         return resp;
     }
 
-    // Build upstream URL
-    let upstream_url = format!(
-        "{}/{}/{}.git/info/refs?service={service}",
-        forge.base_url.trim_end_matches('/'),
-        path.owner,
-        repo_name,
-    );
+    // Build upstream URL using Url builder to prevent path injection
+    let upstream_url =
+        build_upstream_url(&forge.base_url, &path.owner, repo_name, &["info", "refs"]).map(
+            |mut u| {
+                u.query_pairs_mut().append_pair("service", service);
+                u
+            },
+        );
+    let upstream_url = match upstream_url {
+        Ok(u) => u,
+        Err(e) => return error_response(StatusCode::BAD_REQUEST, &e),
+    };
 
     // Proxy request — use HTTP Basic auth for git smart HTTP transport
-    let mut upstream_req = forge.client.get(&upstream_url);
+    let mut upstream_req = forge.client.get(upstream_url);
     if let Some(ref token) = forge.token {
         upstream_req = upstream_req.basic_auth(&forge.git_auth_user, Some(token));
     }
@@ -221,13 +252,17 @@ pub async fn upload_pack(
         return resp;
     }
 
-    // Build upstream URL
-    let upstream_url = format!(
-        "{}/{}/{}.git/git-upload-pack",
-        forge.base_url.trim_end_matches('/'),
-        path.owner,
+    // Build upstream URL using Url builder to prevent path injection
+    let upstream_url = build_upstream_url(
+        &forge.base_url,
+        &path.owner,
         repo_name,
+        &["git-upload-pack"],
     );
+    let upstream_url = match upstream_url {
+        Ok(u) => u,
+        Err(e) => return error_response(StatusCode::BAD_REQUEST, &e),
+    };
 
     // Stream request body to upstream
     let body_stream = body.into_data_stream();
@@ -236,7 +271,7 @@ pub async fn upload_pack(
     // Use HTTP Basic auth for git smart HTTP transport
     let mut upstream_req = forge
         .client
-        .post(&upstream_url)
+        .post(upstream_url)
         .header("content-type", "application/x-git-upload-pack-request")
         .body(reqwest_body);
     if let Some(ref token) = forge.token {
@@ -299,6 +334,44 @@ mod tests {
             repo: "repo".to_string(),
         };
         assert_eq!(path.repo_name(), "repo");
+    }
+
+    #[test]
+    fn build_upstream_url_encodes_reserved_characters() {
+        let url =
+            build_upstream_url("https://forge.example", "org", "repo", &["info", "refs"]).unwrap();
+        assert_eq!(url.as_str(), "https://forge.example/org/repo.git/info/refs");
+    }
+
+    #[test]
+    fn build_upstream_url_encodes_path_traversal() {
+        let url = build_upstream_url(
+            "https://forge.example",
+            "org/../admin",
+            "repo",
+            &["info", "refs"],
+        )
+        .unwrap();
+        // The "/" and ".." within the owner are percent-encoded as a single segment,
+        // not resolved as path traversal
+        assert!(url.as_str().contains("org%2F..%2Fadmin"));
+    }
+
+    #[test]
+    fn build_upstream_url_encodes_query_injection() {
+        let url = build_upstream_url(
+            "https://forge.example",
+            "org",
+            "repo?evil=1#frag",
+            &["git-upload-pack"],
+        )
+        .unwrap();
+        // Query and fragment characters are percent-encoded within the path segment
+        assert!(url.as_str().contains("%3F"));
+        assert!(url.as_str().contains("%23"));
+        // No raw query or fragment was injected
+        assert!(url.query().is_none());
+        assert!(url.fragment().is_none());
     }
 
     use std::sync::Arc;
