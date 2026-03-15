@@ -31,11 +31,11 @@ The proxy is **read-only**. `git push` is blocked — use the `commit_patch` MCP
 **URL pattern:** `<scheme>://<gateway-host>:<port>/git/{forge}/{owner}/{repo}`
 
 ```bash
+# Cache credentials in memory globally (default 15 min, avoids plaintext on disk)
+git config --global credential.helper cache
+
 # Clone through the gateway (use https:// if behind a TLS reverse proxy)
 git clone http://gateway:8443/git/myforge/org/repo
-
-# Cache credentials in memory (default 15 min, avoids plaintext on disk)
-git config credential.helper cache
 ```
 
 ## MCP Tools

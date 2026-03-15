@@ -355,6 +355,32 @@ impl McpShim {
             .map(ToString::to_string)
             .ok_or_else(|| McpError::internal_error("missing content field".to_string(), None))
     }
+
+    /// Discover available forges, gateway URL, git proxy pattern, and auth.
+    #[tool(
+        name = "forge_info",
+        description = "Discover available forge instances, gateway URL, git proxy URL template, and authentication details. Call this first to learn which forges you can access and how to clone repositories."
+    )]
+    async fn forge_info(&self) -> Result<String, McpError> {
+        let url = self.build_url(&["api", "v1", "agent", "info"])?;
+        let response = self.gateway_get(url).await?;
+
+        let mut parsed: serde_json::Value = serde_json::from_str(&response)
+            .map_err(|e| McpError::internal_error(format!("invalid JSON response: {e}"), None))?;
+
+        let gateway_url = self.config.gateway_url.trim_end_matches('/');
+        parsed["gateway_url"] = serde_json::Value::String(gateway_url.to_string());
+        parsed["git_url_template"] =
+            serde_json::Value::String(format!("{gateway_url}/git/{{forge}}/{{owner}}/{{repo}}"));
+        parsed["git_auth"] = serde_json::json!({
+            "scheme": "basic",
+            "username": "any non-empty value",
+            "password_source": "agent_token"
+        });
+
+        serde_json::to_string_pretty(&parsed)
+            .map_err(|e| McpError::internal_error(format!("JSON serialization failed: {e}"), None))
+    }
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -372,8 +398,9 @@ impl ServerHandler for McpShim {
                  Write workflow: clone via git proxy, make changes, generate a unified diff,\n\
                  submit via commit_patch, then open a PR via open_change_request.\n\
                  \n\
-                 Never commit to the default branch directly. Work on agent/ branches\n\
-                 and submit all changes via commit_patch + open_change_request.",
+                 Never commit to the default branch directly. Work on branches matching\n\
+                 your configured branch_prefix and submit via commit_patch + open_change_request.\n\
+                 Use forge_info to discover your available forges.",
                 gateway_url = self.config.gateway_url.trim_end_matches('/'),
             ))
             .with_server_info(Implementation::new(
