@@ -136,11 +136,21 @@ pub fn validate_forge_alias(alias: &str) -> Result<(), String> {
 ///
 /// Returns a description of the first validation error found.
 pub fn validate_config(config: &ServerConfig) -> Result<(), String> {
+    const SUPPORTED_FORGE_TYPES: &[&str] = &["forgejo"];
+
     let mut seen_aliases = std::collections::HashSet::new();
     for forge in &config.forges {
         validate_forge_alias(&forge.alias)?;
         if !seen_aliases.insert(&forge.alias) {
             return Err(format!("duplicate forge alias '{}'", forge.alias));
+        }
+        if !SUPPORTED_FORGE_TYPES.contains(&forge.forge_type.as_str()) {
+            return Err(format!(
+                "unsupported forge type '{}' for alias '{}' (supported: {})",
+                forge.forge_type,
+                forge.alias,
+                SUPPORTED_FORGE_TYPES.join(", ")
+            ));
         }
     }
 
@@ -408,6 +418,30 @@ session_id = "s"
 [agents.policy]
 "#;
         assert!(parse_config(toml_str).is_err());
+    }
+
+    #[test]
+    fn rejects_unsupported_forge_type() {
+        let toml_str = r#"
+[server]
+listen = "0.0.0.0:8443"
+
+[[forges]]
+alias = "internal"
+type = "gitlab"
+base_url = "https://a.example"
+
+[[agents]]
+token = "t"
+agent_id = "a"
+session_id = "s"
+
+[agents.policy]
+"#;
+        let config = parse_config(toml_str).expect("should parse");
+        let err = validate_config(&config).expect_err("should reject unknown type");
+        assert!(err.contains("unsupported forge type 'gitlab'"));
+        assert!(err.contains("internal"));
     }
 
     #[test]
