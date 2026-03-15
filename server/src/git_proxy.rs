@@ -64,6 +64,21 @@ fn build_upstream_url(
     Ok(url)
 }
 
+/// Returns a 401 response with `WWW-Authenticate: Basic` so that git
+/// clients know to retry with credentials.
+fn auth_challenge(message: &str) -> Response {
+    let body = serde_json::to_string(&ErrorBody {
+        error: message.to_string(),
+    })
+    .unwrap_or_else(|_| format!("{{\"error\":\"{message}\"}}"));
+    Response::builder()
+        .status(StatusCode::UNAUTHORIZED)
+        .header("www-authenticate", "Basic realm=\"forge-mcp\"")
+        .header("content-type", "application/json")
+        .body(Body::from(body))
+        .unwrap()
+}
+
 fn error_response(status: StatusCode, message: &str) -> Response {
     let body = serde_json::to_string(&ErrorBody {
         error: message.to_string(),
@@ -85,16 +100,10 @@ fn resolve_agent_and_forge<'a>(
     repo_name: &str,
 ) -> Result<(&'a ResolvedAgent, &'a ForgeInstance), Response> {
     let Some(token) = extract_token(headers) else {
-        return Err(error_response(
-            StatusCode::UNAUTHORIZED,
-            "missing Authorization header",
-        ));
+        return Err(auth_challenge("missing Authorization header"));
     };
     let Some(agent) = state.agent_registry.resolve(&token) else {
-        return Err(error_response(
-            StatusCode::UNAUTHORIZED,
-            "invalid bearer token",
-        ));
+        return Err(auth_challenge("invalid token"));
     };
 
     if !agent
