@@ -5,6 +5,7 @@
 pub mod api;
 pub mod auth;
 pub mod config;
+pub mod git_proxy;
 pub mod handlers;
 pub mod registry;
 
@@ -72,6 +73,18 @@ pub fn build_router(state: AppState, enable_docs: bool) -> Router {
         .route(
             "/api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}",
             get(handlers::get_pull),
+        )
+        .route(
+            "/git/{forge}/{owner}/{repo}/git-receive-pack",
+            post(git_proxy::receive_pack_rejected),
+        )
+        .route(
+            "/git/{forge}/{owner}/{repo}/git-upload-pack",
+            post(git_proxy::upload_pack),
+        )
+        .route(
+            "/git/{forge}/{owner}/{repo}/info/refs",
+            get(git_proxy::info_refs),
         );
 
     if enable_docs {
