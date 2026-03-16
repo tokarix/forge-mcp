@@ -205,6 +205,15 @@ where
             });
         }
 
+        // 2b. Safety: existing_branch requires a configured branch_prefix
+        if request.existing_branch && authorized.policy.branch_prefix.is_none() {
+            return Err(ServiceError::PolicyDenied {
+                reasons: "existing_branch requires a configured branch_prefix to prevent \
+                          writes to unscoped branches"
+                    .to_string(),
+            });
+        }
+
         // 3. Audit intent
         self.audit_sink
             .record(AuditRecord {
@@ -223,7 +232,12 @@ where
             request.repository.owner,
             request.repository.name,
         );
-        let base_branch = request.base_branch.clone();
+        let clone_branch = if request.existing_branch {
+            request.new_branch.clone()
+        } else {
+            request.base_branch.clone()
+        };
+        let existing = request.existing_branch;
         let patch = request.patch.clone();
         let new_branch = request.new_branch.clone();
         let commit_message = request.commit_message.clone();
@@ -232,8 +246,10 @@ where
 
         let git_result = tokio::task::spawn_blocking(move || {
             let workspace =
-                git_exec::GitWorkspace::clone_repo(&clone_url, &base_branch, token.as_deref())?;
-            workspace.create_branch(&new_branch)?;
+                git_exec::GitWorkspace::clone_repo(&clone_url, &clone_branch, token.as_deref())?;
+            if !existing {
+                workspace.create_branch(&new_branch)?;
+            }
             workspace.apply_patch(&patch)?;
             let result =
                 workspace.commit(&commit_message, &agent_id, &format!("{agent_id}@forge-mcp"))?;
@@ -597,6 +613,7 @@ mod tests {
             },
             base_branch: "main".to_string(),
             commit_message: "test commit".to_string(),
+            existing_branch: false,
             new_branch: "agent/test-fix".to_string(),
             patch: "\
 diff --git a/README.md b/README.md
@@ -720,6 +737,31 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
 
         assert!(matches!(err, ServiceError::PolicyDenied { .. }));
         assert_eq!(audit.records().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn commit_patch_rejects_existing_branch_without_prefix() {
+        let adapter = Arc::new(WriteTestForgeAdapter);
+        let audit = Arc::new(InMemoryAuditSink::new());
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit), None);
+
+        let mut request = write_test_request();
+        request.existing_branch = true;
+
+        // Use a policy with no branch prefix
+        let authorized = domain::policy::AuthorizedWrite {
+            policy: domain::policy::PolicyConfig {
+                branch_prefix: None,
+                protected_paths: vec![],
+            },
+        };
+
+        let err = orchestrator
+            .commit_patch(request, authorized)
+            .await
+            .expect_err("should reject existing_branch without prefix");
+
+        assert!(matches!(err, ServiceError::PolicyDenied { .. }));
     }
 
     #[tokio::test]

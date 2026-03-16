@@ -78,6 +78,7 @@ pub struct CommitPatchRequest {
     pub agent: AgentIdentity,
     pub base_branch: String,
     pub commit_message: String,
+    pub existing_branch: bool,
     pub new_branch: String,
     pub patch: String,
     pub repository: RepositoryRef,

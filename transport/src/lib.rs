@@ -45,6 +45,10 @@ pub struct CommitPatchTool {
     pub base_branch: String,
     /// Commit message.
     pub commit_message: String,
+    /// Set to true to push to an existing branch instead of creating a new one.
+    /// Requires a configured `branch_prefix` in the agent's policy.
+    #[serde(default)]
+    pub existing_branch: bool,
     /// Forge alias -- use `forge_info` to discover available aliases.
     pub forge: String,
     /// New branch name (must start with "agent/").
@@ -251,6 +255,7 @@ impl McpShim {
         let body = serde_json::json!({
             "base_branch": request.base_branch,
             "commit_message": request.commit_message,
+            "existing_branch": request.existing_branch,
             "new_branch": request.new_branch,
             "patch": request.patch,
         });

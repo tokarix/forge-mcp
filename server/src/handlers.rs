@@ -381,6 +381,7 @@ pub async fn post_patches(
                 agent: identity,
                 base_branch: body.base_branch,
                 commit_message: body.commit_message,
+                existing_branch: body.existing_branch,
                 new_branch: body.new_branch,
                 patch: body.patch,
                 repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),

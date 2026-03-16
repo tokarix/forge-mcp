@@ -8,6 +8,8 @@ use utoipa::ToSchema;
 pub struct CommitPatchBody {
     pub base_branch: String,
     pub commit_message: String,
+    #[serde(default)]
+    pub existing_branch: bool,
     pub new_branch: String,
     pub patch: String,
 }
