@@ -40,6 +40,18 @@ pub enum TransportError {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct CloseChangeRequestTool {
+    /// Forge alias -- use `forge_info` to discover available aliases.
+    pub forge: String,
+    /// Change request index number.
+    pub index: u64,
+    /// Repository owner or organization.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct CommitPatchTool {
     /// Base branch to create from (e.g. "main").
     pub base_branch: String,
@@ -203,6 +215,29 @@ impl McpShim {
         Ok(body)
     }
 
+    /// Makes an HTTP DELETE request to the control plane.
+    async fn gateway_delete(&self, url: reqwest::Url) -> Result<String, McpError> {
+        let response = self
+            .client
+            .delete(url)
+            .bearer_auth(&self.config.token)
+            .send()
+            .await
+            .map_err(|e| McpError::internal_error(format!("HTTP request failed: {e}"), None))?;
+
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .map_err(|e| McpError::internal_error(format!("failed to read response: {e}"), None))?;
+
+        if !status.is_success() {
+            return Err(Self::map_http_error(status, body));
+        }
+
+        Ok(body)
+    }
+
     /// Makes an HTTP POST request to the control plane.
     async fn gateway_post(
         &self,
@@ -234,6 +269,28 @@ impl McpShim {
 
 #[tool_router]
 impl McpShim {
+    /// Close a change request (pull request) on the forge.
+    #[tool(
+        name = "close_change_request",
+        description = "Close a change request (pull request) on the forge. Only works for PRs whose head branch matches your configured branch prefix."
+    )]
+    async fn close_change_request(
+        &self,
+        Parameters(request): Parameters<CloseChangeRequestTool>,
+    ) -> Result<String, McpError> {
+        let url = self.build_url(&[
+            "api",
+            "v1",
+            "repos",
+            &request.forge,
+            &request.owner,
+            &request.repo,
+            "pulls",
+            &request.index.to_string(),
+        ])?;
+        self.gateway_delete(url).await
+    }
+
     /// Apply a unified diff patch to a new branch and push it.
     #[tool(
         name = "commit_patch",

@@ -9,7 +9,7 @@ pub mod git_proxy;
 pub mod handlers;
 pub mod registry;
 
-use axum::{Router, routing::get, routing::post};
+use axum::{Router, routing::delete, routing::get, routing::post};
 use handlers::AppState;
 use utoipa::OpenApi;
 use utoipa_scalar::{Scalar, Servable};
@@ -17,6 +17,7 @@ use utoipa_scalar::{Scalar, Servable};
 #[derive(OpenApi)]
 #[openapi(
     paths(
+        handlers::close_pull,
         handlers::get_contents,
         handlers::get_pull,
         handlers::get_pull_diff,
@@ -74,7 +75,7 @@ pub fn build_router(state: AppState, enable_docs: bool) -> Router {
         )
         .route(
             "/api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}",
-            get(handlers::get_pull),
+            delete(handlers::close_pull).get(handlers::get_pull),
         )
         .route(
             "/api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}/diff",

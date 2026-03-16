@@ -10,9 +10,9 @@ use axum::{
     response::IntoResponse,
 };
 use domain::{
-    AgentIdentity, CommitPatchRequest, ForgeKind, GetChangeRequestRequest,
-    ListChangeRequestsRequest, OpenChangeRequestRequest, ReadRepositoryFileRequest, RepositoryRef,
-    ServiceError,
+    AgentIdentity, CloseChangeRequestRequest, CommitPatchRequest, ForgeKind,
+    GetChangeRequestRequest, ListChangeRequestsRequest, OpenChangeRequestRequest,
+    ReadRepositoryFileRequest, RepositoryRef, ServiceError,
 };
 
 use crate::api::{
@@ -471,6 +471,56 @@ pub async fn post_pulls(
     ))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}",
+    params(
+        ("forge" = String, Path, description = "Forge alias"),
+        ("owner" = String, Path, description = "Repository owner"),
+        ("repo" = String, Path, description = "Repository name"),
+        ("index" = u64, Path, description = "Pull request index"),
+    ),
+    responses(
+        (status = 200, description = "Change request closed"),
+        (status = 401, description = "Unauthorized", body = ErrorBody),
+    ),
+    security(("bearer" = []))
+)]
+/// DELETE /api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}
+pub async fn close_pull(
+    State(state): State<AppState>,
+    Path(path): Path<PullPath>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let forge = resolve_forge(&state.forge_registry, &path.forge)?;
+    let (identity, policy) = resolve_agent(
+        &headers,
+        &state.agent_registry,
+        &path.forge,
+        &path.owner,
+        &path.repo,
+    )?;
+
+    let authorized = domain::policy::AuthorizedWrite { policy };
+
+    let result = forge
+        .write_service
+        .close_change_request(
+            CloseChangeRequestRequest {
+                agent: identity,
+                index: path.index,
+                repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
+            },
+            authorized,
+        )
+        .await
+        .map_err(map_service_error)?;
+
+    Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(
+        serde_json::to_value(&result).expect("serializable"),
+    ))
+}
+
 /// GET /api/v1/agent/info
 pub async fn agent_info(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
     let token = extract_bearer_token(&headers).ok_or_else(|| {
@@ -555,6 +605,13 @@ mod tests {
 
     #[async_trait::async_trait]
     impl forge::ForgeAdapter for FakeForgeAdapter {
+        async fn close_change_request(
+            &self,
+            _: &domain::RepositoryRef,
+            _: u64,
+        ) -> Result<domain::ChangeRequest, forge::ForgeError> {
+            unimplemented!()
+        }
         async fn read_repository_file(
             &self,
             _: &domain::RepositoryRef,
@@ -650,6 +707,26 @@ mod tests {
 
     #[async_trait::async_trait]
     impl domain::RepositoryWriteService for FakeWriteService {
+        async fn close_change_request(
+            &self,
+            request: CloseChangeRequestRequest,
+            _authorized: domain::policy::AuthorizedWrite,
+        ) -> Result<ChangeRequest, ServiceError> {
+            Ok(ChangeRequest {
+                base_branch: "main".to_string(),
+                body: String::new(),
+                changed_files_count: None,
+                commit_count: None,
+                head_branch: "agent/fix".to_string(),
+                head_sha: None,
+                index: request.index,
+                merge_base_sha: None,
+                state: ChangeRequestState::Closed,
+                title: "Fix".to_string(),
+                url: "https://example.com/pulls/1".to_string(),
+            })
+        }
+
         async fn commit_patch(
             &self,
             request: CommitPatchRequest,

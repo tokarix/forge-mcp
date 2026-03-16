@@ -23,6 +23,13 @@ pub enum ForgeError {
 
 #[async_trait]
 pub trait ForgeAdapter: Send + Sync {
+    /// Closes a change request (pull request) on the forge.
+    async fn close_change_request(
+        &self,
+        repository: &RepositoryRef,
+        index: u64,
+    ) -> Result<ChangeRequest, ForgeError>;
+
     /// Reads a single file from the backing forge.
     ///
     /// # Errors
@@ -159,6 +166,37 @@ impl ForgejoPullRequest {
 
 #[async_trait]
 impl ForgeAdapter for ForgejoAdapter {
+    async fn close_change_request(
+        &self,
+        repository: &RepositoryRef,
+        index: u64,
+    ) -> Result<ChangeRequest, ForgeError> {
+        let url = format!(
+            "{}/api/v1/repos/{}/{}/pulls/{index}",
+            self.config.base_url.trim_end_matches('/'),
+            repository.owner,
+            repository.name,
+        );
+
+        let mut request = self
+            .client
+            .patch(&url)
+            .json(&serde_json::json!({"state": "closed"}));
+        if let Some(token) = &self.config.token {
+            request = request.bearer_auth(token);
+        }
+
+        let response = request.send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(ForgeError::UnexpectedStatus { status, body });
+        }
+
+        let pr: ForgejoPullRequest = response.json().await?;
+        Ok(pr.into_change_request())
+    }
+
     /// Reads a repository file through the Forgejo contents API.
     ///
     /// # Errors

@@ -74,6 +74,13 @@ pub enum ChangeRequestState {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CloseChangeRequestRequest {
+    pub agent: AgentIdentity,
+    pub index: u64,
+    pub repository: RepositoryRef,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommitPatchRequest {
     pub agent: AgentIdentity,
     pub base_branch: String,
@@ -223,6 +230,18 @@ pub trait RepositoryReadService: Send + Sync {
 
 #[async_trait]
 pub trait RepositoryWriteService: Send + Sync {
+    /// Closes a change request after verifying branch-scope policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the branch prefix check fails, the upstream forge
+    /// request fails, or audit recording fails.
+    async fn close_change_request(
+        &self,
+        request: CloseChangeRequestRequest,
+        authorized: policy::AuthorizedWrite,
+    ) -> Result<ChangeRequest, ServiceError>;
+
     /// Applies a patch to a new branch and pushes it.
     ///
     /// # Errors

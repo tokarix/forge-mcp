@@ -404,6 +404,13 @@ mod tests {
 
     #[async_trait::async_trait]
     impl forge::ForgeAdapter for FakeForgeAdapter {
+        async fn close_change_request(
+            &self,
+            _: &domain::RepositoryRef,
+            _: u64,
+        ) -> Result<domain::ChangeRequest, forge::ForgeError> {
+            unimplemented!()
+        }
         async fn read_repository_file(
             &self,
             _: &domain::RepositoryRef,
@@ -499,6 +506,14 @@ mod tests {
 
     #[async_trait::async_trait]
     impl domain::RepositoryWriteService for FakeWriteService {
+        async fn close_change_request(
+            &self,
+            _request: domain::CloseChangeRequestRequest,
+            _authorized: domain::policy::AuthorizedWrite,
+        ) -> Result<ChangeRequest, ServiceError> {
+            unimplemented!()
+        }
+
         async fn commit_patch(
             &self,
             request: domain::CommitPatchRequest,

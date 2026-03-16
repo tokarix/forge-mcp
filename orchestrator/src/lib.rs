@@ -5,9 +5,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use audit::{AuditRecord, AuditSink};
 use domain::{
-    ChangeRequest, ChangeRequestDiff, GetChangeRequestDiffRequest, GetChangeRequestRequest,
-    ListChangeRequestsRequest, ReadRepositoryFileRequest, ReadRepositoryFileResponse,
-    RepositoryReadService, ServiceError, validate_repository_path,
+    ChangeRequest, ChangeRequestDiff, CloseChangeRequestRequest, GetChangeRequestDiffRequest,
+    GetChangeRequestRequest, ListChangeRequestsRequest, ReadRepositoryFileRequest,
+    ReadRepositoryFileResponse, RepositoryReadService, ServiceError, validate_repository_path,
 };
 use forge::ForgeAdapter;
 
@@ -167,6 +167,57 @@ where
     A: ForgeAdapter + 'static,
     S: AuditSink + 'static,
 {
+    async fn close_change_request(
+        &self,
+        request: CloseChangeRequestRequest,
+        authorized: domain::policy::AuthorizedWrite,
+    ) -> Result<ChangeRequest, ServiceError> {
+        // 1. Enforce branch-scope: require branch_prefix
+        let prefix = authorized
+            .policy
+            .branch_prefix
+            .as_deref()
+            .filter(|p| !p.is_empty())
+            .ok_or_else(|| ServiceError::PolicyDenied {
+                reasons: "close_change_request requires a configured branch_prefix".to_string(),
+            })?;
+
+        // 2. Fetch the PR to inspect its head branch
+        let pr = self
+            .adapter
+            .get_change_request(&request.repository, request.index)
+            .await
+            .map_err(|e| ServiceError::Upstream(e.to_string()))?;
+
+        // 3. Verify head branch matches agent's prefix
+        if !pr.head_branch.starts_with(prefix) {
+            return Err(ServiceError::PolicyDenied {
+                reasons: format!(
+                    "agent may only close PRs whose head branch starts with '{prefix}', \
+                     but PR #{} has head branch '{}'",
+                    request.index, pr.head_branch
+                ),
+            });
+        }
+
+        // 4. Audit
+        self.audit_sink
+            .record(AuditRecord {
+                agent: request.agent,
+                action: "close_change_request".to_string(),
+                repository: request.repository.clone(),
+                target: request.index.to_string(),
+            })
+            .await
+            .map_err(|e| ServiceError::Audit(e.to_string()))?;
+
+        // 5. Close
+        self.adapter
+            .close_change_request(&request.repository, request.index)
+            .await
+            .map_err(|e| ServiceError::Upstream(e.to_string()))
+    }
+
     async fn commit_patch(
         &self,
         request: domain::CommitPatchRequest,
@@ -326,9 +377,9 @@ mod tests {
 
     use audit::{AuditError, AuditRecord, AuditSink, InMemoryAuditSink};
     use domain::{
-        AgentIdentity, ChangeRequest, ChangeRequestState, CommitPatchRequest, ForgeKind,
-        OpenChangeRequestRequest, ReadRepositoryFileRequest, RepositoryReadService, RepositoryRef,
-        RepositoryWriteService, ServiceError,
+        AgentIdentity, ChangeRequest, ChangeRequestState, CloseChangeRequestRequest,
+        CommitPatchRequest, ForgeKind, OpenChangeRequestRequest, ReadRepositoryFileRequest,
+        RepositoryReadService, RepositoryRef, RepositoryWriteService, ServiceError,
     };
     use forge::{ForgeAdapter, ForgeError};
 
@@ -356,6 +407,14 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ForgeAdapter for FakeForgeAdapter {
+        async fn close_change_request(
+            &self,
+            _repository: &RepositoryRef,
+            _index: u64,
+        ) -> Result<ChangeRequest, ForgeError> {
+            unimplemented!()
+        }
+
         async fn read_repository_file(
             &self,
             repository: &RepositoryRef,
@@ -410,6 +469,14 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ForgeAdapter for FailingForgeAdapter {
+        async fn close_change_request(
+            &self,
+            _repository: &RepositoryRef,
+            _index: u64,
+        ) -> Result<ChangeRequest, ForgeError> {
+            unimplemented!()
+        }
+
         async fn read_repository_file(
             &self,
             _repository: &RepositoryRef,
@@ -545,6 +612,29 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ForgeAdapter for WriteTestForgeAdapter {
+        async fn close_change_request(
+            &self,
+            repository: &RepositoryRef,
+            index: u64,
+        ) -> Result<ChangeRequest, ForgeError> {
+            Ok(ChangeRequest {
+                base_branch: "main".to_string(),
+                body: String::new(),
+                changed_files_count: None,
+                commit_count: None,
+                head_branch: "agent/fix".to_string(),
+                head_sha: None,
+                index,
+                merge_base_sha: None,
+                state: ChangeRequestState::Closed,
+                title: "Fix".to_string(),
+                url: format!(
+                    "https://forge.example/{}/{}/pulls/{index}",
+                    repository.owner, repository.name
+                ),
+            })
+        }
+
         async fn read_repository_file(
             &self,
             _repository: &RepositoryRef,
@@ -599,9 +689,21 @@ mod tests {
         async fn get_change_request(
             &self,
             _repository: &RepositoryRef,
-            _index: u64,
+            index: u64,
         ) -> Result<ChangeRequest, ForgeError> {
-            unimplemented!()
+            Ok(ChangeRequest {
+                base_branch: "main".to_string(),
+                body: String::new(),
+                changed_files_count: None,
+                commit_count: None,
+                head_branch: "agent/fix".to_string(),
+                head_sha: None,
+                index,
+                merge_base_sha: None,
+                state: ChangeRequestState::Open,
+                title: "Fix".to_string(),
+                url: format!("https://forge.example/org/repo/pulls/{index}"),
+            })
         }
     }
 
@@ -795,5 +897,172 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
 
         assert_eq!(response.change_request.index, 1);
         assert_eq!(audit.records().len(), 1);
+    }
+
+    // --- close_change_request tests ---
+
+    /// Fake adapter where `get_change_request` returns a PR with a
+    /// configurable head branch, so we can test prefix enforcement.
+    struct CloseTestForgeAdapter {
+        head_branch: String,
+    }
+
+    #[async_trait::async_trait]
+    impl ForgeAdapter for CloseTestForgeAdapter {
+        async fn close_change_request(
+            &self,
+            repository: &RepositoryRef,
+            index: u64,
+        ) -> Result<ChangeRequest, ForgeError> {
+            Ok(ChangeRequest {
+                base_branch: "main".to_string(),
+                body: String::new(),
+                changed_files_count: None,
+                commit_count: None,
+                head_branch: self.head_branch.clone(),
+                head_sha: None,
+                index,
+                merge_base_sha: None,
+                state: ChangeRequestState::Closed,
+                title: "Fix".to_string(),
+                url: format!(
+                    "https://forge.example/{}/{}/pulls/{index}",
+                    repository.owner, repository.name
+                ),
+            })
+        }
+
+        async fn create_change_request(
+            &self,
+            _repository: &RepositoryRef,
+            _title: &str,
+            _body: &str,
+            _head_branch: &str,
+            _base_branch: &str,
+        ) -> Result<ChangeRequest, ForgeError> {
+            unimplemented!()
+        }
+
+        async fn get_change_request(
+            &self,
+            _repository: &RepositoryRef,
+            index: u64,
+        ) -> Result<ChangeRequest, ForgeError> {
+            Ok(ChangeRequest {
+                base_branch: "main".to_string(),
+                body: String::new(),
+                changed_files_count: None,
+                commit_count: None,
+                head_branch: self.head_branch.clone(),
+                head_sha: None,
+                index,
+                merge_base_sha: None,
+                state: ChangeRequestState::Open,
+                title: "Fix".to_string(),
+                url: format!("https://forge.example/org/repo/pulls/{index}"),
+            })
+        }
+
+        async fn get_change_request_diff(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+        ) -> Result<String, ForgeError> {
+            unimplemented!()
+        }
+
+        async fn list_change_requests(
+            &self,
+            _repository: &RepositoryRef,
+            _state: Option<&ChangeRequestState>,
+        ) -> Result<Vec<ChangeRequest>, ForgeError> {
+            unimplemented!()
+        }
+
+        async fn read_repository_file(
+            &self,
+            _repository: &RepositoryRef,
+            _path: &str,
+            _git_ref: Option<&str>,
+        ) -> Result<domain::ReadRepositoryFileResponse, ForgeError> {
+            unimplemented!()
+        }
+    }
+
+    fn close_test_request(index: u64) -> CloseChangeRequestRequest {
+        CloseChangeRequestRequest {
+            agent: AgentIdentity {
+                agent_id: "test-agent".to_string(),
+                session_id: "test-session".to_string(),
+            },
+            index,
+            repository: RepositoryRef {
+                alias: "test".to_string(),
+                forge: ForgeKind::Forgejo,
+                host: "https://forge.example".to_string(),
+                name: "repo".to_string(),
+                owner: "org".to_string(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn close_change_request_records_audit_and_closes() {
+        let adapter = Arc::new(CloseTestForgeAdapter {
+            head_branch: "agent/fix".to_string(),
+        });
+        let audit = Arc::new(InMemoryAuditSink::new());
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit), None);
+
+        let result = orchestrator
+            .close_change_request(close_test_request(42), default_authorized())
+            .await
+            .expect("should succeed");
+
+        assert_eq!(result.state, ChangeRequestState::Closed);
+        assert_eq!(result.index, 42);
+        assert_eq!(audit.records().len(), 1);
+        assert_eq!(audit.records()[0].action, "close_change_request");
+    }
+
+    #[tokio::test]
+    async fn close_change_request_rejects_without_prefix() {
+        let adapter = Arc::new(CloseTestForgeAdapter {
+            head_branch: "agent/fix".to_string(),
+        });
+        let audit = Arc::new(InMemoryAuditSink::new());
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit), None);
+
+        let authorized = domain::policy::AuthorizedWrite {
+            policy: domain::policy::PolicyConfig {
+                branch_prefix: None,
+                ..domain::policy::PolicyConfig::default()
+            },
+        };
+
+        let err = orchestrator
+            .close_change_request(close_test_request(1), authorized)
+            .await
+            .expect_err("missing prefix should be rejected");
+
+        assert!(matches!(err, ServiceError::PolicyDenied { .. }));
+        assert_eq!(audit.records().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn close_change_request_rejects_wrong_prefix() {
+        let adapter = Arc::new(CloseTestForgeAdapter {
+            head_branch: "other-agent/fix".to_string(),
+        });
+        let audit = Arc::new(InMemoryAuditSink::new());
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit), None);
+
+        let err = orchestrator
+            .close_change_request(close_test_request(1), default_authorized())
+            .await
+            .expect_err("wrong prefix should be rejected");
+
+        assert!(matches!(err, ServiceError::PolicyDenied { .. }));
+        assert_eq!(audit.records().len(), 0);
     }
 }
