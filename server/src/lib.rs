@@ -18,19 +18,23 @@ use utoipa_scalar::{Scalar, Servable};
 #[openapi(
     paths(
         handlers::close_pull,
+        handlers::comment_on_pull,
         handlers::get_contents,
         handlers::get_pull,
         handlers::get_pull_diff,
         handlers::list_pulls,
         handlers::post_patches,
         handlers::post_pulls,
+        handlers::submit_pull_review,
     ),
     components(schemas(
+        api::CommentBody,
         api::CommitPatchBody,
         api::CommitPatchResult,
         api::ContentsResult,
         api::ErrorBody,
         api::OpenPullBody,
+        api::SubmitReviewBody,
     )),
     modifiers(&SecurityAddon),
 )]
@@ -78,8 +82,16 @@ pub fn build_router(state: AppState, enable_docs: bool) -> Router {
             delete(handlers::close_pull).get(handlers::get_pull),
         )
         .route(
+            "/api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}/comments",
+            post(handlers::comment_on_pull),
+        )
+        .route(
             "/api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}/diff",
             get(handlers::get_pull_diff),
+        )
+        .route(
+            "/api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}/reviews",
+            post(handlers::submit_pull_review),
         )
         .route(
             "/git/{forge}/{owner}/{repo}/git-receive-pack",

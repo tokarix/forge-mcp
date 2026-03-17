@@ -73,9 +73,32 @@ pub enum ChangeRequestState {
     Open,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ChangeRequestComment {
+    pub body: String,
+    pub id: u64,
+    pub index: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ChangeRequestReview {
+    pub body: String,
+    pub event: String,
+    pub id: u64,
+    pub index: u64,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CloseChangeRequestRequest {
     pub agent: AgentIdentity,
+    pub index: u64,
+    pub repository: RepositoryRef,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommentOnChangeRequestRequest {
+    pub agent: AgentIdentity,
+    pub body: String,
     pub index: u64,
     pub repository: RepositoryRef,
 }
@@ -127,6 +150,16 @@ pub struct OpenChangeRequestRequest {
     pub head_branch: String,
     pub repository: RepositoryRef,
     pub title: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SubmitChangeRequestReviewRequest {
+    pub agent: AgentIdentity,
+    pub body: String,
+    /// Must be one of: `APPROVED`, `REQUEST_CHANGES`, `COMMENT`.
+    pub event: String,
+    pub index: u64,
+    pub repository: RepositoryRef,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -242,6 +275,18 @@ pub trait RepositoryWriteService: Send + Sync {
         authorized: policy::AuthorizedWrite,
     ) -> Result<ChangeRequest, ServiceError>;
 
+    /// Posts a general comment on a change request.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the upstream forge request fails or audit
+    /// recording fails.
+    async fn comment_on_change_request(
+        &self,
+        request: CommentOnChangeRequestRequest,
+        authorized: policy::AuthorizedWrite,
+    ) -> Result<ChangeRequestComment, ServiceError>;
+
     /// Applies a patch to a new branch and pushes it.
     ///
     /// # Errors
@@ -263,6 +308,18 @@ pub trait RepositoryWriteService: Send + Sync {
         request: OpenChangeRequestRequest,
         authorized: policy::AuthorizedWrite,
     ) -> Result<OpenChangeRequestResponse, ServiceError>;
+
+    /// Submits a formal review on a change request.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if validation fails, the upstream forge request fails,
+    /// or audit recording fails.
+    async fn submit_change_request_review(
+        &self,
+        request: SubmitChangeRequestReviewRequest,
+        authorized: policy::AuthorizedWrite,
+    ) -> Result<ChangeRequestReview, ServiceError>;
 }
 
 #[cfg(test)]

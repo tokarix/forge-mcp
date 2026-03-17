@@ -3,6 +3,12 @@
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+/// POST /api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}/comments
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CommentBody {
+    pub body: String,
+}
+
 /// POST /api/v1/repos/{owner}/{repo}/patches
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct CommitPatchBody {
@@ -49,6 +55,14 @@ pub struct ContentsResult {
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct ListPullsQuery {
     pub state: Option<String>,
+}
+
+/// POST /api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}/reviews
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct SubmitReviewBody {
+    pub body: String,
+    /// Review event: `APPROVED`, `REQUEST_CHANGES`, or `COMMENT`.
+    pub event: String,
 }
 
 /// Shared path parameters for repo-scoped endpoints.

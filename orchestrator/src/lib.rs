@@ -5,9 +5,11 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use audit::{AuditRecord, AuditSink};
 use domain::{
-    ChangeRequest, ChangeRequestDiff, CloseChangeRequestRequest, GetChangeRequestDiffRequest,
+    ChangeRequest, ChangeRequestComment, ChangeRequestDiff, ChangeRequestReview,
+    CloseChangeRequestRequest, CommentOnChangeRequestRequest, GetChangeRequestDiffRequest,
     GetChangeRequestRequest, ListChangeRequestsRequest, ReadRepositoryFileRequest,
-    ReadRepositoryFileResponse, RepositoryReadService, ServiceError, validate_repository_path,
+    ReadRepositoryFileResponse, RepositoryReadService, ServiceError,
+    SubmitChangeRequestReviewRequest, validate_repository_path,
 };
 use forge::ForgeAdapter;
 
@@ -218,6 +220,27 @@ where
             .map_err(|e| ServiceError::Upstream(e.to_string()))
     }
 
+    async fn comment_on_change_request(
+        &self,
+        request: CommentOnChangeRequestRequest,
+        _authorized: domain::policy::AuthorizedWrite,
+    ) -> Result<ChangeRequestComment, ServiceError> {
+        self.audit_sink
+            .record(AuditRecord {
+                agent: request.agent,
+                action: "comment_on_change_request".to_string(),
+                repository: request.repository.clone(),
+                target: request.index.to_string(),
+            })
+            .await
+            .map_err(|e| ServiceError::Audit(e.to_string()))?;
+
+        self.adapter
+            .comment_on_change_request(&request.repository, request.index, &request.body)
+            .await
+            .map_err(|e| ServiceError::Upstream(e.to_string()))
+    }
+
     async fn commit_patch(
         &self,
         request: domain::CommitPatchRequest,
@@ -369,6 +392,42 @@ where
             repository: request.repository,
         })
     }
+
+    async fn submit_change_request_review(
+        &self,
+        request: SubmitChangeRequestReviewRequest,
+        _authorized: domain::policy::AuthorizedWrite,
+    ) -> Result<ChangeRequestReview, ServiceError> {
+        // Validate event
+        match request.event.as_str() {
+            "APPROVED" | "COMMENT" | "REQUEST_CHANGES" => {}
+            other => {
+                return Err(ServiceError::Validation(format!(
+                    "invalid review event '{other}': must be APPROVED, COMMENT, or REQUEST_CHANGES"
+                )));
+            }
+        }
+
+        self.audit_sink
+            .record(AuditRecord {
+                agent: request.agent,
+                action: "submit_change_request_review".to_string(),
+                repository: request.repository.clone(),
+                target: request.index.to_string(),
+            })
+            .await
+            .map_err(|e| ServiceError::Audit(e.to_string()))?;
+
+        self.adapter
+            .submit_change_request_review(
+                &request.repository,
+                request.index,
+                &request.body,
+                &request.event,
+            )
+            .await
+            .map_err(|e| ServiceError::Upstream(e.to_string()))
+    }
 }
 
 #[cfg(test)]
@@ -378,8 +437,9 @@ mod tests {
     use audit::{AuditError, AuditRecord, AuditSink, InMemoryAuditSink};
     use domain::{
         AgentIdentity, ChangeRequest, ChangeRequestState, CloseChangeRequestRequest,
-        CommitPatchRequest, ForgeKind, OpenChangeRequestRequest, ReadRepositoryFileRequest,
-        RepositoryReadService, RepositoryRef, RepositoryWriteService, ServiceError,
+        CommentOnChangeRequestRequest, CommitPatchRequest, ForgeKind, OpenChangeRequestRequest,
+        ReadRepositoryFileRequest, RepositoryReadService, RepositoryRef, RepositoryWriteService,
+        ServiceError, SubmitChangeRequestReviewRequest,
     };
     use forge::{ForgeAdapter, ForgeError};
 
@@ -415,18 +475,13 @@ mod tests {
             unimplemented!()
         }
 
-        async fn read_repository_file(
+        async fn comment_on_change_request(
             &self,
-            repository: &RepositoryRef,
-            path: &str,
-            git_ref: Option<&str>,
-        ) -> Result<domain::ReadRepositoryFileResponse, ForgeError> {
-            Ok(domain::ReadRepositoryFileResponse {
-                repository: repository.clone(),
-                path: path.to_string(),
-                git_ref: git_ref.map(ToOwned::to_owned),
-                content: "hello".to_string(),
-            })
+            _repository: &RepositoryRef,
+            _index: u64,
+            _body: &str,
+        ) -> Result<domain::ChangeRequestComment, ForgeError> {
+            unimplemented!()
         }
 
         async fn create_change_request(
@@ -436,6 +491,14 @@ mod tests {
             _body: &str,
             _head_branch: &str,
             _base_branch: &str,
+        ) -> Result<ChangeRequest, ForgeError> {
+            unimplemented!()
+        }
+
+        async fn get_change_request(
+            &self,
+            _repository: &RepositoryRef,
+            _index: u64,
         ) -> Result<ChangeRequest, ForgeError> {
             unimplemented!()
         }
@@ -456,11 +519,27 @@ mod tests {
             unimplemented!()
         }
 
-        async fn get_change_request(
+        async fn read_repository_file(
+            &self,
+            repository: &RepositoryRef,
+            path: &str,
+            git_ref: Option<&str>,
+        ) -> Result<domain::ReadRepositoryFileResponse, ForgeError> {
+            Ok(domain::ReadRepositoryFileResponse {
+                repository: repository.clone(),
+                path: path.to_string(),
+                git_ref: git_ref.map(ToOwned::to_owned),
+                content: "hello".to_string(),
+            })
+        }
+
+        async fn submit_change_request_review(
             &self,
             _repository: &RepositoryRef,
             _index: u64,
-        ) -> Result<ChangeRequest, ForgeError> {
+            _body: &str,
+            _event: &str,
+        ) -> Result<domain::ChangeRequestReview, ForgeError> {
             unimplemented!()
         }
     }
@@ -477,13 +556,13 @@ mod tests {
             unimplemented!()
         }
 
-        async fn read_repository_file(
+        async fn comment_on_change_request(
             &self,
             _repository: &RepositoryRef,
-            _path: &str,
-            _git_ref: Option<&str>,
-        ) -> Result<domain::ReadRepositoryFileResponse, ForgeError> {
-            Err(ForgeError::InvalidPayload("test error".to_string()))
+            _index: u64,
+            _body: &str,
+        ) -> Result<domain::ChangeRequestComment, ForgeError> {
+            unimplemented!()
         }
 
         async fn create_change_request(
@@ -493,6 +572,14 @@ mod tests {
             _body: &str,
             _head_branch: &str,
             _base_branch: &str,
+        ) -> Result<ChangeRequest, ForgeError> {
+            unimplemented!()
+        }
+
+        async fn get_change_request(
+            &self,
+            _repository: &RepositoryRef,
+            _index: u64,
         ) -> Result<ChangeRequest, ForgeError> {
             unimplemented!()
         }
@@ -513,11 +600,22 @@ mod tests {
             unimplemented!()
         }
 
-        async fn get_change_request(
+        async fn read_repository_file(
+            &self,
+            _repository: &RepositoryRef,
+            _path: &str,
+            _git_ref: Option<&str>,
+        ) -> Result<domain::ReadRepositoryFileResponse, ForgeError> {
+            Err(ForgeError::InvalidPayload("test error".to_string()))
+        }
+
+        async fn submit_change_request_review(
             &self,
             _repository: &RepositoryRef,
             _index: u64,
-        ) -> Result<ChangeRequest, ForgeError> {
+            _body: &str,
+            _event: &str,
+        ) -> Result<domain::ChangeRequestReview, ForgeError> {
             unimplemented!()
         }
     }
@@ -635,13 +733,17 @@ mod tests {
             })
         }
 
-        async fn read_repository_file(
+        async fn comment_on_change_request(
             &self,
             _repository: &RepositoryRef,
-            _path: &str,
-            _git_ref: Option<&str>,
-        ) -> Result<domain::ReadRepositoryFileResponse, ForgeError> {
-            unimplemented!()
+            index: u64,
+            body: &str,
+        ) -> Result<domain::ChangeRequestComment, ForgeError> {
+            Ok(domain::ChangeRequestComment {
+                body: body.to_string(),
+                id: 1,
+                index,
+            })
         }
 
         async fn create_change_request(
@@ -670,22 +772,6 @@ mod tests {
             })
         }
 
-        async fn get_change_request_diff(
-            &self,
-            _: &RepositoryRef,
-            _: u64,
-        ) -> Result<String, ForgeError> {
-            unimplemented!()
-        }
-
-        async fn list_change_requests(
-            &self,
-            _repository: &RepositoryRef,
-            _state: Option<&ChangeRequestState>,
-        ) -> Result<Vec<ChangeRequest>, ForgeError> {
-            unimplemented!()
-        }
-
         async fn get_change_request(
             &self,
             _repository: &RepositoryRef,
@@ -703,6 +789,46 @@ mod tests {
                 state: ChangeRequestState::Open,
                 title: "Fix".to_string(),
                 url: format!("https://forge.example/org/repo/pulls/{index}"),
+            })
+        }
+
+        async fn get_change_request_diff(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+        ) -> Result<String, ForgeError> {
+            unimplemented!()
+        }
+
+        async fn list_change_requests(
+            &self,
+            _repository: &RepositoryRef,
+            _state: Option<&ChangeRequestState>,
+        ) -> Result<Vec<ChangeRequest>, ForgeError> {
+            unimplemented!()
+        }
+
+        async fn read_repository_file(
+            &self,
+            _repository: &RepositoryRef,
+            _path: &str,
+            _git_ref: Option<&str>,
+        ) -> Result<domain::ReadRepositoryFileResponse, ForgeError> {
+            unimplemented!()
+        }
+
+        async fn submit_change_request_review(
+            &self,
+            _repository: &RepositoryRef,
+            index: u64,
+            body: &str,
+            event: &str,
+        ) -> Result<domain::ChangeRequestReview, ForgeError> {
+            Ok(domain::ChangeRequestReview {
+                body: body.to_string(),
+                event: event.to_string(),
+                id: 1,
+                index,
             })
         }
     }
@@ -932,6 +1058,15 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             })
         }
 
+        async fn comment_on_change_request(
+            &self,
+            _repository: &RepositoryRef,
+            _index: u64,
+            _body: &str,
+        ) -> Result<domain::ChangeRequestComment, ForgeError> {
+            unimplemented!()
+        }
+
         async fn create_change_request(
             &self,
             _repository: &RepositoryRef,
@@ -985,6 +1120,16 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             _path: &str,
             _git_ref: Option<&str>,
         ) -> Result<domain::ReadRepositoryFileResponse, ForgeError> {
+            unimplemented!()
+        }
+
+        async fn submit_change_request_review(
+            &self,
+            _repository: &RepositoryRef,
+            _index: u64,
+            _body: &str,
+            _event: &str,
+        ) -> Result<domain::ChangeRequestReview, ForgeError> {
             unimplemented!()
         }
     }
@@ -1063,6 +1208,96 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             .expect_err("wrong prefix should be rejected");
 
         assert!(matches!(err, ServiceError::PolicyDenied { .. }));
+        assert_eq!(audit.records().len(), 0);
+    }
+
+    // --- comment_on_change_request tests ---
+
+    fn comment_test_request(index: u64) -> CommentOnChangeRequestRequest {
+        CommentOnChangeRequestRequest {
+            agent: AgentIdentity {
+                agent_id: "test-agent".to_string(),
+                session_id: "test-session".to_string(),
+            },
+            body: "Looks good".to_string(),
+            index,
+            repository: RepositoryRef {
+                alias: "test".to_string(),
+                forge: ForgeKind::Forgejo,
+                host: "https://forge.example".to_string(),
+                name: "repo".to_string(),
+                owner: "org".to_string(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn comment_on_change_request_records_audit_and_comments() {
+        let adapter = Arc::new(WriteTestForgeAdapter);
+        let audit = Arc::new(InMemoryAuditSink::new());
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit), None);
+
+        let result = orchestrator
+            .comment_on_change_request(comment_test_request(42), default_authorized())
+            .await
+            .expect("should succeed");
+
+        assert_eq!(result.index, 42);
+        assert_eq!(result.body, "Looks good");
+        assert_eq!(audit.records().len(), 1);
+        assert_eq!(audit.records()[0].action, "comment_on_change_request");
+    }
+
+    // --- submit_change_request_review tests ---
+
+    fn review_test_request(index: u64, event: &str) -> SubmitChangeRequestReviewRequest {
+        SubmitChangeRequestReviewRequest {
+            agent: AgentIdentity {
+                agent_id: "test-agent".to_string(),
+                session_id: "test-session".to_string(),
+            },
+            body: "LGTM".to_string(),
+            event: event.to_string(),
+            index,
+            repository: RepositoryRef {
+                alias: "test".to_string(),
+                forge: ForgeKind::Forgejo,
+                host: "https://forge.example".to_string(),
+                name: "repo".to_string(),
+                owner: "org".to_string(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn submit_review_records_audit_and_submits() {
+        let adapter = Arc::new(WriteTestForgeAdapter);
+        let audit = Arc::new(InMemoryAuditSink::new());
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit), None);
+
+        let result = orchestrator
+            .submit_change_request_review(review_test_request(42, "APPROVED"), default_authorized())
+            .await
+            .expect("should succeed");
+
+        assert_eq!(result.index, 42);
+        assert_eq!(result.event, "APPROVED");
+        assert_eq!(audit.records().len(), 1);
+        assert_eq!(audit.records()[0].action, "submit_change_request_review");
+    }
+
+    #[tokio::test]
+    async fn submit_review_rejects_invalid_event() {
+        let adapter = Arc::new(WriteTestForgeAdapter);
+        let audit = Arc::new(InMemoryAuditSink::new());
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit), None);
+
+        let err = orchestrator
+            .submit_change_request_review(review_test_request(1, "INVALID"), default_authorized())
+            .await
+            .expect_err("invalid event should be rejected");
+
+        assert!(matches!(err, ServiceError::Validation(_)));
         assert_eq!(audit.records().len(), 0);
     }
 }

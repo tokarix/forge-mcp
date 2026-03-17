@@ -52,6 +52,20 @@ pub struct CloseChangeRequestTool {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct CommentOnChangeRequestTool {
+    /// Comment text.
+    pub body: String,
+    /// Forge alias -- use `forge_info` to discover available aliases.
+    pub forge: String,
+    /// Change request index number.
+    pub index: u64,
+    /// Repository owner or organization.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct CommitPatchTool {
     /// Base branch to create from (e.g. "main").
     pub base_branch: String,
@@ -67,8 +81,11 @@ pub struct CommitPatchTool {
     pub new_branch: String,
     /// Repository owner or organization.
     pub owner: String,
-    /// Unified diff patch to apply.
-    pub patch: String,
+    /// Unified diff patch to apply. Provide either this or `patch_file`.
+    pub patch: Option<String>,
+    /// Path to a file containing the unified diff patch. Use this instead of
+    /// `patch` for large diffs that may exceed tool parameter limits.
+    pub patch_file: Option<String>,
     /// Repository name.
     pub repo: String,
 }
@@ -137,6 +154,22 @@ pub struct ReadRepositoryFileTool {
     pub owner: String,
     /// Repository-relative file path.
     pub path: String,
+    /// Repository name.
+    pub repo: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SubmitChangeRequestReviewTool {
+    /// Review body text.
+    pub body: String,
+    /// Review event: `APPROVED`, `REQUEST_CHANGES`, or `COMMENT`.
+    pub event: String,
+    /// Forge alias -- use `forge_info` to discover available aliases.
+    pub forge: String,
+    /// Change request index number.
+    pub index: u64,
+    /// Repository owner or organization.
+    pub owner: String,
     /// Repository name.
     pub repo: String,
 }
@@ -291,6 +324,32 @@ impl McpShim {
         self.gateway_delete(url).await
     }
 
+    /// Post a general comment on a change request (pull request).
+    #[tool(
+        name = "comment_on_change_request",
+        description = "Post a general comment on a change request (pull request). This is not a formal review — use submit_change_request_review for that."
+    )]
+    async fn comment_on_change_request(
+        &self,
+        Parameters(request): Parameters<CommentOnChangeRequestTool>,
+    ) -> Result<String, McpError> {
+        let url = self.build_url(&[
+            "api",
+            "v1",
+            "repos",
+            &request.forge,
+            &request.owner,
+            &request.repo,
+            "pulls",
+            &request.index.to_string(),
+            "comments",
+        ])?;
+        let body = serde_json::json!({
+            "body": request.body,
+        });
+        self.gateway_post(url, &body).await
+    }
+
     /// Apply a unified diff patch to a new branch and push it.
     #[tool(
         name = "commit_patch",
@@ -300,6 +359,20 @@ impl McpShim {
         &self,
         Parameters(request): Parameters<CommitPatchTool>,
     ) -> Result<String, McpError> {
+        // Resolve patch content from either inline or file
+        let patch = match (&request.patch, &request.patch_file) {
+            (Some(p), _) => p.clone(),
+            (None, Some(path)) => std::fs::read_to_string(path).map_err(|e| {
+                McpError::invalid_params(format!("failed to read patch_file '{path}': {e}"), None)
+            })?,
+            (None, None) => {
+                return Err(McpError::invalid_params(
+                    "either patch or patch_file must be provided".to_string(),
+                    None,
+                ));
+            }
+        };
+
         let url = self.build_url(&[
             "api",
             "v1",
@@ -314,7 +387,7 @@ impl McpShim {
             "commit_message": request.commit_message,
             "existing_branch": request.existing_branch,
             "new_branch": request.new_branch,
-            "patch": request.patch,
+            "patch": patch,
         });
         self.gateway_post(url, &body).await
     }
@@ -451,6 +524,33 @@ impl McpShim {
             .as_str()
             .map(ToString::to_string)
             .ok_or_else(|| McpError::internal_error("missing content field".to_string(), None))
+    }
+
+    /// Submit a formal review on a change request (pull request).
+    #[tool(
+        name = "submit_change_request_review",
+        description = "Submit a formal review on a change request (pull request). Event must be APPROVED, REQUEST_CHANGES, or COMMENT."
+    )]
+    async fn submit_change_request_review(
+        &self,
+        Parameters(request): Parameters<SubmitChangeRequestReviewTool>,
+    ) -> Result<String, McpError> {
+        let url = self.build_url(&[
+            "api",
+            "v1",
+            "repos",
+            &request.forge,
+            &request.owner,
+            &request.repo,
+            "pulls",
+            &request.index.to_string(),
+            "reviews",
+        ])?;
+        let body = serde_json::json!({
+            "body": request.body,
+            "event": request.event,
+        });
+        self.gateway_post(url, &body).await
     }
 
     /// Discover available forges, gateway URL, git proxy pattern, and auth.

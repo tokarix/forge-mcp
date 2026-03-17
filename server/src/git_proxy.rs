@@ -411,12 +411,12 @@ mod tests {
         ) -> Result<domain::ChangeRequest, forge::ForgeError> {
             unimplemented!()
         }
-        async fn read_repository_file(
+        async fn comment_on_change_request(
             &self,
             _: &domain::RepositoryRef,
+            _: u64,
             _: &str,
-            _: Option<&str>,
-        ) -> Result<domain::ReadRepositoryFileResponse, forge::ForgeError> {
+        ) -> Result<domain::ChangeRequestComment, forge::ForgeError> {
             unimplemented!()
         }
         async fn create_change_request(
@@ -426,6 +426,13 @@ mod tests {
             _: &str,
             _: &str,
             _: &str,
+        ) -> Result<domain::ChangeRequest, forge::ForgeError> {
+            unimplemented!()
+        }
+        async fn get_change_request(
+            &self,
+            _: &domain::RepositoryRef,
+            _: u64,
         ) -> Result<domain::ChangeRequest, forge::ForgeError> {
             unimplemented!()
         }
@@ -443,11 +450,21 @@ mod tests {
         ) -> Result<Vec<domain::ChangeRequest>, forge::ForgeError> {
             unimplemented!()
         }
-        async fn get_change_request(
+        async fn read_repository_file(
+            &self,
+            _: &domain::RepositoryRef,
+            _: &str,
+            _: Option<&str>,
+        ) -> Result<domain::ReadRepositoryFileResponse, forge::ForgeError> {
+            unimplemented!()
+        }
+        async fn submit_change_request_review(
             &self,
             _: &domain::RepositoryRef,
             _: u64,
-        ) -> Result<domain::ChangeRequest, forge::ForgeError> {
+            _: &str,
+            _: &str,
+        ) -> Result<domain::ChangeRequestReview, forge::ForgeError> {
             unimplemented!()
         }
     }
@@ -514,6 +531,14 @@ mod tests {
             unimplemented!()
         }
 
+        async fn comment_on_change_request(
+            &self,
+            _request: domain::CommentOnChangeRequestRequest,
+            _authorized: domain::policy::AuthorizedWrite,
+        ) -> Result<domain::ChangeRequestComment, ServiceError> {
+            unimplemented!()
+        }
+
         async fn commit_patch(
             &self,
             request: domain::CommitPatchRequest,
@@ -547,6 +572,14 @@ mod tests {
                 },
                 repository: request.repository,
             })
+        }
+
+        async fn submit_change_request_review(
+            &self,
+            _request: domain::SubmitChangeRequestReviewRequest,
+            _authorized: domain::policy::AuthorizedWrite,
+        ) -> Result<domain::ChangeRequestReview, ServiceError> {
+            unimplemented!()
         }
     }
 

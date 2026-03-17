@@ -10,14 +10,14 @@ use axum::{
     response::IntoResponse,
 };
 use domain::{
-    AgentIdentity, CloseChangeRequestRequest, CommitPatchRequest, ForgeKind,
-    GetChangeRequestRequest, ListChangeRequestsRequest, OpenChangeRequestRequest,
-    ReadRepositoryFileRequest, RepositoryRef, ServiceError,
+    AgentIdentity, CloseChangeRequestRequest, CommentOnChangeRequestRequest, CommitPatchRequest,
+    ForgeKind, GetChangeRequestRequest, ListChangeRequestsRequest, OpenChangeRequestRequest,
+    ReadRepositoryFileRequest, RepositoryRef, ServiceError, SubmitChangeRequestReviewRequest,
 };
 
 use crate::api::{
-    CommitPatchBody, CommitPatchResult, ContentsPath, ContentsQuery, ContentsResult, ErrorBody,
-    ListPullsQuery, OpenPullBody, PullPath, RepoPath,
+    CommentBody, CommitPatchBody, CommitPatchResult, ContentsPath, ContentsQuery, ContentsResult,
+    ErrorBody, ListPullsQuery, OpenPullBody, PullPath, RepoPath, SubmitReviewBody,
 };
 use crate::auth::{AgentRegistry, extract_bearer_token};
 
@@ -521,6 +521,115 @@ pub async fn close_pull(
     ))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}/comments",
+    params(
+        ("forge" = String, Path, description = "Forge alias"),
+        ("owner" = String, Path, description = "Repository owner"),
+        ("repo" = String, Path, description = "Repository name"),
+        ("index" = u64, Path, description = "Pull request index"),
+    ),
+    request_body = CommentBody,
+    responses(
+        (status = 201, description = "Comment created"),
+        (status = 401, description = "Unauthorized", body = ErrorBody),
+    ),
+    security(("bearer" = []))
+)]
+/// POST /api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}/comments
+pub async fn comment_on_pull(
+    State(state): State<AppState>,
+    Path(path): Path<PullPath>,
+    headers: HeaderMap,
+    Json(body): Json<CommentBody>,
+) -> impl IntoResponse {
+    let forge = resolve_forge(&state.forge_registry, &path.forge)?;
+    let (identity, policy) = resolve_agent(
+        &headers,
+        &state.agent_registry,
+        &path.forge,
+        &path.owner,
+        &path.repo,
+    )?;
+
+    let authorized = domain::policy::AuthorizedWrite { policy };
+
+    let result = forge
+        .write_service
+        .comment_on_change_request(
+            CommentOnChangeRequestRequest {
+                agent: identity,
+                body: body.body,
+                index: path.index,
+                repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
+            },
+            authorized,
+        )
+        .await
+        .map_err(map_service_error)?;
+
+    Ok::<_, (StatusCode, Json<ErrorBody>)>((
+        StatusCode::CREATED,
+        Json(serde_json::to_value(&result).expect("serializable")),
+    ))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}/reviews",
+    params(
+        ("forge" = String, Path, description = "Forge alias"),
+        ("owner" = String, Path, description = "Repository owner"),
+        ("repo" = String, Path, description = "Repository name"),
+        ("index" = u64, Path, description = "Pull request index"),
+    ),
+    request_body = SubmitReviewBody,
+    responses(
+        (status = 201, description = "Review submitted"),
+        (status = 401, description = "Unauthorized", body = ErrorBody),
+    ),
+    security(("bearer" = []))
+)]
+/// POST /api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}/reviews
+pub async fn submit_pull_review(
+    State(state): State<AppState>,
+    Path(path): Path<PullPath>,
+    headers: HeaderMap,
+    Json(body): Json<SubmitReviewBody>,
+) -> impl IntoResponse {
+    let forge = resolve_forge(&state.forge_registry, &path.forge)?;
+    let (identity, policy) = resolve_agent(
+        &headers,
+        &state.agent_registry,
+        &path.forge,
+        &path.owner,
+        &path.repo,
+    )?;
+
+    let authorized = domain::policy::AuthorizedWrite { policy };
+
+    let result = forge
+        .write_service
+        .submit_change_request_review(
+            SubmitChangeRequestReviewRequest {
+                agent: identity,
+                body: body.body,
+                event: body.event,
+                index: path.index,
+                repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
+            },
+            authorized,
+        )
+        .await
+        .map_err(map_service_error)?;
+
+    Ok::<_, (StatusCode, Json<ErrorBody>)>((
+        StatusCode::CREATED,
+        Json(serde_json::to_value(&result).expect("serializable")),
+    ))
+}
+
 /// GET /api/v1/agent/info
 pub async fn agent_info(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
     let token = extract_bearer_token(&headers).ok_or_else(|| {
@@ -612,12 +721,12 @@ mod tests {
         ) -> Result<domain::ChangeRequest, forge::ForgeError> {
             unimplemented!()
         }
-        async fn read_repository_file(
+        async fn comment_on_change_request(
             &self,
             _: &domain::RepositoryRef,
+            _: u64,
             _: &str,
-            _: Option<&str>,
-        ) -> Result<domain::ReadRepositoryFileResponse, forge::ForgeError> {
+        ) -> Result<domain::ChangeRequestComment, forge::ForgeError> {
             unimplemented!()
         }
         async fn create_change_request(
@@ -627,6 +736,13 @@ mod tests {
             _: &str,
             _: &str,
             _: &str,
+        ) -> Result<domain::ChangeRequest, forge::ForgeError> {
+            unimplemented!()
+        }
+        async fn get_change_request(
+            &self,
+            _: &domain::RepositoryRef,
+            _: u64,
         ) -> Result<domain::ChangeRequest, forge::ForgeError> {
             unimplemented!()
         }
@@ -644,11 +760,21 @@ mod tests {
         ) -> Result<Vec<domain::ChangeRequest>, forge::ForgeError> {
             unimplemented!()
         }
-        async fn get_change_request(
+        async fn read_repository_file(
+            &self,
+            _: &domain::RepositoryRef,
+            _: &str,
+            _: Option<&str>,
+        ) -> Result<domain::ReadRepositoryFileResponse, forge::ForgeError> {
+            unimplemented!()
+        }
+        async fn submit_change_request_review(
             &self,
             _: &domain::RepositoryRef,
             _: u64,
-        ) -> Result<domain::ChangeRequest, forge::ForgeError> {
+            _: &str,
+            _: &str,
+        ) -> Result<domain::ChangeRequestReview, forge::ForgeError> {
             unimplemented!()
         }
     }
@@ -727,6 +853,18 @@ mod tests {
             })
         }
 
+        async fn comment_on_change_request(
+            &self,
+            request: domain::CommentOnChangeRequestRequest,
+            _authorized: domain::policy::AuthorizedWrite,
+        ) -> Result<domain::ChangeRequestComment, ServiceError> {
+            Ok(domain::ChangeRequestComment {
+                body: request.body,
+                id: 1,
+                index: request.index,
+            })
+        }
+
         async fn commit_patch(
             &self,
             request: CommitPatchRequest,
@@ -759,6 +897,19 @@ mod tests {
                     url: "https://example.com/pulls/1".to_string(),
                 },
                 repository: request.repository,
+            })
+        }
+
+        async fn submit_change_request_review(
+            &self,
+            request: domain::SubmitChangeRequestReviewRequest,
+            _authorized: domain::policy::AuthorizedWrite,
+        ) -> Result<domain::ChangeRequestReview, ServiceError> {
+            Ok(domain::ChangeRequestReview {
+                body: request.body,
+                event: request.event,
+                id: 1,
+                index: request.index,
             })
         }
     }

@@ -4,7 +4,10 @@ use std::sync::Once;
 
 use async_trait::async_trait;
 use base64::Engine;
-use domain::{ChangeRequest, ChangeRequestState, ReadRepositoryFileResponse, RepositoryRef};
+use domain::{
+    ChangeRequest, ChangeRequestComment, ChangeRequestReview, ChangeRequestState,
+    ReadRepositoryFileResponse, RepositoryRef,
+};
 use reqwest::StatusCode;
 use serde::Deserialize;
 use thiserror::Error;
@@ -30,6 +33,45 @@ pub trait ForgeAdapter: Send + Sync {
         index: u64,
     ) -> Result<ChangeRequest, ForgeError>;
 
+    /// Posts a general comment on a change request.
+    async fn comment_on_change_request(
+        &self,
+        repository: &RepositoryRef,
+        index: u64,
+        body: &str,
+    ) -> Result<ChangeRequestComment, ForgeError>;
+
+    /// Creates a change request (pull request) on the forge.
+    async fn create_change_request(
+        &self,
+        repository: &RepositoryRef,
+        title: &str,
+        body: &str,
+        head_branch: &str,
+        base_branch: &str,
+    ) -> Result<ChangeRequest, ForgeError>;
+
+    /// Gets a single change request by index.
+    async fn get_change_request(
+        &self,
+        repository: &RepositoryRef,
+        index: u64,
+    ) -> Result<ChangeRequest, ForgeError>;
+
+    /// Gets the unified diff for a change request.
+    async fn get_change_request_diff(
+        &self,
+        repository: &RepositoryRef,
+        index: u64,
+    ) -> Result<String, ForgeError>;
+
+    /// Lists change requests for a repository.
+    async fn list_change_requests(
+        &self,
+        repository: &RepositoryRef,
+        state: Option<&ChangeRequestState>,
+    ) -> Result<Vec<ChangeRequest>, ForgeError>;
+
     /// Reads a single file from the backing forge.
     ///
     /// # Errors
@@ -43,36 +85,14 @@ pub trait ForgeAdapter: Send + Sync {
         git_ref: Option<&str>,
     ) -> Result<ReadRepositoryFileResponse, ForgeError>;
 
-    /// Creates a change request (pull request) on the forge.
-    async fn create_change_request(
+    /// Submits a formal review on a change request.
+    async fn submit_change_request_review(
         &self,
         repository: &RepositoryRef,
-        title: &str,
+        index: u64,
         body: &str,
-        head_branch: &str,
-        base_branch: &str,
-    ) -> Result<ChangeRequest, ForgeError>;
-
-    /// Lists change requests for a repository.
-    async fn list_change_requests(
-        &self,
-        repository: &RepositoryRef,
-        state: Option<&ChangeRequestState>,
-    ) -> Result<Vec<ChangeRequest>, ForgeError>;
-
-    /// Gets the unified diff for a change request.
-    async fn get_change_request_diff(
-        &self,
-        repository: &RepositoryRef,
-        index: u64,
-    ) -> Result<String, ForgeError>;
-
-    /// Gets a single change request by index.
-    async fn get_change_request(
-        &self,
-        repository: &RepositoryRef,
-        index: u64,
-    ) -> Result<ChangeRequest, ForgeError>;
+        event: &str,
+    ) -> Result<ChangeRequestReview, ForgeError>;
 }
 
 #[derive(Clone)]
@@ -164,6 +184,18 @@ impl ForgejoPullRequest {
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct ForgejoCommentResponse {
+    body: String,
+    id: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct ForgejoReviewResponse {
+    body: String,
+    id: u64,
+}
+
 #[async_trait]
 impl ForgeAdapter for ForgejoAdapter {
     async fn close_change_request(
@@ -195,6 +227,175 @@ impl ForgeAdapter for ForgejoAdapter {
 
         let pr: ForgejoPullRequest = response.json().await?;
         Ok(pr.into_change_request())
+    }
+
+    async fn comment_on_change_request(
+        &self,
+        repository: &RepositoryRef,
+        index: u64,
+        body: &str,
+    ) -> Result<ChangeRequestComment, ForgeError> {
+        let url = format!(
+            "{}/api/v1/repos/{}/{}/issues/{index}/comments",
+            self.config.base_url.trim_end_matches('/'),
+            repository.owner,
+            repository.name,
+        );
+
+        let mut request = self
+            .client
+            .post(&url)
+            .json(&serde_json::json!({"body": body}));
+        if let Some(token) = &self.config.token {
+            request = request.bearer_auth(token);
+        }
+
+        let response = request.send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(ForgeError::UnexpectedStatus { status, body });
+        }
+
+        let comment: ForgejoCommentResponse = response.json().await?;
+        Ok(ChangeRequestComment {
+            body: comment.body,
+            id: comment.id,
+            index,
+        })
+    }
+
+    async fn create_change_request(
+        &self,
+        repository: &RepositoryRef,
+        title: &str,
+        body: &str,
+        head_branch: &str,
+        base_branch: &str,
+    ) -> Result<ChangeRequest, ForgeError> {
+        let url = format!(
+            "{}/api/v1/repos/{}/{}/pulls",
+            self.config.base_url.trim_end_matches('/'),
+            repository.owner,
+            repository.name,
+        );
+
+        let mut request = self.client.post(&url).json(&serde_json::json!({
+            "base": base_branch,
+            "body": body,
+            "head": head_branch,
+            "title": title,
+        }));
+        if let Some(token) = &self.config.token {
+            request = request.bearer_auth(token);
+        }
+
+        let response = request.send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(ForgeError::UnexpectedStatus { status, body });
+        }
+
+        let pr: ForgejoPullRequest = response.json().await?;
+        Ok(pr.into_change_request())
+    }
+
+    async fn get_change_request(
+        &self,
+        repository: &RepositoryRef,
+        index: u64,
+    ) -> Result<ChangeRequest, ForgeError> {
+        let url = format!(
+            "{}/api/v1/repos/{}/{}/pulls/{index}",
+            self.config.base_url.trim_end_matches('/'),
+            repository.owner,
+            repository.name,
+        );
+
+        let mut request = self.client.get(&url);
+        if let Some(token) = &self.config.token {
+            request = request.bearer_auth(token);
+        }
+
+        let response = request.send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(ForgeError::UnexpectedStatus { status, body });
+        }
+
+        let pr: ForgejoPullRequest = response.json().await?;
+        Ok(pr.into_change_request())
+    }
+
+    async fn get_change_request_diff(
+        &self,
+        repository: &RepositoryRef,
+        index: u64,
+    ) -> Result<String, ForgeError> {
+        let url = format!(
+            "{}/api/v1/repos/{}/{}/pulls/{index}.diff",
+            self.config.base_url.trim_end_matches('/'),
+            repository.owner,
+            repository.name,
+        );
+
+        let mut request = self.client.get(&url);
+        if let Some(token) = &self.config.token {
+            request = request.bearer_auth(token);
+        }
+
+        let response = request.send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(ForgeError::UnexpectedStatus { status, body });
+        }
+
+        response
+            .text()
+            .await
+            .map_err(|e| ForgeError::InvalidPayload(format!("failed to read diff body: {e}")))
+    }
+
+    async fn list_change_requests(
+        &self,
+        repository: &RepositoryRef,
+        state: Option<&ChangeRequestState>,
+    ) -> Result<Vec<ChangeRequest>, ForgeError> {
+        let url = format!(
+            "{}/api/v1/repos/{}/{}/pulls",
+            self.config.base_url.trim_end_matches('/'),
+            repository.owner,
+            repository.name,
+        );
+
+        let state_str = state.map(|s| match s {
+            ChangeRequestState::Closed | ChangeRequestState::Merged => "closed",
+            ChangeRequestState::Open => "open",
+        });
+
+        let mut request = self.client.get(&url);
+        if let Some(state_str) = state_str {
+            request = request.query(&[("state", state_str)]);
+        }
+        if let Some(token) = &self.config.token {
+            request = request.bearer_auth(token);
+        }
+
+        let response = request.send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(ForgeError::UnexpectedStatus { status, body });
+        }
+
+        let prs: Vec<ForgejoPullRequest> = response.json().await?;
+        Ok(prs
+            .into_iter()
+            .map(ForgejoPullRequest::into_change_request)
+            .collect())
     }
 
     /// Reads a repository file through the Forgejo contents API.
@@ -262,27 +463,24 @@ impl ForgeAdapter for ForgejoAdapter {
         })
     }
 
-    async fn create_change_request(
+    async fn submit_change_request_review(
         &self,
         repository: &RepositoryRef,
-        title: &str,
+        index: u64,
         body: &str,
-        head_branch: &str,
-        base_branch: &str,
-    ) -> Result<ChangeRequest, ForgeError> {
+        event: &str,
+    ) -> Result<ChangeRequestReview, ForgeError> {
         let url = format!(
-            "{}/api/v1/repos/{}/{}/pulls",
+            "{}/api/v1/repos/{}/{}/pulls/{index}/reviews",
             self.config.base_url.trim_end_matches('/'),
             repository.owner,
             repository.name,
         );
 
-        let mut request = self.client.post(&url).json(&serde_json::json!({
-            "base": base_branch,
-            "body": body,
-            "head": head_branch,
-            "title": title,
-        }));
+        let mut request = self
+            .client
+            .post(&url)
+            .json(&serde_json::json!({"body": body, "event": event}));
         if let Some(token) = &self.config.token {
             request = request.bearer_auth(token);
         }
@@ -290,108 +488,19 @@ impl ForgeAdapter for ForgejoAdapter {
         let response = request.send().await?;
         let status = response.status();
         if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(ForgeError::UnexpectedStatus { status, body });
+            let resp_body = response.text().await.unwrap_or_default();
+            return Err(ForgeError::UnexpectedStatus {
+                status,
+                body: resp_body,
+            });
         }
 
-        let pr: ForgejoPullRequest = response.json().await?;
-        Ok(pr.into_change_request())
-    }
-
-    async fn list_change_requests(
-        &self,
-        repository: &RepositoryRef,
-        state: Option<&ChangeRequestState>,
-    ) -> Result<Vec<ChangeRequest>, ForgeError> {
-        let url = format!(
-            "{}/api/v1/repos/{}/{}/pulls",
-            self.config.base_url.trim_end_matches('/'),
-            repository.owner,
-            repository.name,
-        );
-
-        let state_str = state.map(|s| match s {
-            ChangeRequestState::Closed | ChangeRequestState::Merged => "closed",
-            ChangeRequestState::Open => "open",
-        });
-
-        let mut request = self.client.get(&url);
-        if let Some(state_str) = state_str {
-            request = request.query(&[("state", state_str)]);
-        }
-        if let Some(token) = &self.config.token {
-            request = request.bearer_auth(token);
-        }
-
-        let response = request.send().await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(ForgeError::UnexpectedStatus { status, body });
-        }
-
-        let prs: Vec<ForgejoPullRequest> = response.json().await?;
-        Ok(prs
-            .into_iter()
-            .map(ForgejoPullRequest::into_change_request)
-            .collect())
-    }
-
-    async fn get_change_request_diff(
-        &self,
-        repository: &RepositoryRef,
-        index: u64,
-    ) -> Result<String, ForgeError> {
-        let url = format!(
-            "{}/api/v1/repos/{}/{}/pulls/{index}.diff",
-            self.config.base_url.trim_end_matches('/'),
-            repository.owner,
-            repository.name,
-        );
-
-        let mut request = self.client.get(&url);
-        if let Some(token) = &self.config.token {
-            request = request.bearer_auth(token);
-        }
-
-        let response = request.send().await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(ForgeError::UnexpectedStatus { status, body });
-        }
-
-        response
-            .text()
-            .await
-            .map_err(|e| ForgeError::InvalidPayload(format!("failed to read diff body: {e}")))
-    }
-
-    async fn get_change_request(
-        &self,
-        repository: &RepositoryRef,
-        index: u64,
-    ) -> Result<ChangeRequest, ForgeError> {
-        let url = format!(
-            "{}/api/v1/repos/{}/{}/pulls/{index}",
-            self.config.base_url.trim_end_matches('/'),
-            repository.owner,
-            repository.name,
-        );
-
-        let mut request = self.client.get(&url);
-        if let Some(token) = &self.config.token {
-            request = request.bearer_auth(token);
-        }
-
-        let response = request.send().await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(ForgeError::UnexpectedStatus { status, body });
-        }
-
-        let pr: ForgejoPullRequest = response.json().await?;
-        Ok(pr.into_change_request())
+        let review: ForgejoReviewResponse = response.json().await?;
+        Ok(ChangeRequestReview {
+            body: review.body,
+            event: event.to_string(),
+            id: review.id,
+            index,
+        })
     }
 }
