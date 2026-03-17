@@ -408,6 +408,7 @@ mod tests {
             &self,
             _: &domain::RepositoryRef,
             _: u64,
+            _: &domain::ForgeCredential,
         ) -> Result<domain::ChangeRequest, forge::ForgeError> {
             unimplemented!()
         }
@@ -416,6 +417,7 @@ mod tests {
             _: &domain::RepositoryRef,
             _: u64,
             _: &str,
+            _: &domain::ForgeCredential,
         ) -> Result<domain::ChangeRequestComment, forge::ForgeError> {
             unimplemented!()
         }
@@ -426,6 +428,7 @@ mod tests {
             _: &str,
             _: &str,
             _: &str,
+            _: &domain::ForgeCredential,
         ) -> Result<domain::ChangeRequest, forge::ForgeError> {
             unimplemented!()
         }
@@ -433,6 +436,7 @@ mod tests {
             &self,
             _: &domain::RepositoryRef,
             _: u64,
+            _: &domain::ForgeCredential,
         ) -> Result<domain::ChangeRequest, forge::ForgeError> {
             unimplemented!()
         }
@@ -464,6 +468,7 @@ mod tests {
             _: u64,
             _: &str,
             _: &str,
+            _: &domain::ForgeCredential,
         ) -> Result<domain::ChangeRequestReview, forge::ForgeError> {
             unimplemented!()
         }
@@ -527,6 +532,7 @@ mod tests {
             &self,
             _request: domain::CloseChangeRequestRequest,
             _authorized: domain::policy::AuthorizedWrite,
+            _credential: &domain::ForgeCredential,
         ) -> Result<ChangeRequest, ServiceError> {
             unimplemented!()
         }
@@ -535,6 +541,7 @@ mod tests {
             &self,
             _request: domain::CommentOnChangeRequestRequest,
             _authorized: domain::policy::AuthorizedWrite,
+            _credential: &domain::ForgeCredential,
         ) -> Result<domain::ChangeRequestComment, ServiceError> {
             unimplemented!()
         }
@@ -543,6 +550,7 @@ mod tests {
             &self,
             request: domain::CommitPatchRequest,
             _authorized: domain::policy::AuthorizedWrite,
+            _credential: &domain::ForgeCredential,
         ) -> Result<CommitPatchResponse, ServiceError> {
             Ok(CommitPatchResponse {
                 branch: request.new_branch.clone(),
@@ -555,6 +563,7 @@ mod tests {
             &self,
             request: domain::OpenChangeRequestRequest,
             _authorized: domain::policy::AuthorizedWrite,
+            _credential: &domain::ForgeCredential,
         ) -> Result<OpenChangeRequestResponse, ServiceError> {
             Ok(OpenChangeRequestResponse {
                 change_request: ChangeRequest {
@@ -578,6 +587,7 @@ mod tests {
             &self,
             _request: domain::SubmitChangeRequestReviewRequest,
             _authorized: domain::policy::AuthorizedWrite,
+            _credential: &domain::ForgeCredential,
         ) -> Result<domain::ChangeRequestReview, ServiceError> {
             unimplemented!()
         }
@@ -586,6 +596,7 @@ mod tests {
     fn test_state_with_forge(base_url: &str) -> (AppState, Arc<audit::InMemoryAuditSink>) {
         let configs = vec![crate::config::AgentConfig {
             agent_id: "codex".to_string(),
+            forge_identity: std::collections::HashMap::new(),
             policy: AgentPolicyConfig {
                 allowed_repos: vec!["test-forge/*".to_string()],
                 branch_prefix: Some("agent/".to_string()),
@@ -740,6 +751,7 @@ mod tests {
     async fn info_refs_rejects_disallowed_repo() {
         let configs = vec![crate::config::AgentConfig {
             agent_id: "codex".to_string(),
+            forge_identity: std::collections::HashMap::new(),
             policy: AgentPolicyConfig {
                 allowed_repos: vec!["test-forge/org/allowed-only".to_string()],
                 branch_prefix: Some("agent/".to_string()),

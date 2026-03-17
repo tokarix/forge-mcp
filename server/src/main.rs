@@ -59,7 +59,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let write_service = Arc::new(WriteOrchestrator::new(
                     Arc::clone(&adapter),
                     Arc::clone(&audit_sink),
-                    forge_config.token.clone(),
                 ));
 
                 forges.insert(

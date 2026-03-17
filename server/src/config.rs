@@ -45,6 +45,8 @@ impl std::fmt::Debug for ForgeConfig {
 #[derive(Clone, Deserialize)]
 pub struct AgentConfig {
     pub agent_id: String,
+    #[serde(default)]
+    pub forge_identity: std::collections::HashMap<String, ForgeIdentityConfig>,
     pub policy: AgentPolicyConfig,
     pub session_id: String,
     pub token: String,
@@ -54,8 +56,23 @@ impl std::fmt::Debug for AgentConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AgentConfig")
             .field("agent_id", &self.agent_id)
+            .field("forge_identity", &self.forge_identity)
             .field("policy", &self.policy)
             .field("session_id", &self.session_id)
+            .field("token", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// Per-forge identity credentials for an agent.
+#[derive(Clone, Deserialize)]
+pub struct ForgeIdentityConfig {
+    pub token: String,
+}
+
+impl std::fmt::Debug for ForgeIdentityConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ForgeIdentityConfig")
             .field("token", &"[REDACTED]")
             .finish()
     }
@@ -185,6 +202,15 @@ pub fn validate_config(config: &ServerConfig) -> Result<(), String> {
     }
 
     for agent in &config.agents {
+        for forge_alias in agent.forge_identity.keys() {
+            if !seen_aliases.contains(forge_alias) {
+                return Err(format!(
+                    "agent '{}' has forge_identity for unknown forge alias '{forge_alias}'",
+                    agent.agent_id
+                ));
+            }
+        }
+
         for pattern in &agent.policy.allowed_repos {
             if pattern == "*" {
                 continue;
@@ -253,6 +279,9 @@ allowed_repos = ["internal/org/repo", "internal/org/other-repo", "client-a/org/*
 branch_prefix = "agent/codex/"
 protected_paths = [".forgejo/", ".github/"]
 
+[agents.forge_identity.internal]
+token = "codex-bot-forgejo-token"
+
 [[agents]]
 token = "bearer-token-for-claude"
 agent_id = "claude"
@@ -262,6 +291,9 @@ session_id = "default"
 allowed_repos = ["internal/org/repo"]
 branch_prefix = "agent/claude/"
 protected_paths = [".forgejo/", ".github/"]
+
+[agents.forge_identity.internal]
+token = "claude-bot-forgejo-token"
 "#;
 
     #[test]
@@ -275,6 +307,11 @@ protected_paths = [".forgejo/", ".github/"]
         assert_eq!(config.forges[0].token.as_deref(), Some("forgejo-api-token"));
         assert_eq!(config.forges[1].alias, "client-a");
         assert_eq!(config.agents.len(), 2);
+        // Verify forge_identity parsing
+        assert_eq!(config.agents[0].forge_identity.len(), 1);
+        assert!(config.agents[0].forge_identity.contains_key("internal"));
+        assert_eq!(config.agents[1].forge_identity.len(), 1);
+        assert!(config.agents[1].forge_identity.contains_key("internal"));
     }
 
     #[test]
@@ -487,6 +524,34 @@ session_id = "s"
     }
 
     #[test]
+    fn rejects_forge_identity_unknown_alias() {
+        let toml_str = r#"
+[server]
+listen = "0.0.0.0:8443"
+
+[[forges]]
+alias = "internal"
+type = "forgejo"
+base_url = "https://a.example"
+
+[[agents]]
+token = "t"
+agent_id = "a"
+session_id = "s"
+
+[agents.policy]
+allowed_repos = ["internal/*"]
+
+[agents.forge_identity.nonexistent]
+token = "some-token"
+"#;
+        let config = parse_config(toml_str).expect("should parse");
+        let err = validate_config(&config).expect_err("should reject unknown forge alias");
+        assert!(err.contains("nonexistent"));
+        assert!(err.contains("forge_identity"));
+    }
+
+    #[test]
     fn allowed_forge_aliases_global_wildcard() {
         let policy = AgentPolicyConfig {
             allowed_repos: vec!["*".to_string()],
@@ -564,6 +629,8 @@ allowed_repos = ["internal"]
         assert!(!debug.contains("client-token"));
         assert!(!debug.contains("bearer-token-for-codex"));
         assert!(!debug.contains("bearer-token-for-claude"));
+        assert!(!debug.contains("codex-bot-forgejo-token"));
+        assert!(!debug.contains("claude-bot-forgejo-token"));
         assert!(debug.contains("[REDACTED]"));
     }
 }

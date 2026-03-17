@@ -10,8 +10,8 @@ use axum::{
     response::IntoResponse,
 };
 use domain::{
-    AgentIdentity, CloseChangeRequestRequest, CommentOnChangeRequestRequest, CommitPatchRequest,
-    ForgeKind, GetChangeRequestRequest, ListChangeRequestsRequest, OpenChangeRequestRequest,
+    CloseChangeRequestRequest, CommentOnChangeRequestRequest, CommitPatchRequest, ForgeKind,
+    GetChangeRequestRequest, ListChangeRequestsRequest, OpenChangeRequestRequest,
     ReadRepositoryFileRequest, RepositoryRef, ServiceError, SubmitChangeRequestReviewRequest,
 };
 
@@ -60,13 +60,13 @@ fn map_service_error(err: ServiceError) -> (StatusCode, Json<ErrorBody>) {
 
 /// Resolves bearer token to agent identity or returns 401.
 /// Also checks repository authorization (403 if not allowed).
-fn resolve_agent(
+fn resolve_agent<'a>(
     headers: &HeaderMap,
-    registry: &AgentRegistry,
+    registry: &'a AgentRegistry,
     forge_alias: &str,
     owner: &str,
     repo: &str,
-) -> Result<(AgentIdentity, domain::policy::PolicyConfig), (StatusCode, Json<ErrorBody>)> {
+) -> Result<&'a crate::auth::ResolvedAgent, (StatusCode, Json<ErrorBody>)> {
     let token = extract_bearer_token(headers).ok_or_else(|| {
         (
             StatusCode::UNAUTHORIZED,
@@ -100,7 +100,24 @@ fn resolve_agent(
         ));
     }
 
-    Ok((agent.identity.clone(), agent.policy.clone()))
+    Ok(agent)
+}
+
+/// Resolves the effective forge credential for an agent + forge combination.
+///
+/// Prefers the agent's per-forge identity token, falls back to the forge's
+/// configured token.
+fn resolve_credential(
+    agent: &crate::auth::ResolvedAgent,
+    forge_alias: &str,
+    forge: &crate::registry::ForgeInstance,
+) -> domain::ForgeCredential {
+    let token = agent
+        .forge_identities
+        .get(forge_alias)
+        .map(|id| id.token.clone())
+        .or_else(|| forge.token.clone());
+    domain::ForgeCredential { token }
 }
 
 fn repo_ref(
@@ -142,7 +159,7 @@ pub async fn get_contents(
     headers: HeaderMap,
 ) -> impl IntoResponse {
     let forge = resolve_forge(&state.forge_registry, &path.forge)?;
-    let (identity, _policy) = resolve_agent(
+    let agent = resolve_agent(
         &headers,
         &state.agent_registry,
         &path.forge,
@@ -153,7 +170,7 @@ pub async fn get_contents(
     let result = forge
         .read_service
         .read_repository_file(ReadRepositoryFileRequest {
-            agent: identity,
+            agent: agent.identity.clone(),
             git_ref: query.git_ref.clone(),
             path: path.path.clone(),
             repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
@@ -190,7 +207,7 @@ pub async fn get_pull_diff(
     headers: HeaderMap,
 ) -> impl IntoResponse {
     let forge = resolve_forge(&state.forge_registry, &path.forge)?;
-    let (identity, _policy) = resolve_agent(
+    let agent = resolve_agent(
         &headers,
         &state.agent_registry,
         &path.forge,
@@ -201,7 +218,7 @@ pub async fn get_pull_diff(
     let result = forge
         .read_service
         .get_change_request_diff(domain::GetChangeRequestDiffRequest {
-            agent: identity,
+            agent: agent.identity.clone(),
             index: path.index,
             repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
         })
@@ -235,7 +252,7 @@ pub async fn get_pull(
     headers: HeaderMap,
 ) -> impl IntoResponse {
     let forge = resolve_forge(&state.forge_registry, &path.forge)?;
-    let (identity, _policy) = resolve_agent(
+    let agent = resolve_agent(
         &headers,
         &state.agent_registry,
         &path.forge,
@@ -246,7 +263,7 @@ pub async fn get_pull(
     let result = forge
         .read_service
         .get_change_request(GetChangeRequestRequest {
-            agent: identity,
+            agent: agent.identity.clone(),
             index: path.index,
             repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
         })
@@ -281,7 +298,7 @@ pub async fn list_pulls(
     headers: HeaderMap,
 ) -> impl IntoResponse {
     let forge = resolve_forge(&state.forge_registry, &path.forge)?;
-    let (identity, _policy) = resolve_agent(
+    let agent = resolve_agent(
         &headers,
         &state.agent_registry,
         &path.forge,
@@ -298,7 +315,7 @@ pub async fn list_pulls(
     let result = forge
         .read_service
         .list_change_requests(ListChangeRequestsRequest {
-            agent: identity,
+            agent: agent.identity.clone(),
             repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
             state: state_filter,
         })
@@ -333,13 +350,16 @@ pub async fn post_patches(
     Json(body): Json<CommitPatchBody>,
 ) -> impl IntoResponse {
     let forge = resolve_forge(&state.forge_registry, &path.forge)?;
-    let (identity, policy) = resolve_agent(
+    let agent = resolve_agent(
         &headers,
         &state.agent_registry,
         &path.forge,
         &path.owner,
         &path.repo,
     )?;
+    let credential = resolve_credential(agent, &path.forge, forge);
+    let identity = agent.identity.clone();
+    let policy = agent.policy.clone();
 
     // Per-agent policy check
     let diff_result = domain::diff::validate_diff(&body.patch)
@@ -387,6 +407,7 @@ pub async fn post_patches(
                 repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
             },
             authorized,
+            &credential,
         )
         .await
         .map_err(map_service_error)?;
@@ -423,13 +444,16 @@ pub async fn post_pulls(
     Json(body): Json<OpenPullBody>,
 ) -> impl IntoResponse {
     let forge = resolve_forge(&state.forge_registry, &path.forge)?;
-    let (identity, policy) = resolve_agent(
+    let agent = resolve_agent(
         &headers,
         &state.agent_registry,
         &path.forge,
         &path.owner,
         &path.repo,
     )?;
+    let credential = resolve_credential(agent, &path.forge, forge);
+    let identity = agent.identity.clone();
+    let policy = agent.policy.clone();
 
     // Per-agent branch prefix check for the head branch
     let policy_context = domain::policy::PolicyContext {
@@ -461,6 +485,7 @@ pub async fn post_pulls(
                 title: body.title,
             },
             authorized,
+            &credential,
         )
         .await
         .map_err(map_service_error)?;
@@ -493,25 +518,29 @@ pub async fn close_pull(
     headers: HeaderMap,
 ) -> impl IntoResponse {
     let forge = resolve_forge(&state.forge_registry, &path.forge)?;
-    let (identity, policy) = resolve_agent(
+    let agent = resolve_agent(
         &headers,
         &state.agent_registry,
         &path.forge,
         &path.owner,
         &path.repo,
     )?;
+    let credential = resolve_credential(agent, &path.forge, forge);
 
-    let authorized = domain::policy::AuthorizedWrite { policy };
+    let authorized = domain::policy::AuthorizedWrite {
+        policy: agent.policy.clone(),
+    };
 
     let result = forge
         .write_service
         .close_change_request(
             CloseChangeRequestRequest {
-                agent: identity,
+                agent: agent.identity.clone(),
                 index: path.index,
                 repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
             },
             authorized,
+            &credential,
         )
         .await
         .map_err(map_service_error)?;
@@ -545,26 +574,30 @@ pub async fn comment_on_pull(
     Json(body): Json<CommentBody>,
 ) -> impl IntoResponse {
     let forge = resolve_forge(&state.forge_registry, &path.forge)?;
-    let (identity, policy) = resolve_agent(
+    let agent = resolve_agent(
         &headers,
         &state.agent_registry,
         &path.forge,
         &path.owner,
         &path.repo,
     )?;
+    let credential = resolve_credential(agent, &path.forge, forge);
 
-    let authorized = domain::policy::AuthorizedWrite { policy };
+    let authorized = domain::policy::AuthorizedWrite {
+        policy: agent.policy.clone(),
+    };
 
     let result = forge
         .write_service
         .comment_on_change_request(
             CommentOnChangeRequestRequest {
-                agent: identity,
+                agent: agent.identity.clone(),
                 body: body.body,
                 index: path.index,
                 repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
             },
             authorized,
+            &credential,
         )
         .await
         .map_err(map_service_error)?;
@@ -599,27 +632,31 @@ pub async fn submit_pull_review(
     Json(body): Json<SubmitReviewBody>,
 ) -> impl IntoResponse {
     let forge = resolve_forge(&state.forge_registry, &path.forge)?;
-    let (identity, policy) = resolve_agent(
+    let agent = resolve_agent(
         &headers,
         &state.agent_registry,
         &path.forge,
         &path.owner,
         &path.repo,
     )?;
+    let credential = resolve_credential(agent, &path.forge, forge);
 
-    let authorized = domain::policy::AuthorizedWrite { policy };
+    let authorized = domain::policy::AuthorizedWrite {
+        policy: agent.policy.clone(),
+    };
 
     let result = forge
         .write_service
         .submit_change_request_review(
             SubmitChangeRequestReviewRequest {
-                agent: identity,
+                agent: agent.identity.clone(),
                 body: body.body,
                 event: body.event,
                 index: path.index,
                 repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
             },
             authorized,
+            &credential,
         )
         .await
         .map_err(map_service_error)?;
@@ -718,6 +755,7 @@ mod tests {
             &self,
             _: &domain::RepositoryRef,
             _: u64,
+            _: &domain::ForgeCredential,
         ) -> Result<domain::ChangeRequest, forge::ForgeError> {
             unimplemented!()
         }
@@ -726,6 +764,7 @@ mod tests {
             _: &domain::RepositoryRef,
             _: u64,
             _: &str,
+            _: &domain::ForgeCredential,
         ) -> Result<domain::ChangeRequestComment, forge::ForgeError> {
             unimplemented!()
         }
@@ -736,6 +775,7 @@ mod tests {
             _: &str,
             _: &str,
             _: &str,
+            _: &domain::ForgeCredential,
         ) -> Result<domain::ChangeRequest, forge::ForgeError> {
             unimplemented!()
         }
@@ -743,6 +783,7 @@ mod tests {
             &self,
             _: &domain::RepositoryRef,
             _: u64,
+            _: &domain::ForgeCredential,
         ) -> Result<domain::ChangeRequest, forge::ForgeError> {
             unimplemented!()
         }
@@ -774,6 +815,7 @@ mod tests {
             _: u64,
             _: &str,
             _: &str,
+            _: &domain::ForgeCredential,
         ) -> Result<domain::ChangeRequestReview, forge::ForgeError> {
             unimplemented!()
         }
@@ -837,6 +879,7 @@ mod tests {
             &self,
             request: CloseChangeRequestRequest,
             _authorized: domain::policy::AuthorizedWrite,
+            _credential: &domain::ForgeCredential,
         ) -> Result<ChangeRequest, ServiceError> {
             Ok(ChangeRequest {
                 base_branch: "main".to_string(),
@@ -857,6 +900,7 @@ mod tests {
             &self,
             request: domain::CommentOnChangeRequestRequest,
             _authorized: domain::policy::AuthorizedWrite,
+            _credential: &domain::ForgeCredential,
         ) -> Result<domain::ChangeRequestComment, ServiceError> {
             Ok(domain::ChangeRequestComment {
                 body: request.body,
@@ -869,6 +913,7 @@ mod tests {
             &self,
             request: CommitPatchRequest,
             _authorized: domain::policy::AuthorizedWrite,
+            _credential: &domain::ForgeCredential,
         ) -> Result<CommitPatchResponse, ServiceError> {
             Ok(CommitPatchResponse {
                 branch: request.new_branch.clone(),
@@ -881,6 +926,7 @@ mod tests {
             &self,
             request: OpenChangeRequestRequest,
             _authorized: domain::policy::AuthorizedWrite,
+            _credential: &domain::ForgeCredential,
         ) -> Result<OpenChangeRequestResponse, ServiceError> {
             Ok(OpenChangeRequestResponse {
                 change_request: ChangeRequest {
@@ -904,6 +950,7 @@ mod tests {
             &self,
             request: domain::SubmitChangeRequestReviewRequest,
             _authorized: domain::policy::AuthorizedWrite,
+            _credential: &domain::ForgeCredential,
         ) -> Result<domain::ChangeRequestReview, ServiceError> {
             Ok(domain::ChangeRequestReview {
                 body: request.body,
@@ -917,6 +964,7 @@ mod tests {
     fn test_state() -> AppState {
         let configs = vec![crate::config::AgentConfig {
             agent_id: "codex".to_string(),
+            forge_identity: std::collections::HashMap::new(),
             policy: AgentPolicyConfig {
                 allowed_repos: vec!["test-forge/org/repo".to_string()],
                 branch_prefix: Some("agent/".to_string()),
@@ -1007,6 +1055,7 @@ mod tests {
     async fn returns_403_for_unauthorized_repo() {
         let configs = vec![crate::config::AgentConfig {
             agent_id: "codex".to_string(),
+            forge_identity: std::collections::HashMap::new(),
             policy: AgentPolicyConfig {
                 allowed_repos: vec!["test-forge/org/allowed-repo".to_string()],
                 branch_prefix: Some("agent/".to_string()),
@@ -1179,6 +1228,7 @@ mod tests {
     async fn post_patches_rejects_wrong_branch_per_agent_policy() {
         let configs = vec![crate::config::AgentConfig {
             agent_id: "codex".to_string(),
+            forge_identity: std::collections::HashMap::new(),
             policy: AgentPolicyConfig {
                 allowed_repos: vec!["test-forge/org/repo".to_string()],
                 branch_prefix: Some("agent/codex/".to_string()),
@@ -1304,6 +1354,7 @@ mod tests {
         // Agent only has access to "test-forge/org/allowed-repo", not "other-forge"
         let configs = vec![crate::config::AgentConfig {
             agent_id: "restricted".to_string(),
+            forge_identity: std::collections::HashMap::new(),
             policy: AgentPolicyConfig {
                 allowed_repos: vec!["test-forge/org/repo".to_string()],
                 branch_prefix: Some("agent/".to_string()),
@@ -1376,6 +1427,7 @@ mod tests {
         let audit_sink = Arc::new(audit::InMemoryAuditSink::new());
         let configs = vec![crate::config::AgentConfig {
             agent_id: "codex".to_string(),
+            forge_identity: std::collections::HashMap::new(),
             policy: AgentPolicyConfig {
                 allowed_repos: vec!["*".to_string()],
                 branch_prefix: Some("agent/".to_string()),

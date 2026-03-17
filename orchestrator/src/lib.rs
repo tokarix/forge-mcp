@@ -6,9 +6,9 @@ use async_trait::async_trait;
 use audit::{AuditRecord, AuditSink};
 use domain::{
     ChangeRequest, ChangeRequestComment, ChangeRequestDiff, ChangeRequestReview,
-    CloseChangeRequestRequest, CommentOnChangeRequestRequest, GetChangeRequestDiffRequest,
-    GetChangeRequestRequest, ListChangeRequestsRequest, ReadRepositoryFileRequest,
-    ReadRepositoryFileResponse, RepositoryReadService, ServiceError,
+    CloseChangeRequestRequest, CommentOnChangeRequestRequest, ForgeCredential,
+    GetChangeRequestDiffRequest, GetChangeRequestRequest, ListChangeRequestsRequest,
+    ReadRepositoryFileRequest, ReadRepositoryFileResponse, RepositoryReadService, ServiceError,
     SubmitChangeRequestReviewRequest, validate_repository_path,
 };
 use forge::ForgeAdapter;
@@ -83,7 +83,11 @@ where
             .map_err(|e| ServiceError::Audit(e.to_string()))?;
 
         self.adapter
-            .get_change_request(&request.repository, request.index)
+            .get_change_request(
+                &request.repository,
+                request.index,
+                &ForgeCredential { token: None },
+            )
             .await
             .map_err(|e| ServiceError::Upstream(e.to_string()))
     }
@@ -145,7 +149,6 @@ where
 {
     adapter: Arc<A>,
     audit_sink: Arc<S>,
-    forge_token: Option<String>,
 }
 
 impl<A, S> WriteOrchestrator<A, S>
@@ -154,11 +157,10 @@ where
     S: AuditSink + 'static,
 {
     #[must_use]
-    pub fn new(adapter: Arc<A>, audit_sink: Arc<S>, forge_token: Option<String>) -> Self {
+    pub fn new(adapter: Arc<A>, audit_sink: Arc<S>) -> Self {
         Self {
             adapter,
             audit_sink,
-            forge_token,
         }
     }
 }
@@ -173,6 +175,7 @@ where
         &self,
         request: CloseChangeRequestRequest,
         authorized: domain::policy::AuthorizedWrite,
+        credential: &ForgeCredential,
     ) -> Result<ChangeRequest, ServiceError> {
         // 1. Enforce branch-scope: require branch_prefix
         let prefix = authorized
@@ -187,7 +190,7 @@ where
         // 2. Fetch the PR to inspect its head branch
         let pr = self
             .adapter
-            .get_change_request(&request.repository, request.index)
+            .get_change_request(&request.repository, request.index, credential)
             .await
             .map_err(|e| ServiceError::Upstream(e.to_string()))?;
 
@@ -215,7 +218,7 @@ where
 
         // 5. Close
         self.adapter
-            .close_change_request(&request.repository, request.index)
+            .close_change_request(&request.repository, request.index, credential)
             .await
             .map_err(|e| ServiceError::Upstream(e.to_string()))
     }
@@ -224,6 +227,7 @@ where
         &self,
         request: CommentOnChangeRequestRequest,
         _authorized: domain::policy::AuthorizedWrite,
+        credential: &ForgeCredential,
     ) -> Result<ChangeRequestComment, ServiceError> {
         self.audit_sink
             .record(AuditRecord {
@@ -236,7 +240,12 @@ where
             .map_err(|e| ServiceError::Audit(e.to_string()))?;
 
         self.adapter
-            .comment_on_change_request(&request.repository, request.index, &request.body)
+            .comment_on_change_request(
+                &request.repository,
+                request.index,
+                &request.body,
+                credential,
+            )
             .await
             .map_err(|e| ServiceError::Upstream(e.to_string()))
     }
@@ -245,6 +254,7 @@ where
         &self,
         request: domain::CommitPatchRequest,
         authorized: domain::policy::AuthorizedWrite,
+        credential: &ForgeCredential,
     ) -> Result<domain::CommitPatchResponse, ServiceError> {
         // 1. Validate the diff
         let diff_result = domain::diff::validate_diff(&request.patch)
@@ -316,7 +326,7 @@ where
         let new_branch = request.new_branch.clone();
         let commit_message = request.commit_message.clone();
         let agent_id = request.agent.agent_id.clone();
-        let token = self.forge_token.clone();
+        let token = credential.token.clone();
 
         let git_result = tokio::task::spawn_blocking(move || {
             let workspace =
@@ -345,6 +355,7 @@ where
         &self,
         request: domain::OpenChangeRequestRequest,
         authorized: domain::policy::AuthorizedWrite,
+        credential: &ForgeCredential,
     ) -> Result<domain::OpenChangeRequestResponse, ServiceError> {
         // 1. Evaluate policy — enforce branch constraints
         let policy_context = domain::policy::PolicyContext {
@@ -383,6 +394,7 @@ where
                 &request.body,
                 &request.head_branch,
                 &request.base_branch,
+                credential,
             )
             .await
             .map_err(|e| ServiceError::Upstream(e.to_string()))?;
@@ -397,6 +409,7 @@ where
         &self,
         request: SubmitChangeRequestReviewRequest,
         _authorized: domain::policy::AuthorizedWrite,
+        credential: &ForgeCredential,
     ) -> Result<ChangeRequestReview, ServiceError> {
         // Validate event
         match request.event.as_str() {
@@ -424,6 +437,7 @@ where
                 request.index,
                 &request.body,
                 &request.event,
+                credential,
             )
             .await
             .map_err(|e| ServiceError::Upstream(e.to_string()))
@@ -471,6 +485,7 @@ mod tests {
             &self,
             _repository: &RepositoryRef,
             _index: u64,
+            _credential: &domain::ForgeCredential,
         ) -> Result<ChangeRequest, ForgeError> {
             unimplemented!()
         }
@@ -480,6 +495,7 @@ mod tests {
             _repository: &RepositoryRef,
             _index: u64,
             _body: &str,
+            _credential: &domain::ForgeCredential,
         ) -> Result<domain::ChangeRequestComment, ForgeError> {
             unimplemented!()
         }
@@ -491,6 +507,7 @@ mod tests {
             _body: &str,
             _head_branch: &str,
             _base_branch: &str,
+            _credential: &domain::ForgeCredential,
         ) -> Result<ChangeRequest, ForgeError> {
             unimplemented!()
         }
@@ -499,6 +516,7 @@ mod tests {
             &self,
             _repository: &RepositoryRef,
             _index: u64,
+            _credential: &domain::ForgeCredential,
         ) -> Result<ChangeRequest, ForgeError> {
             unimplemented!()
         }
@@ -539,6 +557,7 @@ mod tests {
             _index: u64,
             _body: &str,
             _event: &str,
+            _credential: &domain::ForgeCredential,
         ) -> Result<domain::ChangeRequestReview, ForgeError> {
             unimplemented!()
         }
@@ -552,6 +571,7 @@ mod tests {
             &self,
             _repository: &RepositoryRef,
             _index: u64,
+            _credential: &domain::ForgeCredential,
         ) -> Result<ChangeRequest, ForgeError> {
             unimplemented!()
         }
@@ -561,6 +581,7 @@ mod tests {
             _repository: &RepositoryRef,
             _index: u64,
             _body: &str,
+            _credential: &domain::ForgeCredential,
         ) -> Result<domain::ChangeRequestComment, ForgeError> {
             unimplemented!()
         }
@@ -572,6 +593,7 @@ mod tests {
             _body: &str,
             _head_branch: &str,
             _base_branch: &str,
+            _credential: &domain::ForgeCredential,
         ) -> Result<ChangeRequest, ForgeError> {
             unimplemented!()
         }
@@ -580,6 +602,7 @@ mod tests {
             &self,
             _repository: &RepositoryRef,
             _index: u64,
+            _credential: &domain::ForgeCredential,
         ) -> Result<ChangeRequest, ForgeError> {
             unimplemented!()
         }
@@ -615,6 +638,7 @@ mod tests {
             _index: u64,
             _body: &str,
             _event: &str,
+            _credential: &domain::ForgeCredential,
         ) -> Result<domain::ChangeRequestReview, ForgeError> {
             unimplemented!()
         }
@@ -714,6 +738,7 @@ mod tests {
             &self,
             repository: &RepositoryRef,
             index: u64,
+            _credential: &domain::ForgeCredential,
         ) -> Result<ChangeRequest, ForgeError> {
             Ok(ChangeRequest {
                 base_branch: "main".to_string(),
@@ -738,6 +763,7 @@ mod tests {
             _repository: &RepositoryRef,
             index: u64,
             body: &str,
+            _credential: &domain::ForgeCredential,
         ) -> Result<domain::ChangeRequestComment, ForgeError> {
             Ok(domain::ChangeRequestComment {
                 body: body.to_string(),
@@ -753,6 +779,7 @@ mod tests {
             body: &str,
             head_branch: &str,
             base_branch: &str,
+            _credential: &domain::ForgeCredential,
         ) -> Result<ChangeRequest, ForgeError> {
             Ok(ChangeRequest {
                 base_branch: base_branch.to_string(),
@@ -776,6 +803,7 @@ mod tests {
             &self,
             _repository: &RepositoryRef,
             index: u64,
+            _credential: &domain::ForgeCredential,
         ) -> Result<ChangeRequest, ForgeError> {
             Ok(ChangeRequest {
                 base_branch: "main".to_string(),
@@ -823,6 +851,7 @@ mod tests {
             index: u64,
             body: &str,
             event: &str,
+            _credential: &domain::ForgeCredential,
         ) -> Result<domain::ChangeRequestReview, ForgeError> {
             Ok(domain::ChangeRequestReview {
                 body: body.to_string(),
@@ -872,7 +901,7 @@ diff --git a/README.md b/README.md
     async fn commit_patch_rejects_invalid_diff() {
         let adapter = Arc::new(WriteTestForgeAdapter);
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit), None);
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
 
         let mut request = write_test_request();
         request.patch = "\
@@ -882,7 +911,11 @@ Binary files /dev/null and b/image.png differ
         .to_string();
 
         let err = orchestrator
-            .commit_patch(request, default_authorized())
+            .commit_patch(
+                request,
+                default_authorized(),
+                &domain::ForgeCredential { token: None },
+            )
             .await
             .expect_err("binary diff should be rejected");
 
@@ -894,13 +927,17 @@ Binary files /dev/null and b/image.png differ
     async fn commit_patch_rejects_wrong_branch_prefix() {
         let adapter = Arc::new(WriteTestForgeAdapter);
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit), None);
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
 
         let mut request = write_test_request();
         request.new_branch = "main".to_string();
 
         let err = orchestrator
-            .commit_patch(request, default_authorized())
+            .commit_patch(
+                request,
+                default_authorized(),
+                &domain::ForgeCredential { token: None },
+            )
             .await
             .expect_err("wrong branch prefix should be rejected");
 
@@ -912,7 +949,7 @@ Binary files /dev/null and b/image.png differ
     async fn commit_patch_rejects_protected_paths() {
         let adapter = Arc::new(WriteTestForgeAdapter);
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit), None);
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
 
         let mut request = write_test_request();
         request.patch = "\
@@ -926,7 +963,11 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
         .to_string();
 
         let err = orchestrator
-            .commit_patch(request, default_authorized())
+            .commit_patch(
+                request,
+                default_authorized(),
+                &domain::ForgeCredential { token: None },
+            )
             .await
             .expect_err("protected path should be rejected");
 
@@ -938,7 +979,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
     async fn open_change_request_rejects_wrong_branch_prefix() {
         let adapter = Arc::new(WriteTestForgeAdapter);
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit), None);
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
 
         let request = OpenChangeRequestRequest {
             agent: AgentIdentity {
@@ -959,7 +1000,11 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
         };
 
         let err = orchestrator
-            .open_change_request(request, default_authorized())
+            .open_change_request(
+                request,
+                default_authorized(),
+                &domain::ForgeCredential { token: None },
+            )
             .await
             .expect_err("wrong branch prefix should be rejected");
 
@@ -971,7 +1016,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
     async fn commit_patch_rejects_existing_branch_without_prefix() {
         let adapter = Arc::new(WriteTestForgeAdapter);
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit), None);
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
 
         let mut request = write_test_request();
         request.existing_branch = true;
@@ -985,7 +1030,11 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
         };
 
         let err = orchestrator
-            .commit_patch(request, authorized)
+            .commit_patch(
+                request,
+                authorized,
+                &domain::ForgeCredential { token: None },
+            )
             .await
             .expect_err("should reject existing_branch without prefix");
 
@@ -996,7 +1045,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
     async fn open_change_request_records_audit_and_creates() {
         let adapter = Arc::new(WriteTestForgeAdapter);
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit), None);
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
 
         let request = OpenChangeRequestRequest {
             agent: AgentIdentity {
@@ -1017,7 +1066,11 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
         };
 
         let response = orchestrator
-            .open_change_request(request, default_authorized())
+            .open_change_request(
+                request,
+                default_authorized(),
+                &domain::ForgeCredential { token: None },
+            )
             .await
             .expect("should succeed");
 
@@ -1039,6 +1092,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             &self,
             repository: &RepositoryRef,
             index: u64,
+            _credential: &domain::ForgeCredential,
         ) -> Result<ChangeRequest, ForgeError> {
             Ok(ChangeRequest {
                 base_branch: "main".to_string(),
@@ -1063,6 +1117,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             _repository: &RepositoryRef,
             _index: u64,
             _body: &str,
+            _credential: &domain::ForgeCredential,
         ) -> Result<domain::ChangeRequestComment, ForgeError> {
             unimplemented!()
         }
@@ -1074,6 +1129,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             _body: &str,
             _head_branch: &str,
             _base_branch: &str,
+            _credential: &domain::ForgeCredential,
         ) -> Result<ChangeRequest, ForgeError> {
             unimplemented!()
         }
@@ -1082,6 +1138,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             &self,
             _repository: &RepositoryRef,
             index: u64,
+            _credential: &domain::ForgeCredential,
         ) -> Result<ChangeRequest, ForgeError> {
             Ok(ChangeRequest {
                 base_branch: "main".to_string(),
@@ -1129,6 +1186,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             _index: u64,
             _body: &str,
             _event: &str,
+            _credential: &domain::ForgeCredential,
         ) -> Result<domain::ChangeRequestReview, ForgeError> {
             unimplemented!()
         }
@@ -1157,10 +1215,14 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             head_branch: "agent/fix".to_string(),
         });
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit), None);
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
 
         let result = orchestrator
-            .close_change_request(close_test_request(42), default_authorized())
+            .close_change_request(
+                close_test_request(42),
+                default_authorized(),
+                &domain::ForgeCredential { token: None },
+            )
             .await
             .expect("should succeed");
 
@@ -1176,7 +1238,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             head_branch: "agent/fix".to_string(),
         });
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit), None);
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
 
         let authorized = domain::policy::AuthorizedWrite {
             policy: domain::policy::PolicyConfig {
@@ -1186,7 +1248,11 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
         };
 
         let err = orchestrator
-            .close_change_request(close_test_request(1), authorized)
+            .close_change_request(
+                close_test_request(1),
+                authorized,
+                &domain::ForgeCredential { token: None },
+            )
             .await
             .expect_err("missing prefix should be rejected");
 
@@ -1200,10 +1266,14 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             head_branch: "other-agent/fix".to_string(),
         });
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit), None);
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
 
         let err = orchestrator
-            .close_change_request(close_test_request(1), default_authorized())
+            .close_change_request(
+                close_test_request(1),
+                default_authorized(),
+                &domain::ForgeCredential { token: None },
+            )
             .await
             .expect_err("wrong prefix should be rejected");
 
@@ -1235,10 +1305,14 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
     async fn comment_on_change_request_records_audit_and_comments() {
         let adapter = Arc::new(WriteTestForgeAdapter);
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit), None);
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
 
         let result = orchestrator
-            .comment_on_change_request(comment_test_request(42), default_authorized())
+            .comment_on_change_request(
+                comment_test_request(42),
+                default_authorized(),
+                &domain::ForgeCredential { token: None },
+            )
             .await
             .expect("should succeed");
 
@@ -1273,10 +1347,14 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
     async fn submit_review_records_audit_and_submits() {
         let adapter = Arc::new(WriteTestForgeAdapter);
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit), None);
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
 
         let result = orchestrator
-            .submit_change_request_review(review_test_request(42, "APPROVED"), default_authorized())
+            .submit_change_request_review(
+                review_test_request(42, "APPROVED"),
+                default_authorized(),
+                &domain::ForgeCredential { token: None },
+            )
             .await
             .expect("should succeed");
 
@@ -1290,14 +1368,170 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
     async fn submit_review_rejects_invalid_event() {
         let adapter = Arc::new(WriteTestForgeAdapter);
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit), None);
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
 
         let err = orchestrator
-            .submit_change_request_review(review_test_request(1, "INVALID"), default_authorized())
+            .submit_change_request_review(
+                review_test_request(1, "INVALID"),
+                default_authorized(),
+                &domain::ForgeCredential { token: None },
+            )
             .await
             .expect_err("invalid event should be rejected");
 
         assert!(matches!(err, ServiceError::Validation(_)));
         assert_eq!(audit.records().len(), 0);
+    }
+
+    // --- credential override tests ---
+
+    /// Sentinel to distinguish "not called" from "called with None token".
+    enum CapturedCredential {
+        NotCalled,
+        Called(Option<String>),
+    }
+
+    struct CredentialCapturingAdapter {
+        captured: std::sync::Mutex<CapturedCredential>,
+    }
+
+    impl CredentialCapturingAdapter {
+        fn new() -> Self {
+            Self {
+                captured: std::sync::Mutex::new(CapturedCredential::NotCalled),
+            }
+        }
+
+        fn captured_token(&self) -> Option<String> {
+            match &*self.captured.lock().unwrap() {
+                CapturedCredential::NotCalled => panic!("adapter was not called"),
+                CapturedCredential::Called(t) => t.clone(),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ForgeAdapter for CredentialCapturingAdapter {
+        async fn close_change_request(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &domain::ForgeCredential,
+        ) -> Result<ChangeRequest, ForgeError> {
+            unimplemented!()
+        }
+
+        async fn comment_on_change_request(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &str,
+            credential: &domain::ForgeCredential,
+        ) -> Result<domain::ChangeRequestComment, ForgeError> {
+            *self.captured.lock().unwrap() = CapturedCredential::Called(credential.token.clone());
+            Ok(domain::ChangeRequestComment {
+                body: "test".to_string(),
+                id: 1,
+                index: 1,
+            })
+        }
+
+        async fn create_change_request(
+            &self,
+            _: &RepositoryRef,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &domain::ForgeCredential,
+        ) -> Result<ChangeRequest, ForgeError> {
+            unimplemented!()
+        }
+
+        async fn get_change_request(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &domain::ForgeCredential,
+        ) -> Result<ChangeRequest, ForgeError> {
+            unimplemented!()
+        }
+
+        async fn get_change_request_diff(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+        ) -> Result<String, ForgeError> {
+            unimplemented!()
+        }
+
+        async fn list_change_requests(
+            &self,
+            _: &RepositoryRef,
+            _: Option<&ChangeRequestState>,
+        ) -> Result<Vec<ChangeRequest>, ForgeError> {
+            unimplemented!()
+        }
+
+        async fn read_repository_file(
+            &self,
+            _: &RepositoryRef,
+            _: &str,
+            _: Option<&str>,
+        ) -> Result<domain::ReadRepositoryFileResponse, ForgeError> {
+            unimplemented!()
+        }
+
+        async fn submit_change_request_review(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &str,
+            _: &str,
+            _: &domain::ForgeCredential,
+        ) -> Result<domain::ChangeRequestReview, ForgeError> {
+            unimplemented!()
+        }
+    }
+
+    #[tokio::test]
+    async fn credential_override_reaches_adapter() {
+        let adapter = Arc::new(CredentialCapturingAdapter::new());
+        let audit = Arc::new(InMemoryAuditSink::new());
+        let orchestrator = WriteOrchestrator::new(Arc::clone(&adapter), Arc::clone(&audit));
+
+        let override_cred = domain::ForgeCredential {
+            token: Some("per-agent-token".to_string()),
+        };
+
+        orchestrator
+            .comment_on_change_request(
+                comment_test_request(1),
+                default_authorized(),
+                &override_cred,
+            )
+            .await
+            .expect("should succeed");
+
+        assert_eq!(
+            adapter.captured_token(),
+            Some("per-agent-token".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn credential_none_reaches_adapter() {
+        let adapter = Arc::new(CredentialCapturingAdapter::new());
+        let audit = Arc::new(InMemoryAuditSink::new());
+        let orchestrator = WriteOrchestrator::new(Arc::clone(&adapter), Arc::clone(&audit));
+
+        let no_override = domain::ForgeCredential { token: None };
+
+        orchestrator
+            .comment_on_change_request(comment_test_request(1), default_authorized(), &no_override)
+            .await
+            .expect("should succeed");
+
+        assert_eq!(adapter.captured_token(), None);
     }
 }

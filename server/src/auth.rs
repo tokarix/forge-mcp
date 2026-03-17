@@ -47,6 +47,7 @@ pub fn extract_token(headers: &axum::http::HeaderMap) -> Option<String> {
 /// Resolved agent identity and policy from a bearer token.
 #[derive(Clone, Debug)]
 pub struct ResolvedAgent {
+    pub forge_identities: HashMap<String, crate::config::ForgeIdentityConfig>,
     pub identity: AgentIdentity,
     pub policy: PolicyConfig,
     pub policy_config: crate::config::AgentPolicyConfig,
@@ -75,6 +76,7 @@ impl AgentRegistry {
             agents.insert(
                 agent.token.clone(),
                 ResolvedAgent {
+                    forge_identities: agent.forge_identity.clone(),
                     identity: AgentIdentity {
                         agent_id: agent.agent_id.clone(),
                         session_id: agent.session_id.clone(),
@@ -102,6 +104,7 @@ mod tests {
     fn test_configs() -> Vec<AgentConfig> {
         vec![AgentConfig {
             agent_id: "codex".to_string(),
+            forge_identity: std::collections::HashMap::new(),
             policy: AgentPolicyConfig {
                 allowed_repos: vec!["test/org/repo".to_string()],
                 branch_prefix: Some("agent/codex/".to_string()),

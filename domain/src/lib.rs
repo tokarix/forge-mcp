@@ -7,6 +7,19 @@ use thiserror::Error;
 pub mod diff;
 pub mod policy;
 
+#[derive(Clone)]
+pub struct ForgeCredential {
+    pub token: Option<String>,
+}
+
+impl std::fmt::Debug for ForgeCredential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ForgeCredential")
+            .field("token", &self.token.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum ForgeKind {
     Forgejo,
@@ -273,6 +286,7 @@ pub trait RepositoryWriteService: Send + Sync {
         &self,
         request: CloseChangeRequestRequest,
         authorized: policy::AuthorizedWrite,
+        credential: &ForgeCredential,
     ) -> Result<ChangeRequest, ServiceError>;
 
     /// Posts a general comment on a change request.
@@ -285,6 +299,7 @@ pub trait RepositoryWriteService: Send + Sync {
         &self,
         request: CommentOnChangeRequestRequest,
         authorized: policy::AuthorizedWrite,
+        credential: &ForgeCredential,
     ) -> Result<ChangeRequestComment, ServiceError>;
 
     /// Applies a patch to a new branch and pushes it.
@@ -296,6 +311,7 @@ pub trait RepositoryWriteService: Send + Sync {
         &self,
         request: CommitPatchRequest,
         authorized: policy::AuthorizedWrite,
+        credential: &ForgeCredential,
     ) -> Result<CommitPatchResponse, ServiceError>;
 
     /// Opens a change request (pull request) on the forge.
@@ -307,6 +323,7 @@ pub trait RepositoryWriteService: Send + Sync {
         &self,
         request: OpenChangeRequestRequest,
         authorized: policy::AuthorizedWrite,
+        credential: &ForgeCredential,
     ) -> Result<OpenChangeRequestResponse, ServiceError>;
 
     /// Submits a formal review on a change request.
@@ -319,13 +336,31 @@ pub trait RepositoryWriteService: Send + Sync {
         &self,
         request: SubmitChangeRequestReviewRequest,
         authorized: policy::AuthorizedWrite,
+        credential: &ForgeCredential,
     ) -> Result<ChangeRequestReview, ServiceError>;
 }
 
 #[cfg(test)]
 mod tests {
     use super::validate_repository_path;
-    use super::{ChangeRequest, ChangeRequestState};
+    use super::{ChangeRequest, ChangeRequestState, ForgeCredential};
+
+    #[test]
+    fn forge_credential_debug_redacts_token() {
+        let cred = ForgeCredential {
+            token: Some("secret-token".to_string()),
+        };
+        let debug = format!("{cred:?}");
+        assert!(!debug.contains("secret-token"));
+        assert!(debug.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn forge_credential_debug_none_token() {
+        let cred = ForgeCredential { token: None };
+        let debug = format!("{cred:?}");
+        assert!(debug.contains("None"));
+    }
 
     #[test]
     fn change_request_serializes_to_json() {

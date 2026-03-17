@@ -5,7 +5,7 @@ use std::sync::Once;
 use async_trait::async_trait;
 use base64::Engine;
 use domain::{
-    ChangeRequest, ChangeRequestComment, ChangeRequestReview, ChangeRequestState,
+    ChangeRequest, ChangeRequestComment, ChangeRequestReview, ChangeRequestState, ForgeCredential,
     ReadRepositoryFileResponse, RepositoryRef,
 };
 use reqwest::StatusCode;
@@ -31,6 +31,7 @@ pub trait ForgeAdapter: Send + Sync {
         &self,
         repository: &RepositoryRef,
         index: u64,
+        credential: &ForgeCredential,
     ) -> Result<ChangeRequest, ForgeError>;
 
     /// Posts a general comment on a change request.
@@ -39,6 +40,7 @@ pub trait ForgeAdapter: Send + Sync {
         repository: &RepositoryRef,
         index: u64,
         body: &str,
+        credential: &ForgeCredential,
     ) -> Result<ChangeRequestComment, ForgeError>;
 
     /// Creates a change request (pull request) on the forge.
@@ -49,6 +51,7 @@ pub trait ForgeAdapter: Send + Sync {
         body: &str,
         head_branch: &str,
         base_branch: &str,
+        credential: &ForgeCredential,
     ) -> Result<ChangeRequest, ForgeError>;
 
     /// Gets a single change request by index.
@@ -56,6 +59,7 @@ pub trait ForgeAdapter: Send + Sync {
         &self,
         repository: &RepositoryRef,
         index: u64,
+        credential: &ForgeCredential,
     ) -> Result<ChangeRequest, ForgeError>;
 
     /// Gets the unified diff for a change request.
@@ -92,6 +96,7 @@ pub trait ForgeAdapter: Send + Sync {
         index: u64,
         body: &str,
         event: &str,
+        credential: &ForgeCredential,
     ) -> Result<ChangeRequestReview, ForgeError>;
 }
 
@@ -202,6 +207,7 @@ impl ForgeAdapter for ForgejoAdapter {
         &self,
         repository: &RepositoryRef,
         index: u64,
+        credential: &ForgeCredential,
     ) -> Result<ChangeRequest, ForgeError> {
         let url = format!(
             "{}/api/v1/repos/{}/{}/pulls/{index}",
@@ -210,11 +216,12 @@ impl ForgeAdapter for ForgejoAdapter {
             repository.name,
         );
 
+        let effective_token = credential.token.as_deref().or(self.config.token.as_deref());
         let mut request = self
             .client
             .patch(&url)
             .json(&serde_json::json!({"state": "closed"}));
-        if let Some(token) = &self.config.token {
+        if let Some(token) = effective_token {
             request = request.bearer_auth(token);
         }
 
@@ -234,6 +241,7 @@ impl ForgeAdapter for ForgejoAdapter {
         repository: &RepositoryRef,
         index: u64,
         body: &str,
+        credential: &ForgeCredential,
     ) -> Result<ChangeRequestComment, ForgeError> {
         let url = format!(
             "{}/api/v1/repos/{}/{}/issues/{index}/comments",
@@ -242,11 +250,12 @@ impl ForgeAdapter for ForgejoAdapter {
             repository.name,
         );
 
+        let effective_token = credential.token.as_deref().or(self.config.token.as_deref());
         let mut request = self
             .client
             .post(&url)
             .json(&serde_json::json!({"body": body}));
-        if let Some(token) = &self.config.token {
+        if let Some(token) = effective_token {
             request = request.bearer_auth(token);
         }
 
@@ -272,6 +281,7 @@ impl ForgeAdapter for ForgejoAdapter {
         body: &str,
         head_branch: &str,
         base_branch: &str,
+        credential: &ForgeCredential,
     ) -> Result<ChangeRequest, ForgeError> {
         let url = format!(
             "{}/api/v1/repos/{}/{}/pulls",
@@ -280,13 +290,14 @@ impl ForgeAdapter for ForgejoAdapter {
             repository.name,
         );
 
+        let effective_token = credential.token.as_deref().or(self.config.token.as_deref());
         let mut request = self.client.post(&url).json(&serde_json::json!({
             "base": base_branch,
             "body": body,
             "head": head_branch,
             "title": title,
         }));
-        if let Some(token) = &self.config.token {
+        if let Some(token) = effective_token {
             request = request.bearer_auth(token);
         }
 
@@ -305,6 +316,7 @@ impl ForgeAdapter for ForgejoAdapter {
         &self,
         repository: &RepositoryRef,
         index: u64,
+        credential: &ForgeCredential,
     ) -> Result<ChangeRequest, ForgeError> {
         let url = format!(
             "{}/api/v1/repos/{}/{}/pulls/{index}",
@@ -313,8 +325,9 @@ impl ForgeAdapter for ForgejoAdapter {
             repository.name,
         );
 
+        let effective_token = credential.token.as_deref().or(self.config.token.as_deref());
         let mut request = self.client.get(&url);
-        if let Some(token) = &self.config.token {
+        if let Some(token) = effective_token {
             request = request.bearer_auth(token);
         }
 
@@ -469,6 +482,7 @@ impl ForgeAdapter for ForgejoAdapter {
         index: u64,
         body: &str,
         event: &str,
+        credential: &ForgeCredential,
     ) -> Result<ChangeRequestReview, ForgeError> {
         let url = format!(
             "{}/api/v1/repos/{}/{}/pulls/{index}/reviews",
@@ -477,11 +491,12 @@ impl ForgeAdapter for ForgejoAdapter {
             repository.name,
         );
 
+        let effective_token = credential.token.as_deref().or(self.config.token.as_deref());
         let mut request = self
             .client
             .post(&url)
             .json(&serde_json::json!({"body": body, "event": event}));
-        if let Some(token) = &self.config.token {
+        if let Some(token) = effective_token {
             request = request.bearer_auth(token);
         }
 
