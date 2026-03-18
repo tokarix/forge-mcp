@@ -12,12 +12,14 @@ use axum::{
 use domain::{
     CloseChangeRequestRequest, CommentOnChangeRequestRequest, CommitPatchRequest, ForgeKind,
     GetChangeRequestRequest, ListChangeRequestsRequest, OpenChangeRequestRequest,
-    ReadRepositoryFileRequest, RepositoryRef, ServiceError, SubmitChangeRequestReviewRequest,
+    ReadRepositoryFileRequest, RebaseBranchRequest, RepositoryRef, ServiceError,
+    SubmitChangeRequestReviewRequest,
 };
 
 use crate::api::{
     CommentBody, CommitPatchBody, CommitPatchResult, ContentsPath, ContentsQuery, ContentsResult,
-    ErrorBody, ListPullsQuery, OpenPullBody, PullPath, RepoPath, SubmitReviewBody,
+    ErrorBody, ListPullsQuery, OpenPullBody, PullPath, RebaseBranchBody, RebaseBranchResult,
+    RebaseOperationBody, RepoPath, SubmitReviewBody,
 };
 use crate::auth::{AgentRegistry, extract_bearer_token};
 
@@ -419,6 +421,90 @@ pub async fn post_patches(
             commit_sha: result.commit_sha,
         }),
     ))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/repos/{forge}/{owner}/{repo}/rebase",
+    params(
+        ("forge" = String, Path, description = "Forge alias"),
+        ("owner" = String, Path, description = "Repository owner"),
+        ("repo" = String, Path, description = "Repository name"),
+    ),
+    request_body = RebaseBranchBody,
+    responses(
+        (status = 200, description = "Branch rebased", body = RebaseBranchResult),
+        (status = 401, description = "Unauthorized", body = ErrorBody),
+    ),
+    security(("bearer" = []))
+)]
+/// POST /api/v1/repos/{forge}/{owner}/{repo}/rebase
+pub async fn post_rebase(
+    State(state): State<AppState>,
+    Path(path): Path<RepoPath>,
+    headers: HeaderMap,
+    Json(body): Json<RebaseBranchBody>,
+) -> impl IntoResponse {
+    let forge = resolve_forge(&state.forge_registry, &path.forge)?;
+    let agent = resolve_agent(
+        &headers,
+        &state.agent_registry,
+        &path.forge,
+        &path.owner,
+        &path.repo,
+    )?;
+    let credential = resolve_credential(agent, &path.forge, forge);
+    let identity = agent.identity.clone();
+    let policy = agent.policy.clone();
+
+    // Per-agent branch prefix check
+    let policy_context = domain::policy::PolicyContext {
+        action: "rebase_branch".to_string(),
+        agent: identity.clone(),
+        repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
+        target_branch: body.branch.clone(),
+        touched_paths: vec![],
+    };
+    let decision = domain::policy::evaluate(&policy, &policy_context)
+        .map_err(|e| map_service_error(ServiceError::Validation(e.to_string())))?;
+    if !decision.is_allowed() {
+        return Err(map_service_error(ServiceError::PolicyDenied {
+            reasons: decision.reasons.join("; "),
+        }));
+    }
+
+    let authorized = domain::policy::AuthorizedWrite { policy };
+
+    let operations: Vec<domain::RebaseOperation> = body
+        .operations
+        .into_iter()
+        .map(|op| match op {
+            RebaseOperationBody::Fixup { commit, into } => {
+                domain::RebaseOperation::Fixup { commit, into }
+            }
+        })
+        .collect();
+
+    let result = forge
+        .write_service
+        .rebase_branch(
+            RebaseBranchRequest {
+                agent: identity,
+                base_branch: body.base_branch,
+                branch: body.branch,
+                operations,
+                repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
+            },
+            authorized,
+            &credential,
+        )
+        .await
+        .map_err(map_service_error)?;
+
+    Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(RebaseBranchResult {
+        branch: result.branch,
+        commit_sha: result.commit_sha,
+    }))
 }
 
 #[utoipa::path(
@@ -944,6 +1030,15 @@ mod tests {
                 },
                 repository: request.repository,
             })
+        }
+
+        async fn rebase_branch(
+            &self,
+            _request: domain::RebaseBranchRequest,
+            _authorized: domain::policy::AuthorizedWrite,
+            _credential: &domain::ForgeCredential,
+        ) -> Result<domain::RebaseBranchResponse, ServiceError> {
+            unimplemented!()
         }
 
         async fn submit_change_request_review(

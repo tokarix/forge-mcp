@@ -8,8 +8,9 @@ use domain::{
     ChangeRequest, ChangeRequestComment, ChangeRequestDiff, ChangeRequestReview,
     CloseChangeRequestRequest, CommentOnChangeRequestRequest, ForgeCredential,
     GetChangeRequestDiffRequest, GetChangeRequestRequest, ListChangeRequestsRequest,
-    ReadRepositoryFileRequest, ReadRepositoryFileResponse, RepositoryReadService, ServiceError,
-    SubmitChangeRequestReviewRequest, validate_repository_path,
+    ReadRepositoryFileRequest, ReadRepositoryFileResponse, RebaseBranchRequest,
+    RebaseBranchResponse, RepositoryReadService, ServiceError, SubmitChangeRequestReviewRequest,
+    validate_repository_path,
 };
 use forge::ForgeAdapter;
 
@@ -142,6 +143,89 @@ where
     }
 }
 
+/// Validates rebase operations against the list of commits in the branch.
+///
+/// Checks that:
+/// - All referenced SHAs exist in the commit list
+/// - No commit is used as both a fixup source and target
+/// - No commit fixups into itself
+/// - Each commit appears as a fixup source at most once
+/// - Fixup targets appear before sources in commit order
+fn validate_rebase_operations(
+    operations: &[domain::RebaseOperation],
+    commits: &[String],
+) -> Result<(), ServiceError> {
+    use std::collections::{HashMap, HashSet};
+
+    let commit_set: HashSet<&str> = commits.iter().map(String::as_str).collect();
+    let commit_index: HashMap<&str, usize> = commits
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (c.as_str(), i))
+        .collect();
+
+    let mut fixup_sources: HashSet<String> = HashSet::new();
+    let mut fixup_targets: HashSet<String> = HashSet::new();
+
+    for op in operations {
+        match op {
+            domain::RebaseOperation::Fixup { commit, into } => {
+                // Check SHAs exist
+                if !commit_set.contains(commit.as_str()) {
+                    return Err(ServiceError::Validation(format!(
+                        "fixup commit '{commit}' not found in branch commits"
+                    )));
+                }
+                if !commit_set.contains(into.as_str()) {
+                    return Err(ServiceError::Validation(format!(
+                        "fixup target '{into}' not found in branch commits"
+                    )));
+                }
+
+                // No self-fixup
+                if commit == into {
+                    return Err(ServiceError::Validation(format!(
+                        "commit '{commit}' cannot fixup into itself"
+                    )));
+                }
+
+                // Target must come before source in commit order
+                let target_idx = commit_index[into.as_str()];
+                let source_idx = commit_index[commit.as_str()];
+                if target_idx >= source_idx {
+                    return Err(ServiceError::Validation(format!(
+                        "fixup target '{into}' must come before source '{commit}' in commit order"
+                    )));
+                }
+
+                // Each commit used as fixup source at most once
+                if !fixup_sources.insert(commit.clone()) {
+                    return Err(ServiceError::Validation(format!(
+                        "commit '{commit}' is used as fixup source more than once"
+                    )));
+                }
+
+                fixup_targets.insert(into.clone());
+            }
+        }
+    }
+
+    // A commit cannot be both a fixup source and target
+    let conflicts: Vec<_> = fixup_sources.intersection(&fixup_targets).collect();
+    if !conflicts.is_empty() {
+        return Err(ServiceError::Validation(format!(
+            "commit(s) used as both fixup source and target: {}",
+            conflicts
+                .iter()
+                .map(|c| &c[..std::cmp::min(7, c.len())])
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
+    }
+
+    Ok(())
+}
+
 pub struct WriteOrchestrator<A, S>
 where
     A: ForgeAdapter,
@@ -166,6 +250,7 @@ where
 }
 
 #[async_trait]
+#[allow(clippy::too_many_lines)]
 impl<A, S> domain::RepositoryWriteService for WriteOrchestrator<A, S>
 where
     A: ForgeAdapter + 'static,
@@ -329,8 +414,12 @@ where
         let token = credential.token.clone();
 
         let git_result = tokio::task::spawn_blocking(move || {
-            let workspace =
-                git_exec::GitWorkspace::clone_repo(&clone_url, &clone_branch, token.as_deref())?;
+            let workspace = git_exec::GitWorkspace::clone_repo(
+                &clone_url,
+                &clone_branch,
+                token.as_deref(),
+                true,
+            )?;
             if !existing {
                 workspace.create_branch(&new_branch)?;
             }
@@ -402,6 +491,166 @@ where
         Ok(domain::OpenChangeRequestResponse {
             change_request,
             repository: request.repository,
+        })
+    }
+
+    async fn rebase_branch(
+        &self,
+        request: RebaseBranchRequest,
+        authorized: domain::policy::AuthorizedWrite,
+        credential: &ForgeCredential,
+    ) -> Result<RebaseBranchResponse, ServiceError> {
+        // 1. Validate branch prefix
+        let prefix = authorized
+            .policy
+            .branch_prefix
+            .as_deref()
+            .filter(|p| !p.is_empty())
+            .ok_or_else(|| ServiceError::PolicyDenied {
+                reasons: "rebase_branch requires a configured branch_prefix".to_string(),
+            })?;
+
+        if !request.branch.starts_with(prefix) {
+            return Err(ServiceError::PolicyDenied {
+                reasons: format!(
+                    "branch '{}' does not start with required prefix '{prefix}'",
+                    request.branch
+                ),
+            });
+        }
+
+        // 2. Reject empty operations
+        if request.operations.is_empty() {
+            return Err(ServiceError::Validation(
+                "operations must not be empty".to_string(),
+            ));
+        }
+
+        // 3. Clone full depth, check out the branch
+        let clone_url = format!(
+            "{}/{}/{}.git",
+            request.repository.host.trim_end_matches('/'),
+            request.repository.owner,
+            request.repository.name,
+        );
+        let branch = request.branch.clone();
+        let base_branch = request.base_branch.clone();
+        let operations = request.operations.clone();
+        let agent_identity = request.agent.clone();
+        let repository = request.repository.clone();
+        let token = credential.token.clone();
+
+        let git_result = tokio::task::spawn_blocking(move || {
+            let workspace =
+                git_exec::GitWorkspace::clone_repo(&clone_url, &branch, token.as_deref(), false)
+                    .map_err(|e| ServiceError::GitExec(e.to_string()))?;
+
+            // 4. Compute merge base
+            let mb = workspace
+                .merge_base(&format!("origin/{base_branch}"), "HEAD")
+                .map_err(|e| ServiceError::GitExec(e.to_string()))?;
+
+            // 5. Check for merge commits
+            if workspace
+                .has_merge_commits(&mb)
+                .map_err(|e| ServiceError::GitExec(e.to_string()))?
+            {
+                return Err(ServiceError::Validation(
+                    "branch contains merge commits; rebase is not safe".to_string(),
+                ));
+            }
+
+            // 6. List commits in range and validate operations
+            let commits = workspace
+                .list_commits_in_range(&mb)
+                .map_err(|e| ServiceError::GitExec(e.to_string()))?;
+
+            validate_rebase_operations(&operations, &commits)?;
+
+            // 7. Capture old HEAD SHA and tree SHA
+            let old_head = workspace
+                .rev_parse("HEAD")
+                .map_err(|e| ServiceError::GitExec(e.to_string()))?;
+            let old_tree = workspace
+                .rev_parse("HEAD^{tree}")
+                .map_err(|e| ServiceError::GitExec(e.to_string()))?;
+
+            // 8. Convert domain operations to git-exec operations
+            let git_ops: Vec<git_exec::RebaseOperation> = operations
+                .iter()
+                .map(|op| match op {
+                    domain::RebaseOperation::Fixup { commit, into } => {
+                        git_exec::RebaseOperation::Fixup {
+                            commit: commit.clone(),
+                            into: into.clone(),
+                        }
+                    }
+                })
+                .collect();
+
+            // 9. Run rebase
+            workspace
+                .rebase_interactive(&mb, &git_ops)
+                .map_err(|e| ServiceError::GitExec(e.to_string()))?;
+
+            // 10. Capture new HEAD SHA and tree SHA
+            let new_head = workspace
+                .rev_parse("HEAD")
+                .map_err(|e| ServiceError::GitExec(e.to_string()))?;
+            let new_tree = workspace
+                .rev_parse("HEAD^{tree}")
+                .map_err(|e| ServiceError::GitExec(e.to_string()))?;
+
+            // 11. Verify tree integrity
+            if old_tree != new_tree {
+                return Err(ServiceError::Validation(format!(
+                    "rebase changed the tree: old={old_tree}, new={new_tree}; \
+                     this indicates a conflict or data loss"
+                )));
+            }
+
+            Ok((
+                workspace,
+                old_head,
+                new_head,
+                branch,
+                agent_identity,
+                repository,
+            ))
+        })
+        .await
+        .map_err(|e| ServiceError::GitExec(e.to_string()))?;
+
+        let (workspace, old_head, new_head, branch, agent_identity, repository) = git_result?;
+
+        // 12. Audit BEFORE push — failure blocks the write
+        let op_count = request.operations.len();
+        self.audit_sink
+            .record(AuditRecord {
+                agent: agent_identity,
+                action: "rebase_branch".to_string(),
+                repository: repository.clone(),
+                target: format!(
+                    "{}..{} fixup:{op_count} {branch}",
+                    &old_head[..8.min(old_head.len())],
+                    &new_head[..8.min(new_head.len())],
+                ),
+            })
+            .await
+            .map_err(|e| ServiceError::Audit(e.to_string()))?;
+
+        // 13. Force push with lease (after audit succeeds)
+        tokio::task::spawn_blocking(move || {
+            workspace
+                .force_push_with_lease(&branch, &old_head)
+                .map_err(|e| ServiceError::GitExec(e.to_string()))
+        })
+        .await
+        .map_err(|e| ServiceError::GitExec(e.to_string()))??;
+
+        Ok(RebaseBranchResponse {
+            branch: request.branch,
+            commit_sha: new_head,
         })
     }
 

@@ -583,6 +583,15 @@ mod tests {
             })
         }
 
+        async fn rebase_branch(
+            &self,
+            _request: domain::RebaseBranchRequest,
+            _authorized: domain::policy::AuthorizedWrite,
+            _credential: &domain::ForgeCredential,
+        ) -> Result<domain::RebaseBranchResponse, ServiceError> {
+            unimplemented!()
+        }
+
         async fn submit_change_request_review(
             &self,
             _request: domain::SubmitChangeRequestReviewRequest,

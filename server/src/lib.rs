@@ -25,6 +25,7 @@ use utoipa_scalar::{Scalar, Servable};
         handlers::list_pulls,
         handlers::post_patches,
         handlers::post_pulls,
+        handlers::post_rebase,
         handlers::submit_pull_review,
     ),
     components(schemas(
@@ -34,6 +35,9 @@ use utoipa_scalar::{Scalar, Servable};
         api::ContentsResult,
         api::ErrorBody,
         api::OpenPullBody,
+        api::RebaseBranchBody,
+        api::RebaseBranchResult,
+        api::RebaseOperationBody,
         api::SubmitReviewBody,
     )),
     modifiers(&SecurityAddon),
@@ -76,6 +80,10 @@ pub fn build_router(state: AppState, enable_docs: bool) -> Router {
         .route(
             "/api/v1/repos/{forge}/{owner}/{repo}/pulls",
             get(handlers::list_pulls).post(handlers::post_pulls),
+        )
+        .route(
+            "/api/v1/repos/{forge}/{owner}/{repo}/rebase",
+            post(handlers::post_rebase),
         )
         .route(
             "/api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}",

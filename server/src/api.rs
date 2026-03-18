@@ -27,6 +27,28 @@ pub struct CommitPatchResult {
     pub commit_sha: String,
 }
 
+/// POST /api/v1/repos/{forge}/{owner}/{repo}/rebase
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct RebaseBranchBody {
+    pub base_branch: String,
+    pub branch: String,
+    pub operations: Vec<RebaseOperationBody>,
+}
+
+/// A single rebase operation.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum RebaseOperationBody {
+    Fixup { commit: String, into: String },
+}
+
+/// Response for POST /rebase
+#[derive(Debug, Serialize, ToSchema)]
+pub struct RebaseBranchResult {
+    pub branch: String,
+    pub commit_sha: String,
+}
+
 /// POST /api/v1/repos/{owner}/{repo}/pulls
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct OpenPullBody {

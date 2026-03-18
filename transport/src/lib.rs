@@ -145,6 +145,34 @@ pub struct OpenChangeRequestTool {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct RebaseBranchTool {
+    /// Base branch to compute merge-base against (e.g. "main").
+    pub base_branch: String,
+    /// Branch to rebase (must match your configured branch prefix).
+    pub branch: String,
+    /// Forge alias -- use `forge_info` to discover available aliases.
+    pub forge: String,
+    /// List of rebase operations as JSON objects. Each object must have a
+    /// `"type"` field. Currently supported: `{"type": "fixup", "commit": "<sha>", "into": "<sha>"}`.
+    pub operations: Vec<RebaseBranchOperationTool>,
+    /// Repository owner or organization.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum RebaseBranchOperationTool {
+    Fixup {
+        /// Full SHA of the commit to squash.
+        commit: String,
+        /// Full SHA of the commit to squash into.
+        into: String,
+    },
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct ReadRepositoryFileTool {
     /// Forge alias -- use `forge_info` to discover available aliases.
     pub forge: String,
@@ -484,6 +512,47 @@ impl McpShim {
             "body": request.body,
             "head_branch": request.head_branch,
             "title": request.title,
+        });
+        self.gateway_post(url, &body).await
+    }
+
+    /// Rebase a branch by squashing (fixup) commits.
+    #[tool(
+        name = "rebase_branch",
+        description = "Rebase a branch by squashing (fixup) commits. Performs a full clone, validates operations, runs interactive rebase, verifies tree integrity, and force-pushes with lease. Only works on branches matching your configured branch prefix."
+    )]
+    async fn rebase_branch(
+        &self,
+        Parameters(request): Parameters<RebaseBranchTool>,
+    ) -> Result<String, McpError> {
+        let url = self.build_url(&[
+            "api",
+            "v1",
+            "repos",
+            &request.forge,
+            &request.owner,
+            &request.repo,
+            "rebase",
+        ])?;
+
+        let operations: Vec<serde_json::Value> = request
+            .operations
+            .iter()
+            .map(|op| match op {
+                RebaseBranchOperationTool::Fixup { commit, into } => {
+                    serde_json::json!({
+                        "type": "fixup",
+                        "commit": commit,
+                        "into": into,
+                    })
+                }
+            })
+            .collect();
+
+        let body = serde_json::json!({
+            "base_branch": request.base_branch,
+            "branch": request.branch,
+            "operations": operations,
         });
         self.gateway_post(url, &body).await
     }

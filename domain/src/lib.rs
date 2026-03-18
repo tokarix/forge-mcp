@@ -166,6 +166,26 @@ pub struct OpenChangeRequestRequest {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RebaseOperation {
+    Fixup { commit: String, into: String },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RebaseBranchRequest {
+    pub agent: AgentIdentity,
+    pub base_branch: String,
+    pub branch: String,
+    pub operations: Vec<RebaseOperation>,
+    pub repository: RepositoryRef,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct RebaseBranchResponse {
+    pub branch: String,
+    pub commit_sha: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SubmitChangeRequestReviewRequest {
     pub agent: AgentIdentity,
     pub body: String,
@@ -325,6 +345,21 @@ pub trait RepositoryWriteService: Send + Sync {
         authorized: policy::AuthorizedWrite,
         credential: &ForgeCredential,
     ) -> Result<OpenChangeRequestResponse, ServiceError>;
+
+    /// Rebases a branch using the given operations (e.g. fixup).
+    ///
+    /// Performs a full clone, validates operations, runs interactive rebase,
+    /// verifies tree integrity, and force-pushes with lease.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if validation, git execution, or audit fails.
+    async fn rebase_branch(
+        &self,
+        request: RebaseBranchRequest,
+        authorized: policy::AuthorizedWrite,
+        credential: &ForgeCredential,
+    ) -> Result<RebaseBranchResponse, ServiceError>;
 
     /// Submits a formal review on a change request.
     ///
