@@ -84,6 +84,17 @@ pub trait ForgeAdapter: Send + Sync {
         state: Option<&ChangeRequestState>,
     ) -> Result<Vec<ChangeRequest>, ForgeError>;
 
+    /// Schedules a pull request for automatic merge when all branch
+    /// protection requirements are met.
+    async fn schedule_auto_merge(
+        &self,
+        repository: &RepositoryRef,
+        index: u64,
+        merge_style: &str,
+        head_commit_id: &str,
+        credential: &ForgeCredential,
+    ) -> Result<(), ForgeError>;
+
     /// Reads a single file from the backing forge.
     ///
     /// # Errors
@@ -519,6 +530,41 @@ impl ForgeAdapter for ForgejoAdapter {
             .collect())
     }
 
+    async fn schedule_auto_merge(
+        &self,
+        repository: &RepositoryRef,
+        index: u64,
+        merge_style: &str,
+        head_commit_id: &str,
+        credential: &ForgeCredential,
+    ) -> Result<(), ForgeError> {
+        let url = format!(
+            "{}/api/v1/repos/{}/{}/pulls/{index}/merge",
+            self.config.base_url.trim_end_matches('/'),
+            repository.owner,
+            repository.name,
+        );
+
+        let effective_token = credential.token.as_deref().or(self.config.token.as_deref());
+        let mut request = self.client.post(&url).json(&serde_json::json!({
+            "do": merge_style,
+            "head_commit_id": head_commit_id,
+            "merge_when_checks_succeed": true,
+        }));
+        if let Some(token) = effective_token {
+            request = request.bearer_auth(token);
+        }
+
+        let response = request.send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(ForgeError::UnexpectedStatus { status, body });
+        }
+
+        Ok(())
+    }
+
     /// Reads a repository file through the Forgejo contents API.
     ///
     /// # Errors
@@ -651,6 +697,32 @@ mod tests {
             name: "repo".to_string(),
             owner: "org".to_string(),
         }
+    }
+
+    #[tokio::test]
+    async fn schedule_auto_merge_sends_correct_body() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path_regex(r"/api/v1/repos/.+/pulls/\d+/merge"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        adapter
+            .schedule_auto_merge(&test_repo(), 42, "rebase", "abc123sha", &cred)
+            .await
+            .unwrap();
+
+        let requests = mock.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        let body: serde_json::Value =
+            serde_json::from_slice(&requests[0].body).expect("valid JSON");
+        assert_eq!(body["do"], "rebase");
+        assert_eq!(body["merge_when_checks_succeed"], true);
+        assert_eq!(body["head_commit_id"], "abc123sha");
     }
 
     #[tokio::test]

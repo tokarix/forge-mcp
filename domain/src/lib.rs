@@ -212,6 +212,15 @@ pub struct RebaseBranchResponse {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScheduleAutoMergeRequest {
+    pub agent: AgentIdentity,
+    pub expected_head_sha: String,
+    pub index: u64,
+    pub merge_style: String,
+    pub repository: RepositoryRef,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SubmitChangeRequestReviewRequest {
     pub agent: AgentIdentity,
     pub body: String,
@@ -397,6 +406,20 @@ pub trait RepositoryWriteService: Send + Sync {
         authorized: policy::AuthorizedWrite,
         credential: &ForgeCredential,
     ) -> Result<RebaseBranchResponse, ServiceError>;
+
+    /// Schedules a pull request for automatic merge when all branch
+    /// protection requirements are met.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the head SHA does not match, the merge style is
+    /// invalid, the upstream forge request fails, or audit recording fails.
+    async fn schedule_auto_merge(
+        &self,
+        request: ScheduleAutoMergeRequest,
+        authorized: policy::AuthorizedWrite,
+        credential: &ForgeCredential,
+    ) -> Result<(), ServiceError>;
 
     /// Submits a formal review on a change request.
     ///

@@ -27,6 +27,7 @@ use utoipa_scalar::{Scalar, Servable};
         handlers::post_patches,
         handlers::post_pulls,
         handlers::post_rebase,
+        handlers::schedule_auto_merge,
         handlers::submit_pull_review,
     ),
     components(schemas(
@@ -39,6 +40,7 @@ use utoipa_scalar::{Scalar, Servable};
         api::RebaseBranchBody,
         api::RebaseBranchResult,
         api::RebaseOperationBody,
+        api::ScheduleAutoMergeBody,
         api::SubmitReviewBody,
     )),
     modifiers(&SecurityAddon),
@@ -89,6 +91,10 @@ pub fn build_router(state: AppState, enable_docs: bool) -> Router {
         .route(
             "/api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}",
             delete(handlers::close_pull).get(handlers::get_pull),
+        )
+        .route(
+            "/api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}/automerge",
+            post(handlers::schedule_auto_merge),
         )
         .route(
             "/api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}/comments",

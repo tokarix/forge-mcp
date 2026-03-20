@@ -13,13 +13,13 @@ use domain::{
     CloseChangeRequestRequest, CommentOnChangeRequestRequest, CommitPatchRequest, ForgeKind,
     GetChangeRequestCommentsRequest, GetChangeRequestRequest, ListChangeRequestsRequest,
     OpenChangeRequestRequest, ReadRepositoryFileRequest, RebaseBranchRequest, RepositoryRef,
-    ServiceError, SubmitChangeRequestReviewRequest,
+    ScheduleAutoMergeRequest, ServiceError, SubmitChangeRequestReviewRequest,
 };
 
 use crate::api::{
     CommentBody, CommitPatchBody, CommitPatchResult, ContentsPath, ContentsQuery, ContentsResult,
     ErrorBody, ListPullsQuery, OpenPullBody, PullPath, RebaseBranchBody, RebaseBranchResult,
-    RebaseOperationBody, RepoPath, SubmitReviewBody,
+    RebaseOperationBody, RepoPath, ScheduleAutoMergeBody, SubmitReviewBody,
 };
 use crate::auth::{AgentRegistry, extract_bearer_token};
 
@@ -771,6 +771,62 @@ pub async fn get_pull_comments(
 
 #[utoipa::path(
     post,
+    path = "/api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}/automerge",
+    params(
+        ("forge" = String, Path, description = "Forge alias"),
+        ("owner" = String, Path, description = "Repository owner"),
+        ("repo" = String, Path, description = "Repository name"),
+        ("index" = u64, Path, description = "Pull request index"),
+    ),
+    request_body = ScheduleAutoMergeBody,
+    responses(
+        (status = 200, description = "Auto-merge scheduled"),
+        (status = 401, description = "Unauthorized", body = ErrorBody),
+    ),
+    security(("bearer" = []))
+)]
+/// POST /api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}/automerge
+pub async fn schedule_auto_merge(
+    State(state): State<AppState>,
+    Path(path): Path<PullPath>,
+    headers: HeaderMap,
+    Json(body): Json<ScheduleAutoMergeBody>,
+) -> impl IntoResponse {
+    let forge = resolve_forge(&state.forge_registry, &path.forge)?;
+    let agent = resolve_agent(
+        &headers,
+        &state.agent_registry,
+        &path.forge,
+        &path.owner,
+        &path.repo,
+    )?;
+    let credential = resolve_credential(agent, &path.forge, forge);
+
+    let authorized = domain::policy::AuthorizedWrite {
+        policy: agent.policy.clone(),
+    };
+
+    forge
+        .write_service
+        .schedule_auto_merge(
+            ScheduleAutoMergeRequest {
+                agent: agent.identity.clone(),
+                expected_head_sha: body.expected_head_sha,
+                index: path.index,
+                merge_style: body.merge_style,
+                repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
+            },
+            authorized,
+            &credential,
+        )
+        .await
+        .map_err(map_service_error)?;
+
+    Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(serde_json::json!({})))
+}
+
+#[utoipa::path(
+    post,
     path = "/api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}/reviews",
     params(
         ("forge" = String, Path, description = "Forge alias"),
@@ -978,6 +1034,16 @@ mod tests {
         ) -> Result<domain::ReadRepositoryFileResponse, forge::ForgeError> {
             unimplemented!()
         }
+        async fn schedule_auto_merge(
+            &self,
+            _: &domain::RepositoryRef,
+            _: u64,
+            _: &str,
+            _: &str,
+            _: &domain::ForgeCredential,
+        ) -> Result<(), forge::ForgeError> {
+            unimplemented!()
+        }
         async fn submit_change_request_review(
             &self,
             _: &domain::RepositoryRef,
@@ -1146,6 +1212,15 @@ mod tests {
             _credential: &domain::ForgeCredential,
         ) -> Result<domain::RebaseBranchResponse, ServiceError> {
             unimplemented!()
+        }
+
+        async fn schedule_auto_merge(
+            &self,
+            _request: domain::ScheduleAutoMergeRequest,
+            _authorized: domain::policy::AuthorizedWrite,
+            _credential: &domain::ForgeCredential,
+        ) -> Result<(), ServiceError> {
+            Ok(())
         }
 
         async fn submit_change_request_review(

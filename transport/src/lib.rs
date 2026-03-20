@@ -270,6 +270,22 @@ pub struct ReadRepositoryFileTool {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct ScheduleAutoMergeTool {
+    /// Expected head commit SHA -- prevents scheduling on a stale PR.
+    pub expected_head_sha: String,
+    /// Forge alias -- use `forge_info` to discover available aliases.
+    pub forge: String,
+    /// Change request index number.
+    pub index: u64,
+    /// Merge style: rebase, merge, squash, or fast-forward-only.
+    pub merge_style: String,
+    /// Repository owner or organization.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct SubmitChangeRequestReviewTool {
     /// Review body text.
     pub body: String,
@@ -667,6 +683,33 @@ impl McpShim {
         self.gateway_post(url, &body).await
     }
 
+    /// Schedule a pull request for automatic merge when all checks pass.
+    #[tool(
+        name = "schedule_auto_merge",
+        description = "Schedule a pull request for automatic merge when all branch protection requirements are met. Requires the expected head SHA to prevent scheduling on a stale PR."
+    )]
+    async fn schedule_auto_merge(
+        &self,
+        Parameters(request): Parameters<ScheduleAutoMergeTool>,
+    ) -> Result<String, McpError> {
+        let url = self.build_url(&[
+            "api",
+            "v1",
+            "repos",
+            &request.forge,
+            &request.owner,
+            &request.repo,
+            "pulls",
+            &request.index.to_string(),
+            "automerge",
+        ])?;
+        let body = serde_json::json!({
+            "expected_head_sha": request.expected_head_sha,
+            "merge_style": request.merge_style,
+        });
+        self.gateway_post(url, &body).await
+    }
+
     /// Read a single UTF-8 text file from a repository.
     #[tool(
         name = "read_repository_file",
@@ -1050,6 +1093,61 @@ mod tests {
             .map(|t| t.text.clone())
             .expect("text result");
         assert!(text.contains("agent/fix"));
+
+        drop(client);
+        server_handle.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn schedule_auto_merge_calls_gateway() -> Result<(), Box<dyn std::error::Error>> {
+        let mock_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path_regex(
+                r"/api/v1/repos/.+/.+/.+/pulls/\d+/automerge",
+            ))
+            .and(wiremock::matchers::header(
+                "authorization",
+                "Bearer test-token",
+            ))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&mock_server)
+            .await;
+
+        let (client, server_handle) =
+            spawn_shim_and_client(test_config(&mock_server.uri())).await?;
+
+        let args = serde_json::json!({
+            "forge": "test-forge",
+            "owner": "org",
+            "repo": "repo",
+            "index": 42,
+            "expected_head_sha": "abc123",
+            "merge_style": "rebase"
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+
+        let result = client
+            .call_tool(CallToolRequestParams::new("schedule_auto_merge").with_arguments(args))
+            .await?;
+
+        let text = result
+            .content
+            .first()
+            .and_then(|c| c.raw.as_text())
+            .map(|t| t.text.clone())
+            .expect("text result");
+        assert!(text.contains('{'));
+
+        // Verify the request body sent to the gateway
+        let requests = mock_server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        let body: serde_json::Value =
+            serde_json::from_slice(&requests[0].body).expect("valid JSON");
+        assert_eq!(body["expected_head_sha"], "abc123");
+        assert_eq!(body["merge_style"], "rebase");
 
         drop(client);
         server_handle.await??;

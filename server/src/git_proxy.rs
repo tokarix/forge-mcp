@@ -470,6 +470,16 @@ mod tests {
         ) -> Result<domain::ReadRepositoryFileResponse, forge::ForgeError> {
             unimplemented!()
         }
+        async fn schedule_auto_merge(
+            &self,
+            _: &domain::RepositoryRef,
+            _: u64,
+            _: &str,
+            _: &str,
+            _: &domain::ForgeCredential,
+        ) -> Result<(), forge::ForgeError> {
+            unimplemented!()
+        }
         async fn submit_change_request_review(
             &self,
             _: &domain::RepositoryRef,
@@ -604,6 +614,15 @@ mod tests {
             _authorized: domain::policy::AuthorizedWrite,
             _credential: &domain::ForgeCredential,
         ) -> Result<domain::RebaseBranchResponse, ServiceError> {
+            unimplemented!()
+        }
+
+        async fn schedule_auto_merge(
+            &self,
+            _request: domain::ScheduleAutoMergeRequest,
+            _authorized: domain::policy::AuthorizedWrite,
+            _credential: &domain::ForgeCredential,
+        ) -> Result<(), ServiceError> {
             unimplemented!()
         }
 

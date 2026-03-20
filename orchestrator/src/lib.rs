@@ -9,8 +9,8 @@ use domain::{
     ChangeRequestReview, CloseChangeRequestRequest, CommentOnChangeRequestRequest, ForgeCredential,
     GetChangeRequestCommentsRequest, GetChangeRequestDiffRequest, GetChangeRequestRequest,
     ListChangeRequestsRequest, ReadRepositoryFileRequest, ReadRepositoryFileResponse,
-    RebaseBranchRequest, RebaseBranchResponse, RepositoryReadService, ServiceError,
-    SubmitChangeRequestReviewRequest, validate_repository_path,
+    RebaseBranchRequest, RebaseBranchResponse, RepositoryReadService, ScheduleAutoMergeRequest,
+    ServiceError, SubmitChangeRequestReviewRequest, validate_repository_path,
 };
 use forge::ForgeAdapter;
 
@@ -696,6 +696,71 @@ where
         })
     }
 
+    async fn schedule_auto_merge(
+        &self,
+        request: ScheduleAutoMergeRequest,
+        _authorized: domain::policy::AuthorizedWrite,
+        credential: &ForgeCredential,
+    ) -> Result<(), ServiceError> {
+        // 1. Validate merge_style
+        match request.merge_style.as_str() {
+            "fast-forward-only" | "merge" | "rebase" | "squash" => {}
+            other => {
+                return Err(ServiceError::Validation(format!(
+                    "invalid merge style '{other}': must be rebase, merge, squash, or fast-forward-only"
+                )));
+            }
+        }
+
+        // 2. Fetch PR to verify head SHA
+        let pr = self
+            .adapter
+            .get_change_request(&request.repository, request.index, credential)
+            .await
+            .map_err(|e| ServiceError::Upstream(e.to_string()))?;
+
+        // 3. Check head SHA is available
+        let current_sha = pr.head_sha.ok_or_else(|| {
+            ServiceError::Validation(
+                "pull request head SHA unavailable; cannot schedule auto-merge".to_string(),
+            )
+        })?;
+
+        // 4. Check expected head SHA matches
+        if current_sha != request.expected_head_sha {
+            return Err(ServiceError::Validation(format!(
+                "expected head SHA '{}' does not match current '{current_sha}'",
+                request.expected_head_sha
+            )));
+        }
+
+        // 5. Audit before action
+        self.audit_sink
+            .record(AuditRecord {
+                agent: request.agent,
+                action: "schedule_auto_merge".to_string(),
+                repository: request.repository.clone(),
+                target: format!(
+                    "schedule_auto_merge {} head:{} #{}",
+                    request.merge_style, current_sha, request.index
+                ),
+            })
+            .await
+            .map_err(|e| ServiceError::Audit(e.to_string()))?;
+
+        // 6. Call adapter
+        self.adapter
+            .schedule_auto_merge(
+                &request.repository,
+                request.index,
+                &request.merge_style,
+                &current_sha,
+                credential,
+            )
+            .await
+            .map_err(|e| ServiceError::Upstream(e.to_string()))
+    }
+
     async fn submit_change_request_review(
         &self,
         request: SubmitChangeRequestReviewRequest,
@@ -851,6 +916,17 @@ mod tests {
             })
         }
 
+        async fn schedule_auto_merge(
+            &self,
+            _repository: &RepositoryRef,
+            _index: u64,
+            _merge_style: &str,
+            _head_commit_id: &str,
+            _credential: &domain::ForgeCredential,
+        ) -> Result<(), ForgeError> {
+            unimplemented!()
+        }
+
         async fn submit_change_request_review(
             &self,
             _repository: &RepositoryRef,
@@ -939,6 +1015,17 @@ mod tests {
             _git_ref: Option<&str>,
         ) -> Result<domain::ReadRepositoryFileResponse, ForgeError> {
             Err(ForgeError::InvalidPayload("test error".to_string()))
+        }
+
+        async fn schedule_auto_merge(
+            &self,
+            _repository: &RepositoryRef,
+            _index: u64,
+            _merge_style: &str,
+            _head_commit_id: &str,
+            _credential: &domain::ForgeCredential,
+        ) -> Result<(), ForgeError> {
+            unimplemented!()
         }
 
         async fn submit_change_request_review(
@@ -1160,6 +1247,17 @@ mod tests {
             _path: &str,
             _git_ref: Option<&str>,
         ) -> Result<domain::ReadRepositoryFileResponse, ForgeError> {
+            unimplemented!()
+        }
+
+        async fn schedule_auto_merge(
+            &self,
+            _repository: &RepositoryRef,
+            _index: u64,
+            _merge_style: &str,
+            _head_commit_id: &str,
+            _credential: &domain::ForgeCredential,
+        ) -> Result<(), ForgeError> {
             unimplemented!()
         }
 
@@ -1533,6 +1631,17 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             unimplemented!()
         }
 
+        async fn schedule_auto_merge(
+            &self,
+            _repository: &RepositoryRef,
+            _index: u64,
+            _merge_style: &str,
+            _head_commit_id: &str,
+            _credential: &domain::ForgeCredential,
+        ) -> Result<(), ForgeError> {
+            unimplemented!()
+        }
+
         async fn submit_change_request_review(
             &self,
             _repository: &RepositoryRef,
@@ -1844,6 +1953,17 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             unimplemented!()
         }
 
+        async fn schedule_auto_merge(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &str,
+            _: &str,
+            _: &domain::ForgeCredential,
+        ) -> Result<(), ForgeError> {
+            unimplemented!()
+        }
+
         async fn submit_change_request_review(
             &self,
             _: &RepositoryRef,
@@ -1895,5 +2015,253 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             .expect("should succeed");
 
         assert_eq!(adapter.captured_token(), None);
+    }
+
+    // --- schedule_auto_merge tests ---
+
+    struct AutoMergeTestForgeAdapter {
+        head_sha: Option<String>,
+    }
+
+    #[async_trait::async_trait]
+    impl ForgeAdapter for AutoMergeTestForgeAdapter {
+        async fn close_change_request(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &domain::ForgeCredential,
+        ) -> Result<ChangeRequest, ForgeError> {
+            unimplemented!()
+        }
+
+        async fn comment_on_change_request(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &str,
+            _: &domain::ForgeCredential,
+        ) -> Result<domain::ChangeRequestComment, ForgeError> {
+            unimplemented!()
+        }
+
+        async fn create_change_request(
+            &self,
+            _: &RepositoryRef,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &domain::ForgeCredential,
+        ) -> Result<ChangeRequest, ForgeError> {
+            unimplemented!()
+        }
+
+        async fn get_change_request_comments(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &domain::ForgeCredential,
+        ) -> Result<Vec<ChangeRequestCommentDetail>, ForgeError> {
+            unimplemented!()
+        }
+
+        async fn get_change_request(
+            &self,
+            _repository: &RepositoryRef,
+            index: u64,
+            _credential: &domain::ForgeCredential,
+        ) -> Result<ChangeRequest, ForgeError> {
+            Ok(ChangeRequest {
+                base_branch: "main".to_string(),
+                body: String::new(),
+                changed_files_count: None,
+                commit_count: None,
+                head_branch: "agent/fix".to_string(),
+                head_sha: self.head_sha.clone(),
+                index,
+                merge_base_sha: None,
+                state: ChangeRequestState::Open,
+                title: "Fix".to_string(),
+                url: format!("https://forge.example/org/repo/pulls/{index}"),
+            })
+        }
+
+        async fn get_change_request_diff(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+        ) -> Result<String, ForgeError> {
+            unimplemented!()
+        }
+
+        async fn list_change_requests(
+            &self,
+            _: &RepositoryRef,
+            _: Option<&ChangeRequestState>,
+        ) -> Result<Vec<ChangeRequest>, ForgeError> {
+            unimplemented!()
+        }
+
+        async fn read_repository_file(
+            &self,
+            _: &RepositoryRef,
+            _: &str,
+            _: Option<&str>,
+        ) -> Result<domain::ReadRepositoryFileResponse, ForgeError> {
+            unimplemented!()
+        }
+
+        async fn schedule_auto_merge(
+            &self,
+            _repository: &RepositoryRef,
+            _index: u64,
+            _merge_style: &str,
+            _head_commit_id: &str,
+            _credential: &domain::ForgeCredential,
+        ) -> Result<(), ForgeError> {
+            Ok(())
+        }
+
+        async fn submit_change_request_review(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &str,
+            _: &str,
+            _: &domain::ForgeCredential,
+        ) -> Result<domain::ChangeRequestReview, ForgeError> {
+            unimplemented!()
+        }
+    }
+
+    fn auto_merge_test_request(
+        merge_style: &str,
+        expected_head_sha: &str,
+    ) -> domain::ScheduleAutoMergeRequest {
+        domain::ScheduleAutoMergeRequest {
+            agent: AgentIdentity {
+                agent_id: "test-agent".to_string(),
+                session_id: "test-session".to_string(),
+            },
+            expected_head_sha: expected_head_sha.to_string(),
+            index: 42,
+            merge_style: merge_style.to_string(),
+            repository: RepositoryRef {
+                alias: "test".to_string(),
+                forge: ForgeKind::Forgejo,
+                host: "https://forge.example".to_string(),
+                name: "repo".to_string(),
+                owner: "org".to_string(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn schedule_auto_merge_valid_merge_style() {
+        let adapter = Arc::new(AutoMergeTestForgeAdapter {
+            head_sha: Some("abc123".to_string()),
+        });
+        let audit = Arc::new(InMemoryAuditSink::new());
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
+
+        orchestrator
+            .schedule_auto_merge(
+                auto_merge_test_request("rebase", "abc123"),
+                default_authorized(),
+                &domain::ForgeCredential { token: None },
+            )
+            .await
+            .expect("should succeed");
+    }
+
+    #[tokio::test]
+    async fn schedule_auto_merge_invalid_merge_style() {
+        let adapter = Arc::new(AutoMergeTestForgeAdapter {
+            head_sha: Some("abc123".to_string()),
+        });
+        let audit = Arc::new(InMemoryAuditSink::new());
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
+
+        let err = orchestrator
+            .schedule_auto_merge(
+                auto_merge_test_request("invalid", "abc123"),
+                default_authorized(),
+                &domain::ForgeCredential { token: None },
+            )
+            .await
+            .expect_err("invalid merge style should be rejected");
+
+        assert!(matches!(err, ServiceError::Validation(_)));
+        assert_eq!(audit.records().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn schedule_auto_merge_head_sha_mismatch() {
+        let adapter = Arc::new(AutoMergeTestForgeAdapter {
+            head_sha: Some("abc123".to_string()),
+        });
+        let audit = Arc::new(InMemoryAuditSink::new());
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
+
+        let err = orchestrator
+            .schedule_auto_merge(
+                auto_merge_test_request("rebase", "wrong-sha"),
+                default_authorized(),
+                &domain::ForgeCredential { token: None },
+            )
+            .await
+            .expect_err("mismatched head SHA should be rejected");
+
+        assert!(matches!(err, ServiceError::Validation(_)));
+        assert_eq!(audit.records().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn schedule_auto_merge_missing_head_sha() {
+        let adapter = Arc::new(AutoMergeTestForgeAdapter { head_sha: None });
+        let audit = Arc::new(InMemoryAuditSink::new());
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
+
+        let err = orchestrator
+            .schedule_auto_merge(
+                auto_merge_test_request("rebase", "abc123"),
+                default_authorized(),
+                &domain::ForgeCredential { token: None },
+            )
+            .await
+            .expect_err("missing head SHA should be rejected");
+
+        assert!(matches!(err, ServiceError::Validation(_)));
+        assert_eq!(audit.records().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn schedule_auto_merge_records_audit() {
+        let full_sha = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2";
+        let adapter = Arc::new(AutoMergeTestForgeAdapter {
+            head_sha: Some(full_sha.to_string()),
+        });
+        let audit = Arc::new(InMemoryAuditSink::new());
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
+
+        orchestrator
+            .schedule_auto_merge(
+                auto_merge_test_request("squash", full_sha),
+                default_authorized(),
+                &domain::ForgeCredential { token: None },
+            )
+            .await
+            .expect("should succeed");
+
+        assert_eq!(audit.records().len(), 1);
+        assert_eq!(audit.records()[0].action, "schedule_auto_merge");
+        assert!(audit.records()[0].target.contains("squash"));
+        // Full SHA must be preserved — not truncated
+        assert!(
+            audit.records()[0]
+                .target
+                .contains(&format!("head:{full_sha}"))
+        );
+        assert!(audit.records()[0].target.contains("#42"));
     }
 }
