@@ -12,6 +12,8 @@ pub struct CommentBody {
 /// POST /api/v1/repos/{owner}/{repo}/patches
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct CommitPatchBody {
+    pub author_email: Option<String>,
+    pub author_name: Option<String>,
     pub base_branch: String,
     pub commit_message: String,
     #[serde(default)]
@@ -142,12 +144,16 @@ mod tests {
     #[test]
     fn commit_patch_body_deserializes() {
         let json = serde_json::json!({
+            "author_email": "you@example.com",
+            "author_name": "Your Name",
             "base_branch": "main",
             "commit_message": "fix typo",
             "new_branch": "agent/fix",
             "patch": "diff..."
         });
         let body: CommitPatchBody = serde_json::from_value(json).expect("should deserialize");
+        assert_eq!(body.author_name.as_deref(), Some("Your Name"));
+        assert_eq!(body.author_email.as_deref(), Some("you@example.com"));
         assert_eq!(body.base_branch, "main");
         assert_eq!(body.new_branch, "agent/fix");
     }

@@ -14,6 +14,24 @@ use domain::{
 };
 use forge::ForgeAdapter;
 
+fn sanitize_commit_message(message: &str) -> String {
+    let mut lines: Vec<&str> = message
+        .lines()
+        .filter(|line| {
+            !line
+                .trim_start()
+                .to_ascii_lowercase()
+                .starts_with("co-committed-by:")
+        })
+        .collect();
+
+    while lines.last().is_some_and(|line| line.trim().is_empty()) {
+        lines.pop();
+    }
+
+    lines.join("\n")
+}
+
 pub struct ReadOrchestrator<A, S>
 where
     A: ForgeAdapter,
@@ -433,8 +451,8 @@ where
         let existing = request.existing_branch;
         let patch = request.patch.clone();
         let new_branch = request.new_branch.clone();
-        let commit_message = request.commit_message.clone();
-        let agent_id = request.agent.agent_id.clone();
+        let commit_author = request.commit_author.clone();
+        let commit_message = sanitize_commit_message(&request.commit_message);
         let token = credential.token.clone();
 
         let git_result = tokio::task::spawn_blocking(move || {
@@ -449,7 +467,7 @@ where
             }
             workspace.apply_patch(&patch)?;
             let result =
-                workspace.commit(&commit_message, &agent_id, &format!("{agent_id}@forge-mcp"))?;
+                workspace.commit(&commit_message, &commit_author.name, &commit_author.email)?;
             workspace.push_branch(&new_branch)?;
             Ok::<_, git_exec::GitExecError>(result)
         })
@@ -730,7 +748,7 @@ mod tests {
     };
     use forge::{ForgeAdapter, ForgeError};
 
-    use super::{ReadOrchestrator, WriteOrchestrator};
+    use super::{ReadOrchestrator, WriteOrchestrator, sanitize_commit_message};
 
     fn test_request(path: &str) -> ReadRepositoryFileRequest {
         ReadRepositoryFileRequest {
@@ -1169,6 +1187,10 @@ mod tests {
                 session_id: "test-session".to_string(),
             },
             base_branch: "main".to_string(),
+            commit_author: domain::CommitAuthor {
+                email: "test@example.com".to_string(),
+                name: "Test User".to_string(),
+            },
             commit_message: "test commit".to_string(),
             existing_branch: false,
             new_branch: "agent/test-fix".to_string(),
@@ -1195,6 +1217,28 @@ diff --git a/README.md b/README.md
         domain::policy::AuthorizedWrite {
             policy: domain::policy::PolicyConfig::default(),
         }
+    }
+
+    #[test]
+    fn sanitize_commit_message_removes_co_committed_by_trailers() {
+        let message = "feat: improve gateway\n\nBody text.\n\nCo-authored-by: Claude Opus 4.6 <noreply@anthropic.com>\nCo-committed-by: agent-claude <noreply+claude@adlevio.net>\n";
+        let sanitized = sanitize_commit_message(message);
+        assert!(sanitized.contains("Co-authored-by: Claude Opus 4.6 <noreply@anthropic.com>"));
+        assert!(!sanitized.contains("Co-committed-by:"));
+    }
+
+    #[test]
+    fn sanitize_commit_message_handles_uppercase_trailers_and_blank_lines() {
+        let message = "feat: improve gateway\n\nCO-COMMITTED-BY: agent-claude <noreply+claude@adlevio.net>\n\n\n";
+        let sanitized = sanitize_commit_message(message);
+        assert_eq!(sanitized, "feat: improve gateway");
+    }
+
+    #[test]
+    fn sanitize_commit_message_can_strip_trailers_only() {
+        let message = "Co-committed-by: agent-claude <noreply+claude@adlevio.net>\n\n";
+        let sanitized = sanitize_commit_message(message);
+        assert!(sanitized.is_empty());
     }
 
     #[tokio::test]

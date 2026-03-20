@@ -43,6 +43,12 @@ pub struct AgentIdentity {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommitAuthor {
+    pub email: String,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReadRepositoryFileRequest {
     pub agent: AgentIdentity,
     pub repository: RepositoryRef,
@@ -139,6 +145,7 @@ pub struct CommentOnChangeRequestRequest {
 pub struct CommitPatchRequest {
     pub agent: AgentIdentity,
     pub base_branch: String,
+    pub commit_author: CommitAuthor,
     pub commit_message: String,
     pub existing_branch: bool,
     pub new_branch: String,

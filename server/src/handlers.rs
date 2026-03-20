@@ -122,6 +122,34 @@ fn resolve_credential(
     domain::ForgeCredential { token }
 }
 
+fn resolve_commit_author(
+    agent: &crate::auth::ResolvedAgent,
+    body: &CommitPatchBody,
+) -> Result<domain::CommitAuthor, ServiceError> {
+    match (&body.author_name, &body.author_email) {
+        (Some(name), Some(email)) => {
+            let name = name.trim();
+            let email = email.trim();
+            if name.is_empty() || email.is_empty() {
+                return Err(ServiceError::Validation(
+                    "author_name and author_email must be non-empty when provided".to_string(),
+                ));
+            }
+            Ok(domain::CommitAuthor {
+                email: email.to_string(),
+                name: name.to_string(),
+            })
+        }
+        (None, None) => Ok(domain::CommitAuthor {
+            email: format!("{}@forge-mcp", agent.identity.agent_id),
+            name: agent.identity.agent_id.clone(),
+        }),
+        _ => Err(ServiceError::Validation(
+            "author_name and author_email must be provided together".to_string(),
+        )),
+    }
+}
+
 fn repo_ref(
     forge_alias: &str,
     owner: &str,
@@ -362,6 +390,7 @@ pub async fn post_patches(
     let credential = resolve_credential(agent, &path.forge, forge);
     let identity = agent.identity.clone();
     let policy = agent.policy.clone();
+    let commit_author = resolve_commit_author(agent, &body).map_err(map_service_error)?;
 
     // Per-agent policy check
     let diff_result = domain::diff::validate_diff(&body.patch)
@@ -402,6 +431,7 @@ pub async fn post_patches(
             CommitPatchRequest {
                 agent: identity,
                 base_branch: body.base_branch,
+                commit_author,
                 commit_message: body.commit_message,
                 existing_branch: body.existing_branch,
                 new_branch: body.new_branch,
@@ -860,7 +890,7 @@ pub async fn agent_info(State(state): State<AppState>, headers: HeaderMap) -> im
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{collections::HashMap, sync::Arc};
 
     use axum::{
         body::Body,
@@ -1133,6 +1163,25 @@ mod tests {
         }
     }
 
+    fn test_agent() -> crate::auth::ResolvedAgent {
+        let configs = vec![crate::config::AgentConfig {
+            agent_id: "codex".to_string(),
+            forge_identity: HashMap::new(),
+            policy: AgentPolicyConfig {
+                allowed_repos: vec!["test-forge/org/repo".to_string()],
+                branch_prefix: Some("agent/".to_string()),
+                protected_paths: vec![],
+            },
+            session_id: "default".to_string(),
+            token: "test-token".to_string(),
+        }];
+
+        AgentRegistry::from_configs(&configs)
+            .resolve("test-token")
+            .expect("test agent should resolve")
+            .clone()
+    }
+
     fn test_state() -> AppState {
         let configs = vec![crate::config::AgentConfig {
             agent_id: "codex".to_string(),
@@ -1167,6 +1216,77 @@ mod tests {
             audit_sink: Arc::new(audit::InMemoryAuditSink::new()),
             forge_registry: Arc::new(crate::registry::ForgeRegistry::new(forges)),
         }
+    }
+
+    #[test]
+    fn resolve_commit_author_defaults_to_agent_identity() {
+        let agent = test_agent();
+        let body = CommitPatchBody {
+            author_email: None,
+            author_name: None,
+            base_branch: "main".to_string(),
+            commit_message: "fix".to_string(),
+            existing_branch: false,
+            new_branch: "agent/codex/fix".to_string(),
+            patch: "diff --git a/README.md b/README.md\n".to_string(),
+        };
+
+        let author = resolve_commit_author(&agent, &body).expect("author should resolve");
+        assert_eq!(
+            author,
+            domain::CommitAuthor {
+                email: "codex@forge-mcp".to_string(),
+                name: "codex".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn resolve_commit_author_rejects_partial_author() {
+        let agent = test_agent();
+        let body = CommitPatchBody {
+            author_email: Some("codex@example.com".to_string()),
+            author_name: None,
+            base_branch: "main".to_string(),
+            commit_message: "fix".to_string(),
+            existing_branch: false,
+            new_branch: "agent/codex/fix".to_string(),
+            patch: "diff --git a/README.md b/README.md\n".to_string(),
+        };
+
+        let err = resolve_commit_author(&agent, &body).expect_err("partial author should fail");
+        assert!(
+            matches!(
+                err,
+                ServiceError::Validation(ref message)
+                    if message == "author_name and author_email must be provided together"
+            ),
+            "unexpected error: {err:#?}",
+        );
+    }
+
+    #[test]
+    fn resolve_commit_author_rejects_blank_values() {
+        let agent = test_agent();
+        let body = CommitPatchBody {
+            author_email: Some("   ".to_string()),
+            author_name: Some("Codex".to_string()),
+            base_branch: "main".to_string(),
+            commit_message: "fix".to_string(),
+            existing_branch: false,
+            new_branch: "agent/codex/fix".to_string(),
+            patch: "diff --git a/README.md b/README.md\n".to_string(),
+        };
+
+        let err = resolve_commit_author(&agent, &body).expect_err("blank author should fail");
+        assert!(
+            matches!(
+                err,
+                ServiceError::Validation(ref message)
+                    if message == "author_name and author_email must be non-empty when provided"
+            ),
+            "unexpected error: {err:#?}",
+        );
     }
 
     #[tokio::test]

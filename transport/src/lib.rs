@@ -1,5 +1,7 @@
 //! MCP shim — translates MCP tool calls into HTTP requests to the control plane.
 
+use std::process::Command;
+
 use rmcp::{
     ErrorData as McpError, ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -67,6 +69,12 @@ pub struct CommentOnChangeRequestTool {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct CommitPatchTool {
+    /// Optional commit author email. If omitted, the shim will try to use the
+    /// local git author identity.
+    pub author_email: Option<String>,
+    /// Optional commit author name. If omitted, the shim will try to use the
+    /// local git author identity.
+    pub author_name: Option<String>,
     /// Base branch to create from (e.g. "main").
     pub base_branch: String,
     /// Commit message.
@@ -88,6 +96,69 @@ pub struct CommitPatchTool {
     pub patch_file: Option<String>,
     /// Repository name.
     pub repo: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CommitAuthor {
+    email: String,
+    name: String,
+}
+
+fn parse_git_author_ident(output: &str) -> Option<CommitAuthor> {
+    let trimmed = output.trim();
+    let email_end = trimmed.rfind('>')?;
+    let email_start = trimmed[..email_end].rfind('<')?;
+    let name = trimmed[..email_start].trim();
+    let email = trimmed[email_start + 1..email_end].trim();
+    if name.is_empty() || email.is_empty() {
+        return None;
+    }
+    Some(CommitAuthor {
+        email: email.to_string(),
+        name: name.to_string(),
+    })
+}
+
+fn discover_local_commit_author() -> Option<CommitAuthor> {
+    let output = Command::new("git")
+        .args(["var", "GIT_AUTHOR_IDENT"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    parse_git_author_ident(&stdout)
+}
+
+fn resolve_commit_author<F>(
+    request: &CommitPatchTool,
+    discover: F,
+) -> Result<Option<CommitAuthor>, McpError>
+where
+    F: FnOnce() -> Option<CommitAuthor>,
+{
+    match (&request.author_name, &request.author_email) {
+        (Some(name), Some(email)) => {
+            let name = name.trim();
+            let email = email.trim();
+            if name.is_empty() || email.is_empty() {
+                return Err(McpError::invalid_params(
+                    "author_name and author_email must be non-empty when provided".to_string(),
+                    None,
+                ));
+            }
+            Ok(Some(CommitAuthor {
+                email: email.to_string(),
+                name: name.to_string(),
+            }))
+        }
+        (None, None) => Ok(discover()),
+        _ => Err(McpError::invalid_params(
+            "author_name and author_email must be provided together".to_string(),
+            None,
+        )),
+    }
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -399,6 +470,8 @@ impl McpShim {
         &self,
         Parameters(request): Parameters<CommitPatchTool>,
     ) -> Result<String, McpError> {
+        let commit_author = resolve_commit_author(&request, discover_local_commit_author)?;
+
         // Resolve patch content from either inline or file
         let patch = match (&request.patch, &request.patch_file) {
             (Some(p), _) => p.clone(),
@@ -423,6 +496,8 @@ impl McpShim {
             "patches",
         ])?;
         let body = serde_json::json!({
+            "author_email": commit_author.as_ref().map(|a| a.email.clone()),
+            "author_name": commit_author.as_ref().map(|a| a.name.clone()),
             "base_branch": request.base_branch,
             "commit_message": request.commit_message,
             "existing_branch": request.existing_branch,
@@ -809,6 +884,44 @@ mod tests {
         segments.extend(path_parts.iter());
         let url = shim.build_url(&segments).unwrap();
         assert_eq!(url.path(), "/api/v1/repos/org/repo/contents/src/main.rs");
+    }
+
+    #[test]
+    fn parse_git_author_ident_extracts_name_and_email() {
+        let ident = "Your Name <you@example.com> 1710853140 +0200";
+        let author = parse_git_author_ident(ident).expect("should parse");
+        assert_eq!(
+            author,
+            CommitAuthor {
+                email: "you@example.com".to_string(),
+                name: "Your Name".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn resolve_commit_author_prefers_explicit_values() {
+        let request = CommitPatchTool {
+            author_email: Some("explicit@example.com".to_string()),
+            author_name: Some("Explicit User".to_string()),
+            base_branch: "main".to_string(),
+            commit_message: "fix".to_string(),
+            existing_branch: false,
+            forge: "test-forge".to_string(),
+            new_branch: "agent/fix".to_string(),
+            owner: "org".to_string(),
+            patch: Some("diff...".to_string()),
+            patch_file: None,
+            repo: "repo".to_string(),
+        };
+        let author = resolve_commit_author(&request, || None).expect("should resolve");
+        assert_eq!(
+            author,
+            Some(CommitAuthor {
+                email: "explicit@example.com".to_string(),
+                name: "Explicit User".to_string(),
+            })
+        );
     }
 
     async fn spawn_shim_and_client(
