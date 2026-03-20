@@ -5,12 +5,12 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use audit::{AuditRecord, AuditSink};
 use domain::{
-    ChangeRequest, ChangeRequestComment, ChangeRequestDiff, ChangeRequestReview,
-    CloseChangeRequestRequest, CommentOnChangeRequestRequest, ForgeCredential,
-    GetChangeRequestDiffRequest, GetChangeRequestRequest, ListChangeRequestsRequest,
-    ReadRepositoryFileRequest, ReadRepositoryFileResponse, RebaseBranchRequest,
-    RebaseBranchResponse, RepositoryReadService, ServiceError, SubmitChangeRequestReviewRequest,
-    validate_repository_path,
+    ChangeRequest, ChangeRequestComment, ChangeRequestCommentDetail, ChangeRequestDiff,
+    ChangeRequestReview, CloseChangeRequestRequest, CommentOnChangeRequestRequest, ForgeCredential,
+    GetChangeRequestCommentsRequest, GetChangeRequestDiffRequest, GetChangeRequestRequest,
+    ListChangeRequestsRequest, ReadRepositoryFileRequest, ReadRepositoryFileResponse,
+    RebaseBranchRequest, RebaseBranchResponse, RepositoryReadService, ServiceError,
+    SubmitChangeRequestReviewRequest, validate_repository_path,
 };
 use forge::ForgeAdapter;
 
@@ -43,6 +43,30 @@ where
     A: ForgeAdapter,
     S: AuditSink,
 {
+    async fn get_change_request_comments(
+        &self,
+        request: GetChangeRequestCommentsRequest,
+    ) -> Result<Vec<ChangeRequestCommentDetail>, ServiceError> {
+        self.audit_sink
+            .record(AuditRecord {
+                agent: request.agent,
+                action: "get_change_request_comments".to_string(),
+                repository: request.repository.clone(),
+                target: request.index.to_string(),
+            })
+            .await
+            .map_err(|e| ServiceError::Audit(e.to_string()))?;
+
+        self.adapter
+            .get_change_request_comments(
+                &request.repository,
+                request.index,
+                &ForgeCredential { token: None },
+            )
+            .await
+            .map_err(|e| ServiceError::Upstream(e.to_string()))
+    }
+
     async fn get_change_request_diff(
         &self,
         request: GetChangeRequestDiffRequest,
@@ -699,10 +723,10 @@ mod tests {
 
     use audit::{AuditError, AuditRecord, AuditSink, InMemoryAuditSink};
     use domain::{
-        AgentIdentity, ChangeRequest, ChangeRequestState, CloseChangeRequestRequest,
-        CommentOnChangeRequestRequest, CommitPatchRequest, ForgeKind, OpenChangeRequestRequest,
-        ReadRepositoryFileRequest, RepositoryReadService, RepositoryRef, RepositoryWriteService,
-        ServiceError, SubmitChangeRequestReviewRequest,
+        AgentIdentity, ChangeRequest, ChangeRequestCommentDetail, ChangeRequestState,
+        CloseChangeRequestRequest, CommentOnChangeRequestRequest, CommitPatchRequest, ForgeKind,
+        OpenChangeRequestRequest, ReadRepositoryFileRequest, RepositoryReadService, RepositoryRef,
+        RepositoryWriteService, ServiceError, SubmitChangeRequestReviewRequest,
     };
     use forge::{ForgeAdapter, ForgeError};
 
@@ -758,6 +782,15 @@ mod tests {
             _base_branch: &str,
             _credential: &domain::ForgeCredential,
         ) -> Result<ChangeRequest, ForgeError> {
+            unimplemented!()
+        }
+
+        async fn get_change_request_comments(
+            &self,
+            _repository: &RepositoryRef,
+            _index: u64,
+            _credential: &domain::ForgeCredential,
+        ) -> Result<Vec<ChangeRequestCommentDetail>, ForgeError> {
             unimplemented!()
         }
 
@@ -844,6 +877,15 @@ mod tests {
             _base_branch: &str,
             _credential: &domain::ForgeCredential,
         ) -> Result<ChangeRequest, ForgeError> {
+            unimplemented!()
+        }
+
+        async fn get_change_request_comments(
+            &self,
+            _repository: &RepositoryRef,
+            _index: u64,
+            _credential: &domain::ForgeCredential,
+        ) -> Result<Vec<ChangeRequestCommentDetail>, ForgeError> {
             unimplemented!()
         }
 
@@ -1046,6 +1088,15 @@ mod tests {
                     repository.owner, repository.name
                 ),
             })
+        }
+
+        async fn get_change_request_comments(
+            &self,
+            _repository: &RepositoryRef,
+            _index: u64,
+            _credential: &domain::ForgeCredential,
+        ) -> Result<Vec<ChangeRequestCommentDetail>, ForgeError> {
+            unimplemented!()
         }
 
         async fn get_change_request(
@@ -1383,6 +1434,15 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             unimplemented!()
         }
 
+        async fn get_change_request_comments(
+            &self,
+            _repository: &RepositoryRef,
+            _index: u64,
+            _credential: &domain::ForgeCredential,
+        ) -> Result<Vec<ChangeRequestCommentDetail>, ForgeError> {
+            unimplemented!()
+        }
+
         async fn get_change_request(
             &self,
             _repository: &RepositoryRef,
@@ -1694,6 +1754,15 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             _: &str,
             _: &domain::ForgeCredential,
         ) -> Result<ChangeRequest, ForgeError> {
+            unimplemented!()
+        }
+
+        async fn get_change_request_comments(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &domain::ForgeCredential,
+        ) -> Result<Vec<ChangeRequestCommentDetail>, ForgeError> {
             unimplemented!()
         }
 

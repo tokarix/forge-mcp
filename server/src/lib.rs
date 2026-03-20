@@ -21,6 +21,7 @@ use utoipa_scalar::{Scalar, Servable};
         handlers::comment_on_pull,
         handlers::get_contents,
         handlers::get_pull,
+        handlers::get_pull_comments,
         handlers::get_pull_diff,
         handlers::list_pulls,
         handlers::post_patches,
@@ -91,7 +92,7 @@ pub fn build_router(state: AppState, enable_docs: bool) -> Router {
         )
         .route(
             "/api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}/comments",
-            post(handlers::comment_on_pull),
+            get(handlers::get_pull_comments).post(handlers::comment_on_pull),
         )
         .route(
             "/api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}/diff",

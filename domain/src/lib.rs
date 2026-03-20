@@ -94,6 +94,25 @@ pub struct ChangeRequestComment {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ChangeRequestCommentDetail {
+    pub author: String,
+    pub body: String,
+    pub created_at: String,
+    pub id: u64,
+    /// "comment" for general comments, "review" for formal reviews.
+    pub kind: String,
+    /// For reviews: `APPROVED`, `REQUEST_CHANGES`, or `COMMENT`. None for general comments.
+    pub review_state: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GetChangeRequestCommentsRequest {
+    pub agent: AgentIdentity,
+    pub index: u64,
+    pub repository: RepositoryRef,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ChangeRequestReview {
     pub body: String,
     pub event: String,
@@ -270,6 +289,17 @@ pub trait RepositoryReadService: Send + Sync {
         &self,
         request: GetChangeRequestRequest,
     ) -> Result<ChangeRequest, ServiceError>;
+
+    /// Retrieves all comments and reviews for a change request.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the upstream forge request fails or audit
+    /// recording fails.
+    async fn get_change_request_comments(
+        &self,
+        request: GetChangeRequestCommentsRequest,
+    ) -> Result<Vec<ChangeRequestCommentDetail>, ServiceError>;
 
     /// Lists change requests, optionally filtered by state.
     ///

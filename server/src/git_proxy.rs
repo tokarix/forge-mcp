@@ -387,9 +387,9 @@ mod tests {
 
     use axum::{body::Body, http::Request};
     use domain::{
-        ChangeRequest, ChangeRequestState, CommitPatchResponse, GetChangeRequestRequest,
-        ListChangeRequestsRequest, OpenChangeRequestResponse, ReadRepositoryFileResponse,
-        ServiceError,
+        ChangeRequest, ChangeRequestCommentDetail, ChangeRequestState, CommitPatchResponse,
+        GetChangeRequestCommentsRequest, GetChangeRequestRequest, ListChangeRequestsRequest,
+        OpenChangeRequestResponse, ReadRepositoryFileResponse, ServiceError,
     };
     use tower::ServiceExt;
     use wiremock::{
@@ -430,6 +430,14 @@ mod tests {
             _: &str,
             _: &domain::ForgeCredential,
         ) -> Result<domain::ChangeRequest, forge::ForgeError> {
+            unimplemented!()
+        }
+        async fn get_change_request_comments(
+            &self,
+            _: &domain::RepositoryRef,
+            _: u64,
+            _: &domain::ForgeCredential,
+        ) -> Result<Vec<domain::ChangeRequestCommentDetail>, forge::ForgeError> {
             unimplemented!()
         }
         async fn get_change_request(
@@ -488,6 +496,13 @@ mod tests {
                 path: request.path,
                 repository: request.repository,
             })
+        }
+
+        async fn get_change_request_comments(
+            &self,
+            _request: GetChangeRequestCommentsRequest,
+        ) -> Result<Vec<ChangeRequestCommentDetail>, ServiceError> {
+            unimplemented!()
         }
 
         async fn get_change_request_diff(

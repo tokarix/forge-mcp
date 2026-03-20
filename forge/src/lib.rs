@@ -5,8 +5,8 @@ use std::sync::Once;
 use async_trait::async_trait;
 use base64::Engine;
 use domain::{
-    ChangeRequest, ChangeRequestComment, ChangeRequestReview, ChangeRequestState, ForgeCredential,
-    ReadRepositoryFileResponse, RepositoryRef,
+    ChangeRequest, ChangeRequestComment, ChangeRequestCommentDetail, ChangeRequestReview,
+    ChangeRequestState, ForgeCredential, ReadRepositoryFileResponse, RepositoryRef,
 };
 use reqwest::StatusCode;
 use serde::Deserialize;
@@ -53,6 +53,14 @@ pub trait ForgeAdapter: Send + Sync {
         base_branch: &str,
         credential: &ForgeCredential,
     ) -> Result<ChangeRequest, ForgeError>;
+
+    /// Gets all comments and reviews for a change request.
+    async fn get_change_request_comments(
+        &self,
+        repository: &RepositoryRef,
+        index: u64,
+        credential: &ForgeCredential,
+    ) -> Result<Vec<ChangeRequestCommentDetail>, ForgeError>;
 
     /// Gets a single change request by index.
     async fn get_change_request(
@@ -201,6 +209,28 @@ struct ForgejoReviewResponse {
     id: u64,
 }
 
+#[derive(Debug, Deserialize)]
+struct ForgejoCommentUser {
+    login: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ForgejoIssueComment {
+    body: String,
+    created_at: String,
+    id: u64,
+    user: ForgejoCommentUser,
+}
+
+#[derive(Debug, Deserialize)]
+struct ForgejoPullReview {
+    body: Option<String>,
+    id: u64,
+    state: String,
+    submitted_at: Option<String>,
+    user: ForgejoCommentUser,
+}
+
 #[async_trait]
 impl ForgeAdapter for ForgejoAdapter {
     async fn close_change_request(
@@ -310,6 +340,84 @@ impl ForgeAdapter for ForgejoAdapter {
 
         let pr: ForgejoPullRequest = response.json().await?;
         Ok(pr.into_change_request())
+    }
+
+    async fn get_change_request_comments(
+        &self,
+        repository: &RepositoryRef,
+        index: u64,
+        credential: &ForgeCredential,
+    ) -> Result<Vec<ChangeRequestCommentDetail>, ForgeError> {
+        let effective_token = credential.token.as_deref().or(self.config.token.as_deref());
+
+        // Fetch issue comments (general comments on the PR)
+        let comments_url = format!(
+            "{}/api/v1/repos/{}/{}/issues/{index}/comments",
+            self.config.base_url.trim_end_matches('/'),
+            repository.owner,
+            repository.name,
+        );
+        let mut comments_req = self.client.get(&comments_url);
+        if let Some(token) = effective_token {
+            comments_req = comments_req.bearer_auth(token);
+        }
+        let comments_response = comments_req.send().await?;
+        let status = comments_response.status();
+        if !status.is_success() {
+            let body = comments_response.text().await.unwrap_or_default();
+            return Err(ForgeError::UnexpectedStatus { status, body });
+        }
+        let issue_comments: Vec<ForgejoIssueComment> = comments_response.json().await?;
+
+        // Fetch pull request reviews
+        let reviews_url = format!(
+            "{}/api/v1/repos/{}/{}/pulls/{index}/reviews",
+            self.config.base_url.trim_end_matches('/'),
+            repository.owner,
+            repository.name,
+        );
+        let mut reviews_req = self.client.get(&reviews_url);
+        if let Some(token) = effective_token {
+            reviews_req = reviews_req.bearer_auth(token);
+        }
+        let reviews_response = reviews_req.send().await?;
+        let status = reviews_response.status();
+        if !status.is_success() {
+            let body = reviews_response.text().await.unwrap_or_default();
+            return Err(ForgeError::UnexpectedStatus { status, body });
+        }
+        let reviews: Vec<ForgejoPullReview> = reviews_response.json().await?;
+
+        // Merge comments and non-PENDING reviews, sort chronologically
+        let mut result: Vec<ChangeRequestCommentDetail> = Vec::new();
+
+        for c in issue_comments {
+            result.push(ChangeRequestCommentDetail {
+                author: c.user.login,
+                body: c.body,
+                created_at: c.created_at,
+                id: c.id,
+                kind: "comment".to_string(),
+                review_state: None,
+            });
+        }
+
+        for r in reviews {
+            let Some(submitted_at) = r.submitted_at else {
+                continue; // Skip PENDING reviews
+            };
+            result.push(ChangeRequestCommentDetail {
+                author: r.user.login,
+                body: r.body.unwrap_or_default(),
+                created_at: submitted_at,
+                id: r.id,
+                kind: "review".to_string(),
+                review_state: Some(r.state),
+            });
+        }
+
+        result.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        Ok(result)
     }
 
     async fn get_change_request(
@@ -517,5 +625,103 @@ impl ForgeAdapter for ForgejoAdapter {
             id: review.id,
             index,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use domain::ForgeCredential;
+    use wiremock::matchers::{method, path_regex};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::*;
+
+    fn test_adapter(base_url: &str) -> ForgejoAdapter {
+        ForgejoAdapter::new(ForgejoConfig {
+            base_url: base_url.to_string(),
+            token: Some("test-token".to_string()),
+        })
+    }
+
+    fn test_repo() -> RepositoryRef {
+        RepositoryRef {
+            alias: "test".to_string(),
+            forge: domain::ForgeKind::Forgejo,
+            host: "https://forge.example".to_string(),
+            name: "repo".to_string(),
+            owner: "org".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn get_comments_merges_and_sorts_chronologically() {
+        let mock = MockServer::start().await;
+
+        // Issue comments endpoint
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/.+/issues/\d+/comments"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "id": 10,
+                    "body": "second comment",
+                    "created_at": "2026-03-18T12:00:00Z",
+                    "user": { "login": "alice" }
+                },
+                {
+                    "id": 5,
+                    "body": "first comment",
+                    "created_at": "2026-03-18T10:00:00Z",
+                    "user": { "login": "bob" }
+                }
+            ])))
+            .mount(&mock)
+            .await;
+
+        // Reviews endpoint
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/.+/pulls/\d+/reviews"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "id": 20,
+                    "body": "approved",
+                    "state": "APPROVED",
+                    "submitted_at": "2026-03-18T11:00:00Z",
+                    "user": { "login": "carol" }
+                },
+                {
+                    "id": 30,
+                    "body": null,
+                    "state": "PENDING",
+                    "submitted_at": null,
+                    "user": { "login": "dave" }
+                }
+            ])))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let result = adapter
+            .get_change_request_comments(&test_repo(), 1, &cred)
+            .await
+            .unwrap();
+
+        // PENDING review should be filtered out
+        assert_eq!(result.len(), 3);
+
+        // Should be sorted chronologically
+        assert_eq!(result[0].author, "bob");
+        assert_eq!(result[0].created_at, "2026-03-18T10:00:00Z");
+        assert_eq!(result[0].kind, "comment");
+        assert!(result[0].review_state.is_none());
+
+        assert_eq!(result[1].author, "carol");
+        assert_eq!(result[1].created_at, "2026-03-18T11:00:00Z");
+        assert_eq!(result[1].kind, "review");
+        assert_eq!(result[1].review_state.as_deref(), Some("APPROVED"));
+
+        assert_eq!(result[2].author, "alice");
+        assert_eq!(result[2].created_at, "2026-03-18T12:00:00Z");
+        assert_eq!(result[2].kind, "comment");
     }
 }

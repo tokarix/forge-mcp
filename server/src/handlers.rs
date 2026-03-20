@@ -11,9 +11,9 @@ use axum::{
 };
 use domain::{
     CloseChangeRequestRequest, CommentOnChangeRequestRequest, CommitPatchRequest, ForgeKind,
-    GetChangeRequestRequest, ListChangeRequestsRequest, OpenChangeRequestRequest,
-    ReadRepositoryFileRequest, RebaseBranchRequest, RepositoryRef, ServiceError,
-    SubmitChangeRequestReviewRequest,
+    GetChangeRequestCommentsRequest, GetChangeRequestRequest, ListChangeRequestsRequest,
+    OpenChangeRequestRequest, ReadRepositoryFileRequest, RebaseBranchRequest, RepositoryRef,
+    ServiceError, SubmitChangeRequestReviewRequest,
 };
 
 use crate::api::{
@@ -695,6 +695,51 @@ pub async fn comment_on_pull(
 }
 
 #[utoipa::path(
+    get,
+    path = "/api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}/comments",
+    params(
+        ("forge" = String, Path, description = "Forge alias"),
+        ("owner" = String, Path, description = "Repository owner"),
+        ("repo" = String, Path, description = "Repository name"),
+        ("index" = u64, Path, description = "Pull request index"),
+    ),
+    responses(
+        (status = 200, description = "List of comments and reviews"),
+        (status = 401, description = "Unauthorized", body = ErrorBody),
+    ),
+    security(("bearer" = []))
+)]
+/// GET /api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}/comments
+pub async fn get_pull_comments(
+    State(state): State<AppState>,
+    Path(path): Path<PullPath>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let forge = resolve_forge(&state.forge_registry, &path.forge)?;
+    let agent = resolve_agent(
+        &headers,
+        &state.agent_registry,
+        &path.forge,
+        &path.owner,
+        &path.repo,
+    )?;
+
+    let result = forge
+        .read_service
+        .get_change_request_comments(GetChangeRequestCommentsRequest {
+            agent: agent.identity.clone(),
+            index: path.index,
+            repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
+        })
+        .await
+        .map_err(map_service_error)?;
+
+    Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(
+        serde_json::to_value(&result).expect("serializable"),
+    ))
+}
+
+#[utoipa::path(
     post,
     path = "/api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}/reviews",
     params(
@@ -822,9 +867,9 @@ mod tests {
         http::{Request, StatusCode},
     };
     use domain::{
-        ChangeRequest, ChangeRequestState, CommitPatchResponse, GetChangeRequestRequest,
-        ListChangeRequestsRequest, OpenChangeRequestResponse, ReadRepositoryFileResponse,
-        ServiceError,
+        ChangeRequest, ChangeRequestCommentDetail, ChangeRequestState, CommitPatchResponse,
+        GetChangeRequestCommentsRequest, GetChangeRequestRequest, ListChangeRequestsRequest,
+        OpenChangeRequestResponse, ReadRepositoryFileResponse, ServiceError,
     };
     use tower::ServiceExt;
 
@@ -863,6 +908,14 @@ mod tests {
             _: &str,
             _: &domain::ForgeCredential,
         ) -> Result<domain::ChangeRequest, forge::ForgeError> {
+            unimplemented!()
+        }
+        async fn get_change_request_comments(
+            &self,
+            _: &domain::RepositoryRef,
+            _: u64,
+            _: &domain::ForgeCredential,
+        ) -> Result<Vec<domain::ChangeRequestCommentDetail>, forge::ForgeError> {
             unimplemented!()
         }
         async fn get_change_request(
@@ -921,6 +974,30 @@ mod tests {
                 path: request.path,
                 repository: request.repository,
             })
+        }
+
+        async fn get_change_request_comments(
+            &self,
+            _request: GetChangeRequestCommentsRequest,
+        ) -> Result<Vec<ChangeRequestCommentDetail>, ServiceError> {
+            Ok(vec![
+                ChangeRequestCommentDetail {
+                    author: "reviewer".to_string(),
+                    body: "looks good".to_string(),
+                    created_at: "2026-03-18T10:00:00Z".to_string(),
+                    id: 1,
+                    kind: "comment".to_string(),
+                    review_state: None,
+                },
+                ChangeRequestCommentDetail {
+                    author: "reviewer".to_string(),
+                    body: "approved".to_string(),
+                    created_at: "2026-03-18T11:00:00Z".to_string(),
+                    id: 2,
+                    kind: "review".to_string(),
+                    review_state: Some("APPROVED".to_string()),
+                },
+            ])
         }
 
         async fn get_change_request_diff(
@@ -1557,5 +1634,35 @@ mod tests {
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].action, "agent_info");
         assert_eq!(records[0].target, "self");
+    }
+
+    #[tokio::test]
+    async fn get_pull_comments_returns_comments() {
+        let app = crate::build_router(test_state(), false);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/repos/test-forge/org/repo/pulls/1/comments")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let arr = json.as_array().expect("should be array");
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["author"], "reviewer");
+        assert_eq!(arr[0]["body"], "looks good");
+        assert_eq!(arr[0]["kind"], "comment");
+        assert!(arr[0]["review_state"].is_null());
+        assert_eq!(arr[1]["body"], "approved");
+        assert_eq!(arr[1]["kind"], "review");
+        assert_eq!(arr[1]["review_state"], "APPROVED");
     }
 }

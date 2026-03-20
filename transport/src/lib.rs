@@ -103,6 +103,18 @@ pub struct GetChangeRequestDiffTool {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct GetChangeRequestCommentsTool {
+    /// Forge alias -- use `forge_info` to discover available aliases.
+    pub forge: String,
+    /// Change request index number.
+    pub index: u64,
+    /// Repository owner or organization.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct GetChangeRequestTool {
     /// Forge alias -- use `forge_info` to discover available aliases.
     pub forge: String,
@@ -418,6 +430,29 @@ impl McpShim {
             "patch": patch,
         });
         self.gateway_post(url, &body).await
+    }
+
+    /// Get all comments and reviews for a change request.
+    #[tool(
+        name = "get_change_request_comments",
+        description = "Get all comments and reviews for a change request (pull request)."
+    )]
+    async fn get_change_request_comments(
+        &self,
+        Parameters(request): Parameters<GetChangeRequestCommentsTool>,
+    ) -> Result<String, McpError> {
+        let url = self.build_url(&[
+            "api",
+            "v1",
+            "repos",
+            &request.forge,
+            &request.owner,
+            &request.repo,
+            "pulls",
+            &request.index.to_string(),
+            "comments",
+        ])?;
+        self.gateway_get(url).await
     }
 
     /// Get the unified diff for a change request.
@@ -902,6 +937,64 @@ mod tests {
             .map(|t| t.text.clone())
             .expect("text result");
         assert!(text.contains("agent/fix"));
+
+        drop(client);
+        server_handle.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_change_request_comments_calls_gateway() -> Result<(), Box<dyn std::error::Error>> {
+        let mock_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path_regex(
+                r"/api/v1/repos/.+/.+/.+/pulls/\d+/comments",
+            ))
+            .and(wiremock::matchers::header(
+                "authorization",
+                "Bearer test-token",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                    {
+                        "author": "reviewer",
+                        "body": "looks good",
+                        "created_at": "2026-03-18T10:00:00Z",
+                        "id": 1,
+                        "kind": "comment",
+                        "review_state": null
+                    }
+                ])),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let (client, server_handle) =
+            spawn_shim_and_client(test_config(&mock_server.uri())).await?;
+
+        let args = serde_json::json!({
+            "forge": "test-forge",
+            "owner": "org",
+            "repo": "repo",
+            "index": 1
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+
+        let result = client
+            .call_tool(
+                CallToolRequestParams::new("get_change_request_comments").with_arguments(args),
+            )
+            .await?;
+
+        let text = result
+            .content
+            .first()
+            .and_then(|c| c.raw.as_text())
+            .map(|t| t.text.clone())
+            .expect("text result");
+        assert!(text.contains("looks good"));
 
         drop(client);
         server_handle.await??;
