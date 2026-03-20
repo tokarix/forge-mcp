@@ -286,6 +286,22 @@ pub struct ScheduleAutoMergeTool {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct UpdateChangeRequestTool {
+    /// New PR body/description. Omit to leave unchanged.
+    pub body: Option<String>,
+    /// Forge alias -- use `forge_info` to discover available aliases.
+    pub forge: String,
+    /// Change request index number.
+    pub index: u64,
+    /// Repository owner or organization.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+    /// New PR title. Omit to leave unchanged.
+    pub title: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct SubmitChangeRequestReviewTool {
     /// Review body text.
     pub body: String,
@@ -381,6 +397,34 @@ impl McpShim {
             .client
             .delete(url)
             .bearer_auth(&self.config.token)
+            .send()
+            .await
+            .map_err(|e| McpError::internal_error(format!("HTTP request failed: {e}"), None))?;
+
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .map_err(|e| McpError::internal_error(format!("failed to read response: {e}"), None))?;
+
+        if !status.is_success() {
+            return Err(Self::map_http_error(status, body));
+        }
+
+        Ok(body)
+    }
+
+    /// Makes an HTTP PATCH request to the control plane.
+    async fn gateway_patch(
+        &self,
+        url: reqwest::Url,
+        json_body: &impl serde::Serialize,
+    ) -> Result<String, McpError> {
+        let response = self
+            .client
+            .patch(url)
+            .bearer_auth(&self.config.token)
+            .json(json_body)
             .send()
             .await
             .map_err(|e| McpError::internal_error(format!("HTTP request failed: {e}"), None))?;
@@ -773,6 +817,39 @@ impl McpShim {
             "event": request.event,
         });
         self.gateway_post(url, &body).await
+    }
+
+    /// Update a change request's title and/or body.
+    #[tool(
+        name = "update_change_request",
+        description = "Update a change request (pull request) title and/or body. Provide at least one of title or body."
+    )]
+    async fn update_change_request(
+        &self,
+        Parameters(request): Parameters<UpdateChangeRequestTool>,
+    ) -> Result<String, McpError> {
+        let url = self.build_url(&[
+            "api",
+            "v1",
+            "repos",
+            &request.forge,
+            &request.owner,
+            &request.repo,
+            "pulls",
+            &request.index.to_string(),
+        ])?;
+        let mut json_body = serde_json::Map::new();
+        if let Some(title) = &request.title {
+            json_body.insert(
+                "title".to_string(),
+                serde_json::Value::String(title.clone()),
+            );
+        }
+        if let Some(body) = &request.body {
+            json_body.insert("body".to_string(), serde_json::Value::String(body.clone()));
+        }
+        self.gateway_patch(url, &serde_json::Value::Object(json_body))
+            .await
     }
 
     /// Discover available forges, gateway URL, git proxy pattern, and auth.

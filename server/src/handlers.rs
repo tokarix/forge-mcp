@@ -14,12 +14,14 @@ use domain::{
     GetChangeRequestCommentsRequest, GetChangeRequestRequest, ListChangeRequestsRequest,
     OpenChangeRequestRequest, ReadRepositoryFileRequest, RebaseBranchRequest, RepositoryRef,
     ScheduleAutoMergeRequest, ServiceError, SubmitChangeRequestReviewRequest,
+    UpdateChangeRequestRequest,
 };
 
 use crate::api::{
     CommentBody, CommitPatchBody, CommitPatchResult, ContentsPath, ContentsQuery, ContentsResult,
     ErrorBody, ListPullsQuery, OpenPullBody, PullPath, RebaseBranchBody, RebaseBranchResult,
     RebaseOperationBody, RepoPath, ScheduleAutoMergeBody, SubmitReviewBody,
+    UpdateChangeRequestBody,
 };
 use crate::auth::{AgentRegistry, extract_bearer_token};
 
@@ -667,6 +669,64 @@ pub async fn close_pull(
 }
 
 #[utoipa::path(
+    patch,
+    path = "/api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}",
+    params(
+        ("forge" = String, Path, description = "Forge alias"),
+        ("owner" = String, Path, description = "Repository owner"),
+        ("repo" = String, Path, description = "Repository name"),
+        ("index" = u64, Path, description = "Pull request index"),
+    ),
+    request_body = UpdateChangeRequestBody,
+    responses(
+        (status = 200, description = "Change request updated"),
+        (status = 401, description = "Unauthorized", body = ErrorBody),
+    ),
+    security(("bearer" = []))
+)]
+/// PATCH /api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}
+pub async fn update_pull(
+    State(state): State<AppState>,
+    Path(path): Path<PullPath>,
+    headers: HeaderMap,
+    Json(body): Json<UpdateChangeRequestBody>,
+) -> impl IntoResponse {
+    let forge = resolve_forge(&state.forge_registry, &path.forge)?;
+    let agent = resolve_agent(
+        &headers,
+        &state.agent_registry,
+        &path.forge,
+        &path.owner,
+        &path.repo,
+    )?;
+    let credential = resolve_credential(agent, &path.forge, forge);
+
+    let authorized = domain::policy::AuthorizedWrite {
+        policy: agent.policy.clone(),
+    };
+
+    let result = forge
+        .write_service
+        .update_change_request(
+            UpdateChangeRequestRequest {
+                agent: agent.identity.clone(),
+                body: body.body,
+                index: path.index,
+                repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
+                title: body.title,
+            },
+            authorized,
+            &credential,
+        )
+        .await
+        .map_err(map_service_error)?;
+
+    Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(
+        serde_json::to_value(&result).expect("serializable"),
+    ))
+}
+
+#[utoipa::path(
     post,
     path = "/api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}/comments",
     params(
@@ -1054,6 +1114,16 @@ mod tests {
         ) -> Result<domain::ChangeRequestReview, forge::ForgeError> {
             unimplemented!()
         }
+        async fn update_change_request(
+            &self,
+            _: &domain::RepositoryRef,
+            _: u64,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: &domain::ForgeCredential,
+        ) -> Result<domain::ChangeRequest, forge::ForgeError> {
+            unimplemented!()
+        }
     }
 
     struct FakeReadService;
@@ -1234,6 +1304,27 @@ mod tests {
                 event: request.event,
                 id: 1,
                 index: request.index,
+            })
+        }
+
+        async fn update_change_request(
+            &self,
+            request: domain::UpdateChangeRequestRequest,
+            _authorized: domain::policy::AuthorizedWrite,
+            _credential: &domain::ForgeCredential,
+        ) -> Result<ChangeRequest, ServiceError> {
+            Ok(ChangeRequest {
+                base_branch: "main".to_string(),
+                body: request.body.unwrap_or_default(),
+                changed_files_count: None,
+                commit_count: None,
+                head_branch: "agent/fix".to_string(),
+                head_sha: None,
+                index: request.index,
+                merge_base_sha: None,
+                state: ChangeRequestState::Open,
+                title: request.title.unwrap_or_else(|| "Fix".to_string()),
+                url: "https://example.com/pulls/1".to_string(),
             })
         }
     }
@@ -1859,5 +1950,33 @@ mod tests {
         assert_eq!(arr[1]["body"], "approved");
         assert_eq!(arr[1]["kind"], "review");
         assert_eq!(arr[1]["review_state"], "APPROVED");
+    }
+
+    #[tokio::test]
+    async fn patch_pull_returns_updated_pr() {
+        let app = crate::build_router(test_state(), false);
+        let body = serde_json::json!({
+            "title": "Updated title"
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/v1/repos/test-forge/org/repo/pulls/1")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["index"], 1);
+        assert_eq!(json["title"], "Updated title");
     }
 }

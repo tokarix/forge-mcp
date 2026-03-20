@@ -88,6 +88,13 @@ pub struct ScheduleAutoMergeBody {
     pub merge_style: String,
 }
 
+/// PATCH /api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpdateChangeRequestBody {
+    pub body: Option<String>,
+    pub title: Option<String>,
+}
+
 /// POST /api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}/reviews
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct SubmitReviewBody {

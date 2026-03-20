@@ -490,6 +490,16 @@ mod tests {
         ) -> Result<domain::ChangeRequestReview, forge::ForgeError> {
             unimplemented!()
         }
+        async fn update_change_request(
+            &self,
+            _: &domain::RepositoryRef,
+            _: u64,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: &domain::ForgeCredential,
+        ) -> Result<domain::ChangeRequest, forge::ForgeError> {
+            unimplemented!()
+        }
     }
 
     struct FakeReadService;
@@ -632,6 +642,15 @@ mod tests {
             _authorized: domain::policy::AuthorizedWrite,
             _credential: &domain::ForgeCredential,
         ) -> Result<domain::ChangeRequestReview, ServiceError> {
+            unimplemented!()
+        }
+
+        async fn update_change_request(
+            &self,
+            _request: domain::UpdateChangeRequestRequest,
+            _authorized: domain::policy::AuthorizedWrite,
+            _credential: &domain::ForgeCredential,
+        ) -> Result<domain::ChangeRequest, ServiceError> {
             unimplemented!()
         }
     }

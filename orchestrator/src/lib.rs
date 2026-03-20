@@ -10,7 +10,8 @@ use domain::{
     GetChangeRequestCommentsRequest, GetChangeRequestDiffRequest, GetChangeRequestRequest,
     ListChangeRequestsRequest, ReadRepositoryFileRequest, ReadRepositoryFileResponse,
     RebaseBranchRequest, RebaseBranchResponse, RepositoryReadService, ScheduleAutoMergeRequest,
-    ServiceError, SubmitChangeRequestReviewRequest, validate_repository_path,
+    ServiceError, SubmitChangeRequestReviewRequest, UpdateChangeRequestRequest,
+    validate_repository_path,
 };
 use forge::ForgeAdapter;
 
@@ -798,6 +799,71 @@ where
             .await
             .map_err(|e| ServiceError::Upstream(e.to_string()))
     }
+
+    async fn update_change_request(
+        &self,
+        request: UpdateChangeRequestRequest,
+        authorized: domain::policy::AuthorizedWrite,
+        credential: &ForgeCredential,
+    ) -> Result<ChangeRequest, ServiceError> {
+        // Validate at least one field is provided
+        if request.title.is_none() && request.body.is_none() {
+            return Err(ServiceError::Validation(
+                "at least one of title or body must be provided".to_string(),
+            ));
+        }
+
+        // Enforce branch-scope: require branch_prefix
+        let prefix = authorized
+            .policy
+            .branch_prefix
+            .as_deref()
+            .filter(|p| !p.is_empty())
+            .ok_or_else(|| ServiceError::PolicyDenied {
+                reasons: "update_change_request requires a configured branch_prefix".to_string(),
+            })?;
+
+        // Fetch the PR to inspect its head branch
+        let pr = self
+            .adapter
+            .get_change_request(&request.repository, request.index, credential)
+            .await
+            .map_err(|e| ServiceError::Upstream(e.to_string()))?;
+
+        // Verify head branch matches agent's prefix
+        if !pr.head_branch.starts_with(prefix) {
+            return Err(ServiceError::PolicyDenied {
+                reasons: format!(
+                    "agent may only update PRs whose head branch starts with '{prefix}', \
+                     but PR #{} has head branch '{}'",
+                    request.index, pr.head_branch
+                ),
+            });
+        }
+
+        // Audit before action
+        self.audit_sink
+            .record(AuditRecord {
+                agent: request.agent,
+                action: "update_change_request".to_string(),
+                repository: request.repository.clone(),
+                target: format!("#{}", request.index),
+            })
+            .await
+            .map_err(|e| ServiceError::Audit(e.to_string()))?;
+
+        // Delegate to adapter
+        self.adapter
+            .update_change_request(
+                &request.repository,
+                request.index,
+                request.title.as_deref(),
+                request.body.as_deref(),
+                credential,
+            )
+            .await
+            .map_err(|e| ServiceError::Upstream(e.to_string()))
+    }
 }
 
 #[cfg(test)]
@@ -810,6 +876,7 @@ mod tests {
         CloseChangeRequestRequest, CommentOnChangeRequestRequest, CommitPatchRequest, ForgeKind,
         OpenChangeRequestRequest, ReadRepositoryFileRequest, RepositoryReadService, RepositoryRef,
         RepositoryWriteService, ServiceError, SubmitChangeRequestReviewRequest,
+        UpdateChangeRequestRequest,
     };
     use forge::{ForgeAdapter, ForgeError};
 
@@ -937,6 +1004,17 @@ mod tests {
         ) -> Result<domain::ChangeRequestReview, ForgeError> {
             unimplemented!()
         }
+
+        async fn update_change_request(
+            &self,
+            _repository: &RepositoryRef,
+            _index: u64,
+            _title: Option<&str>,
+            _body: Option<&str>,
+            _credential: &domain::ForgeCredential,
+        ) -> Result<ChangeRequest, ForgeError> {
+            unimplemented!()
+        }
     }
 
     struct FailingForgeAdapter;
@@ -1036,6 +1114,17 @@ mod tests {
             _event: &str,
             _credential: &domain::ForgeCredential,
         ) -> Result<domain::ChangeRequestReview, ForgeError> {
+            unimplemented!()
+        }
+
+        async fn update_change_request(
+            &self,
+            _repository: &RepositoryRef,
+            _index: u64,
+            _title: Option<&str>,
+            _body: Option<&str>,
+            _credential: &domain::ForgeCredential,
+        ) -> Result<ChangeRequest, ForgeError> {
             unimplemented!()
         }
     }
@@ -1274,6 +1363,32 @@ mod tests {
                 event: event.to_string(),
                 id: 1,
                 index,
+            })
+        }
+
+        async fn update_change_request(
+            &self,
+            repository: &RepositoryRef,
+            index: u64,
+            title: Option<&str>,
+            body: Option<&str>,
+            _credential: &domain::ForgeCredential,
+        ) -> Result<ChangeRequest, ForgeError> {
+            Ok(ChangeRequest {
+                base_branch: "main".to_string(),
+                body: body.unwrap_or_default().to_string(),
+                changed_files_count: None,
+                commit_count: None,
+                head_branch: "agent/fix".to_string(),
+                head_sha: None,
+                index,
+                merge_base_sha: None,
+                state: ChangeRequestState::Open,
+                title: title.unwrap_or("Fix").to_string(),
+                url: format!(
+                    "https://forge.example/{}/{}/pulls/{index}",
+                    repository.owner, repository.name
+                ),
             })
         }
     }
@@ -1652,6 +1767,17 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
         ) -> Result<domain::ChangeRequestReview, ForgeError> {
             unimplemented!()
         }
+
+        async fn update_change_request(
+            &self,
+            _repository: &RepositoryRef,
+            _index: u64,
+            _title: Option<&str>,
+            _body: Option<&str>,
+            _credential: &domain::ForgeCredential,
+        ) -> Result<ChangeRequest, ForgeError> {
+            unimplemented!()
+        }
     }
 
     fn close_test_request(index: u64) -> CloseChangeRequestRequest {
@@ -1974,6 +2100,17 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
         ) -> Result<domain::ChangeRequestReview, ForgeError> {
             unimplemented!()
         }
+
+        async fn update_change_request(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: &domain::ForgeCredential,
+        ) -> Result<ChangeRequest, ForgeError> {
+            unimplemented!()
+        }
     }
 
     #[tokio::test]
@@ -2132,6 +2269,17 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
         ) -> Result<domain::ChangeRequestReview, ForgeError> {
             unimplemented!()
         }
+
+        async fn update_change_request(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: &domain::ForgeCredential,
+        ) -> Result<ChangeRequest, ForgeError> {
+            unimplemented!()
+        }
     }
 
     fn auto_merge_test_request(
@@ -2263,5 +2411,114 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
                 .contains(&format!("head:{full_sha}"))
         );
         assert!(audit.records()[0].target.contains("#42"));
+    }
+
+    // --- update_change_request tests ---
+
+    fn update_test_request(title: Option<&str>, body: Option<&str>) -> UpdateChangeRequestRequest {
+        UpdateChangeRequestRequest {
+            agent: AgentIdentity {
+                agent_id: "test-agent".to_string(),
+                session_id: "test-session".to_string(),
+            },
+            body: body.map(ToString::to_string),
+            index: 42,
+            repository: RepositoryRef {
+                alias: "test".to_string(),
+                forge: ForgeKind::Forgejo,
+                host: "https://forge.example".to_string(),
+                name: "repo".to_string(),
+                owner: "org".to_string(),
+            },
+            title: title.map(ToString::to_string),
+        }
+    }
+
+    #[tokio::test]
+    async fn update_change_request_rejects_when_both_none() {
+        let adapter = Arc::new(WriteTestForgeAdapter);
+        let audit = Arc::new(InMemoryAuditSink::new());
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
+
+        let err = orchestrator
+            .update_change_request(
+                update_test_request(None, None),
+                default_authorized(),
+                &domain::ForgeCredential { token: None },
+            )
+            .await
+            .expect_err("both None should be rejected");
+
+        assert!(matches!(err, ServiceError::Validation(_)));
+        assert_eq!(audit.records().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn update_change_request_rejects_without_prefix() {
+        let adapter = Arc::new(WriteTestForgeAdapter);
+        let audit = Arc::new(InMemoryAuditSink::new());
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
+
+        let authorized = domain::policy::AuthorizedWrite {
+            policy: domain::policy::PolicyConfig {
+                branch_prefix: None,
+                ..domain::policy::PolicyConfig::default()
+            },
+        };
+
+        let err = orchestrator
+            .update_change_request(
+                update_test_request(Some("New title"), None),
+                authorized,
+                &domain::ForgeCredential { token: None },
+            )
+            .await
+            .expect_err("missing prefix should be rejected");
+
+        assert!(matches!(err, ServiceError::PolicyDenied { .. }));
+        assert_eq!(audit.records().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn update_change_request_rejects_wrong_prefix() {
+        let adapter = Arc::new(CloseTestForgeAdapter {
+            head_branch: "other-agent/fix".to_string(),
+        });
+        let audit = Arc::new(InMemoryAuditSink::new());
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
+
+        let err = orchestrator
+            .update_change_request(
+                update_test_request(Some("New title"), None),
+                default_authorized(),
+                &domain::ForgeCredential { token: None },
+            )
+            .await
+            .expect_err("wrong prefix should be rejected");
+
+        assert!(matches!(err, ServiceError::PolicyDenied { .. }));
+        assert_eq!(audit.records().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn update_change_request_records_audit() {
+        let adapter = Arc::new(WriteTestForgeAdapter);
+        let audit = Arc::new(InMemoryAuditSink::new());
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
+
+        let result = orchestrator
+            .update_change_request(
+                update_test_request(Some("New title"), None),
+                default_authorized(),
+                &domain::ForgeCredential { token: None },
+            )
+            .await
+            .expect("should succeed");
+
+        assert_eq!(result.index, 42);
+        assert_eq!(result.title, "New title");
+        assert_eq!(audit.records().len(), 1);
+        assert_eq!(audit.records()[0].action, "update_change_request");
+        assert_eq!(audit.records()[0].target, "#42");
     }
 }

@@ -221,6 +221,15 @@ pub struct ScheduleAutoMergeRequest {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpdateChangeRequestRequest {
+    pub agent: AgentIdentity,
+    pub body: Option<String>,
+    pub index: u64,
+    pub repository: RepositoryRef,
+    pub title: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SubmitChangeRequestReviewRequest {
     pub agent: AgentIdentity,
     pub body: String,
@@ -433,6 +442,19 @@ pub trait RepositoryWriteService: Send + Sync {
         authorized: policy::AuthorizedWrite,
         credential: &ForgeCredential,
     ) -> Result<ChangeRequestReview, ServiceError>;
+
+    /// Updates a change request's title and/or body.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if neither title nor body is provided, the upstream
+    /// forge request fails, or audit recording fails.
+    async fn update_change_request(
+        &self,
+        request: UpdateChangeRequestRequest,
+        authorized: policy::AuthorizedWrite,
+        credential: &ForgeCredential,
+    ) -> Result<ChangeRequest, ServiceError>;
 }
 
 #[cfg(test)]
