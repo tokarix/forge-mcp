@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use base64::Engine;
 use domain::{
     ChangeRequest, ChangeRequestComment, ChangeRequestCommentDetail, ChangeRequestReview,
-    ChangeRequestState, ForgeCredential, ReadRepositoryFileResponse, RepositoryRef,
+    ChangeRequestState, ForgeCredential, ForgeUser, ReadRepositoryFileResponse, RepositoryRef,
 };
 use reqwest::StatusCode;
 use serde::Deserialize;
@@ -26,6 +26,12 @@ pub enum ForgeError {
 
 #[async_trait]
 pub trait ForgeAdapter: Send + Sync {
+    /// Retrieves the authenticated user's identity from the forge.
+    async fn get_authenticated_user(
+        &self,
+        credential: &ForgeCredential,
+    ) -> Result<ForgeUser, ForgeError>;
+
     /// Closes a change request (pull request) on the forge.
     async fn close_change_request(
         &self,
@@ -165,6 +171,12 @@ impl ForgejoAdapter {
 }
 
 #[derive(Debug, Deserialize)]
+struct ForgejoAuthUser {
+    email: String,
+    login: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct ForgejoContentsResponse {
     content: Option<String>,
     encoding: Option<String>,
@@ -254,6 +266,32 @@ struct ForgejoPullReview {
 
 #[async_trait]
 impl ForgeAdapter for ForgejoAdapter {
+    async fn get_authenticated_user(
+        &self,
+        credential: &ForgeCredential,
+    ) -> Result<ForgeUser, ForgeError> {
+        let url = format!("{}/api/v1/user", self.config.base_url.trim_end_matches('/'),);
+
+        let effective_token = credential.token.as_deref().or(self.config.token.as_deref());
+        let mut request = self.client.get(&url);
+        if let Some(token) = effective_token {
+            request = request.bearer_auth(token);
+        }
+
+        let response = request.send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(ForgeError::UnexpectedStatus { status, body });
+        }
+
+        let user: ForgejoAuthUser = response.json().await?;
+        Ok(ForgeUser {
+            email: user.email,
+            username: user.login,
+        })
+    }
+
     async fn close_change_request(
         &self,
         repository: &RepositoryRef,

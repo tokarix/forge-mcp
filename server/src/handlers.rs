@@ -1028,6 +1028,15 @@ mod tests {
 
     #[async_trait::async_trait]
     impl forge::ForgeAdapter for FakeForgeAdapter {
+        async fn get_authenticated_user(
+            &self,
+            _: &domain::ForgeCredential,
+        ) -> Result<domain::ForgeUser, forge::ForgeError> {
+            Ok(domain::ForgeUser {
+                email: "test@test".to_string(),
+                username: "test".to_string(),
+            })
+        }
         async fn close_change_request(
             &self,
             _: &domain::RepositoryRef,

@@ -257,6 +257,8 @@ impl GitWorkspace {
         &self,
         merge_base: &str,
         operations: &[RebaseOperation],
+        committer_name: &str,
+        committer_email: &str,
     ) -> Result<(), GitExecError> {
         use std::fmt::Write;
 
@@ -352,7 +354,15 @@ with open(sys.argv[1], 'w') as f:
 
         let mut cmd = Command::new("git");
         cmd.current_dir(&self.repo_path)
-            .args(["rebase", "-i", merge_base])
+            .args([
+                "-c",
+                &format!("user.name={committer_name}"),
+                "-c",
+                &format!("user.email={committer_email}"),
+                "rebase",
+                "-i",
+                merge_base,
+            ])
             .env("GIT_SEQUENCE_EDITOR", &editor_path)
             .env("GIT_TERMINAL_PROMPT", "0");
 
@@ -653,6 +663,8 @@ index 7e59600..1234567 100644
                 commit: sha3.clone(),
                 into: sha1.clone(),
             }],
+            "Test Committer",
+            "committer@test",
         )
         .unwrap();
 
@@ -693,6 +705,8 @@ index 7e59600..1234567 100644
                     into: sha1.clone(),
                 },
             ],
+            "Test Committer",
+            "committer@test",
         )
         .unwrap();
 

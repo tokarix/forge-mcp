@@ -15,6 +15,22 @@ use domain::{
 };
 use forge::ForgeAdapter;
 
+/// Resolves the committer identity for git operations.
+///
+/// Tries the forge user API first; falls back to `agent_id` / `agent_id@forge-mcp`
+/// if the token lacks `read:user` scope or the response has empty fields.
+fn resolve_committer_identity(
+    forge_user: Result<domain::ForgeUser, impl std::fmt::Display>,
+    agent_id: &str,
+) -> (String, String) {
+    match forge_user {
+        Ok(user) if !user.username.is_empty() && !user.email.is_empty() => {
+            (user.username, user.email)
+        }
+        _ => (agent_id.to_string(), format!("{agent_id}@forge-mcp")),
+    }
+}
+
 fn sanitize_commit_message(message: &str) -> String {
     let mut lines: Vec<&str> = message
         .lines()
@@ -569,7 +585,12 @@ where
             ));
         }
 
-        // 3. Clone full depth, check out the branch
+        // 3. Fetch committer identity from forge (best-effort)
+        let forge_user_result = self.adapter.get_authenticated_user(credential).await;
+        let (committer_name, committer_email) =
+            resolve_committer_identity(forge_user_result, &request.agent.agent_id);
+
+        // 4. Clone full depth, check out the branch
         let clone_url = format!(
             "{}/{}/{}.git",
             request.repository.host.trim_end_matches('/'),
@@ -633,7 +654,7 @@ where
 
             // 9. Run rebase
             workspace
-                .rebase_interactive(&mb, &git_ops)
+                .rebase_interactive(&mb, &git_ops, &committer_name, &committer_email)
                 .map_err(|e| ServiceError::GitExec(e.to_string()))?;
 
             // 10. Capture new HEAD SHA and tree SHA
@@ -880,7 +901,9 @@ mod tests {
     };
     use forge::{ForgeAdapter, ForgeError};
 
-    use super::{ReadOrchestrator, WriteOrchestrator, sanitize_commit_message};
+    use super::{
+        ReadOrchestrator, WriteOrchestrator, resolve_committer_identity, sanitize_commit_message,
+    };
 
     fn test_request(path: &str) -> ReadRepositoryFileRequest {
         ReadRepositoryFileRequest {
@@ -904,6 +927,16 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ForgeAdapter for FakeForgeAdapter {
+        async fn get_authenticated_user(
+            &self,
+            _: &domain::ForgeCredential,
+        ) -> Result<domain::ForgeUser, ForgeError> {
+            Ok(domain::ForgeUser {
+                email: "test@test".to_string(),
+                username: "test".to_string(),
+            })
+        }
+
         async fn close_change_request(
             &self,
             _repository: &RepositoryRef,
@@ -1021,6 +1054,16 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ForgeAdapter for FailingForgeAdapter {
+        async fn get_authenticated_user(
+            &self,
+            _: &domain::ForgeCredential,
+        ) -> Result<domain::ForgeUser, ForgeError> {
+            Ok(domain::ForgeUser {
+                email: "test@test".to_string(),
+                username: "test".to_string(),
+            })
+        }
+
         async fn close_change_request(
             &self,
             _repository: &RepositoryRef,
@@ -1219,6 +1262,16 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ForgeAdapter for WriteTestForgeAdapter {
+        async fn get_authenticated_user(
+            &self,
+            _: &domain::ForgeCredential,
+        ) -> Result<domain::ForgeUser, ForgeError> {
+            Ok(domain::ForgeUser {
+                email: "test@test".to_string(),
+                username: "test".to_string(),
+            })
+        }
+
         async fn close_change_request(
             &self,
             repository: &RepositoryRef,
@@ -1645,6 +1698,16 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
 
     #[async_trait::async_trait]
     impl ForgeAdapter for CloseTestForgeAdapter {
+        async fn get_authenticated_user(
+            &self,
+            _: &domain::ForgeCredential,
+        ) -> Result<domain::ForgeUser, ForgeError> {
+            Ok(domain::ForgeUser {
+                email: "test@test".to_string(),
+                username: "test".to_string(),
+            })
+        }
+
         async fn close_change_request(
             &self,
             repository: &RepositoryRef,
@@ -2000,6 +2063,16 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
 
     #[async_trait::async_trait]
     impl ForgeAdapter for CredentialCapturingAdapter {
+        async fn get_authenticated_user(
+            &self,
+            _: &domain::ForgeCredential,
+        ) -> Result<domain::ForgeUser, ForgeError> {
+            Ok(domain::ForgeUser {
+                email: "test@test".to_string(),
+                username: "test".to_string(),
+            })
+        }
+
         async fn close_change_request(
             &self,
             _: &RepositoryRef,
@@ -2162,6 +2235,16 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
 
     #[async_trait::async_trait]
     impl ForgeAdapter for AutoMergeTestForgeAdapter {
+        async fn get_authenticated_user(
+            &self,
+            _: &domain::ForgeCredential,
+        ) -> Result<domain::ForgeUser, ForgeError> {
+            Ok(domain::ForgeUser {
+                email: "test@test".to_string(),
+                username: "test".to_string(),
+            })
+        }
+
         async fn close_change_request(
             &self,
             _: &RepositoryRef,
@@ -2520,5 +2603,49 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
         assert_eq!(audit.records().len(), 1);
         assert_eq!(audit.records()[0].action, "update_change_request");
         assert_eq!(audit.records()[0].target, "#42");
+    }
+
+    // --- resolve_committer_identity tests ---
+
+    #[test]
+    fn resolve_committer_identity_uses_forge_user() {
+        let user: Result<domain::ForgeUser, String> = Ok(domain::ForgeUser {
+            email: "user@forge.example".to_string(),
+            username: "forgeuser".to_string(),
+        });
+        let (name, email) = resolve_committer_identity(user, "agent");
+        assert_eq!(name, "forgeuser");
+        assert_eq!(email, "user@forge.example");
+    }
+
+    #[test]
+    fn resolve_committer_identity_falls_back_on_error() {
+        let user: Result<domain::ForgeUser, String> =
+            Err("unauthorized: token lacks read:user scope".to_string());
+        let (name, email) = resolve_committer_identity(user, "claude");
+        assert_eq!(name, "claude");
+        assert_eq!(email, "claude@forge-mcp");
+    }
+
+    #[test]
+    fn resolve_committer_identity_falls_back_on_empty_email() {
+        let user: Result<domain::ForgeUser, String> = Ok(domain::ForgeUser {
+            email: String::new(),
+            username: "forgeuser".to_string(),
+        });
+        let (name, email) = resolve_committer_identity(user, "claude");
+        assert_eq!(name, "claude");
+        assert_eq!(email, "claude@forge-mcp");
+    }
+
+    #[test]
+    fn resolve_committer_identity_falls_back_on_empty_username() {
+        let user: Result<domain::ForgeUser, String> = Ok(domain::ForgeUser {
+            email: "user@forge.example".to_string(),
+            username: String::new(),
+        });
+        let (name, email) = resolve_committer_identity(user, "claude");
+        assert_eq!(name, "claude");
+        assert_eq!(email, "claude@forge-mcp");
     }
 }

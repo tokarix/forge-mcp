@@ -27,6 +27,12 @@ pub enum ForgeKind {
     GitLab,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ForgeUser {
+    pub email: String,
+    pub username: String,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct RepositoryRef {
     pub alias: String,
