@@ -1,7 +1,9 @@
 //! MCP shim — translates MCP tool calls into HTTP requests to the control plane.
 
+use std::collections::VecDeque;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rmcp::{
@@ -15,7 +17,7 @@ use rmcp::{
     transport::stdio,
 };
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Configuration for the MCP shim.
@@ -328,7 +330,7 @@ pub struct SubmitChangeRequestReviewTool {
     pub repo: String,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct ChannelEventMetaEnvelope {
     action: String,
     change_request: Option<u64>,
@@ -340,7 +342,7 @@ struct ChannelEventMetaEnvelope {
     repo: String,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct AgentEventEnvelope {
     content: String,
     kind: String,
@@ -445,6 +447,7 @@ impl SseParser {
 pub struct McpShim {
     client: reqwest::Client,
     config: ShimConfig,
+    event_buffer: Arc<Mutex<VecDeque<AgentEventEnvelope>>>,
     event_forwarder_started: AtomicBool,
     subscriber_id: String,
     tool_router: ToolRouter<Self>,
@@ -456,6 +459,7 @@ impl McpShim {
         Self {
             client: reqwest::Client::new(),
             config,
+            event_buffer: Arc::new(Mutex::new(VecDeque::new())),
             event_forwarder_started: AtomicBool::new(false),
             subscriber_id: generate_subscriber_id(),
             tool_router: Self::tool_router(),
@@ -673,6 +677,7 @@ impl McpShim {
     async fn run_event_forwarder(
         client: reqwest::Client,
         config: ShimConfig,
+        event_buffer: Arc<Mutex<VecDeque<AgentEventEnvelope>>>,
         subscriber_id: String,
         peer: rmcp::service::Peer<RoleServer>,
     ) {
@@ -725,7 +730,7 @@ impl McpShim {
             }
 
             backoff = Duration::from_secs(1);
-            if !read_event_stream(&peer, response, &mut last_event_id).await {
+            if !read_event_stream(&peer, &event_buffer, response, &mut last_event_id).await {
                 return;
             }
 
@@ -785,42 +790,48 @@ async fn send_event_stream_request(
         .map_err(|error| format!("HTTP request failed: {error}"))
 }
 
-async fn forward_sse_event(
+async fn buffer_sse_event(
     peer: &rmcp::service::Peer<RoleServer>,
+    event_buffer: &Mutex<VecDeque<AgentEventEnvelope>>,
     event: SseEvent,
     last_event_id: &mut Option<String>,
-) -> bool {
+) {
     if let Some(event_id) = &event.id {
         last_event_id.replace(event_id.clone());
     }
     if let Some(event_name) = &event.event
         && event_name != "change_request"
     {
-        return true;
+        return;
     }
 
     let envelope = match serde_json::from_str::<AgentEventEnvelope>(&event.data) {
         Ok(envelope) => envelope,
         Err(error) => {
             eprintln!("dropping invalid SSE event payload: {error}");
-            return true;
+            return;
         }
     };
     if envelope.kind != "change_request" {
-        return true;
+        return;
     }
 
-    match McpShim::send_channel_notification(peer, &envelope).await {
-        Ok(()) => true,
-        Err(error) => {
-            eprintln!("failed to forward channel event: {error}");
-            false
+    if let Ok(mut buffer) = event_buffer.lock() {
+        buffer.push_back(envelope.clone());
+    }
+
+    // Also attempt channel notification (currently broken in Claude Code,
+    // but will start working once anthropics/claude-code#36411 is fixed).
+    {
+        if let Err(error) = McpShim::send_channel_notification(peer, &envelope).await {
+            eprintln!("channel notification failed (expected): {error}");
         }
     }
 }
 
 async fn read_event_stream(
     peer: &rmcp::service::Peer<RoleServer>,
+    event_buffer: &Mutex<VecDeque<AgentEventEnvelope>>,
     mut response: reqwest::Response,
     last_event_id: &mut Option<String>,
 ) -> bool {
@@ -841,16 +852,12 @@ async fn read_event_stream(
         match next_chunk {
             Ok(Some(chunk)) => {
                 for event in parser.push_chunk(&chunk) {
-                    if !forward_sse_event(peer, event, last_event_id).await {
-                        return false;
-                    }
+                    buffer_sse_event(peer, event_buffer, event, last_event_id).await;
                 }
             }
             Ok(None) => {
-                if let Some(event) = parser.finish()
-                    && !forward_sse_event(peer, event, last_event_id).await
-                {
-                    return false;
+                if let Some(event) = parser.finish() {
+                    buffer_sse_event(peer, event_buffer, event, last_event_id).await;
                 }
                 return true;
             }
@@ -1157,6 +1164,24 @@ impl McpShim {
         self.gateway_post(url, &body).await
     }
 
+    /// Poll for pending webhook events. Returns any buffered change request
+    /// events that arrived since the last poll, then clears the buffer.
+    #[tool(
+        name = "poll_events",
+        description = "Poll for pending webhook events (change request opened, synchronized, etc.). Returns buffered events since last poll. Call periodically to receive forge notifications."
+    )]
+    async fn poll_events(&self) -> Result<String, McpError> {
+        let events: Vec<AgentEventEnvelope> = {
+            let mut buffer = self
+                .event_buffer
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            buffer.drain(..).collect()
+        };
+        serde_json::to_string_pretty(&events)
+            .map_err(|e| McpError::internal_error(format!("serialization failed: {e}"), None))
+    }
+
     /// Read a single UTF-8 text file from a repository.
     #[tool(
         name = "read_repository_file",
@@ -1309,9 +1334,10 @@ impl ServerHandler for McpShim {
         let peer = context.peer.clone();
         let client = self.client.clone();
         let config = self.config.clone();
+        let event_buffer = self.event_buffer.clone();
         let subscriber_id = self.subscriber_id.clone();
         tokio::spawn(async move {
-            Self::run_event_forwarder(client, config, subscriber_id, peer).await;
+            Self::run_event_forwarder(client, config, event_buffer, subscriber_id, peer).await;
         });
     }
 }
@@ -1876,6 +1902,76 @@ mod tests {
                 .and_then(|value| value["meta"]["delivery_id"].as_str()),
             Some("delivery-123")
         );
+
+        drop(client);
+        server_handle.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sse_event_is_buffered_for_polling() -> Result<(), Box<dyn std::error::Error>> {
+        let mock_server = wiremock::MockServer::start().await;
+        let event_body = serde_json::json!({
+            "kind": "change_request",
+            "content": "change_request opened on internal/org/repo#24 at abc123",
+            "meta": {
+                "forge_alias": "internal",
+                "owner": "org",
+                "repo": "repo",
+                "event_kind": "change_request",
+                "action": "opened",
+                "change_request": 24,
+                "head_sha": "abc123",
+                "delivery_id": "delivery-456"
+            }
+        });
+        let sse = format!(
+            "event: change_request\nid: internal:delivery-456\ndata: {}\n\n",
+            event_body
+        );
+
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/api/v1/agent/events"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(sse),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let (client, _payload, _receive_signal, server_handle) =
+            spawn_shim_and_channel_client(test_channel_config(&mock_server.uri())).await?;
+
+        // Wait for the event to be processed
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let result = client
+            .call_tool(CallToolRequestParams::new("poll_events"))
+            .await?;
+        let text = result
+            .content
+            .first()
+            .and_then(|c| c.raw.as_text())
+            .map(|t| t.text.clone())
+            .expect("text content");
+        let events: Vec<serde_json::Value> = serde_json::from_str(&text)?;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["meta"]["delivery_id"], "delivery-456");
+        assert_eq!(events[0]["meta"]["forge_alias"], "internal");
+        assert_eq!(events[0]["meta"]["change_request"], 24);
+
+        // Second poll returns empty
+        let result = client
+            .call_tool(CallToolRequestParams::new("poll_events"))
+            .await?;
+        let text = result
+            .content
+            .first()
+            .and_then(|c| c.raw.as_text())
+            .map(|t| t.text.clone())
+            .expect("text content");
+        assert_eq!(text, "[]");
 
         drop(client);
         server_handle.await??;
