@@ -277,12 +277,17 @@ pub async fn upload_pack(
     let body_stream = body.into_data_stream();
     let reqwest_body = reqwest::Body::wrap_stream(body_stream);
 
-    // Use HTTP Basic auth for git smart HTTP transport
+    // Use HTTP Basic auth for git smart HTTP transport.
+    // Forward Content-Encoding so Forgejo can decompress gzip request bodies
+    // that git clients send for large fetches.
     let mut upstream_req = forge
         .client
         .post(upstream_url)
         .header("content-type", "application/x-git-upload-pack-request")
         .body(reqwest_body);
+    if let Some(encoding) = headers.get("content-encoding") {
+        upstream_req = upstream_req.header("content-encoding", encoding);
+    }
     if let Some(ref token) = forge.token {
         upstream_req = upstream_req.basic_auth(&forge.git_auth_user, Some(token));
     }
@@ -775,6 +780,45 @@ mod tests {
         assert_eq!(records[0].action, "git_read");
         assert_eq!(records[0].target, "info/refs");
         assert_eq!(records[0].agent.agent_id, "codex");
+    }
+
+    #[tokio::test]
+    async fn upload_pack_forwards_content_encoding() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path_regex(r"/org/repo\.git/git-upload-pack"))
+            .and(wiremock::matchers::header("content-encoding", "gzip"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_bytes(b"0008NAK\n" as &[u8])
+                    .insert_header(
+                        "content-type",
+                        "application/x-git-upload-pack-result",
+                    ),
+            )
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let (state, _) = test_state_with_forge(&mock_server.uri());
+        let app = git_proxy_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/git/test-forge/org/repo.git/git-upload-pack")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/x-git-upload-pack-request")
+                    .header("content-encoding", "gzip")
+                    .body(Body::from(b"\x1f\x8b\x08\x00" as &[u8]))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]
