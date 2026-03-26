@@ -866,7 +866,7 @@ impl ForgeWebhookAdapter for ForgejoAdapter {
         let action = match payload.action.as_str() {
             "opened" => ChangeRequestEventAction::Opened,
             "reopened" => ChangeRequestEventAction::Reopened,
-            "synchronize" => ChangeRequestEventAction::Synchronized,
+            "synchronize" | "synchronized" => ChangeRequestEventAction::Synchronized,
             _ => return Ok(None),
         };
 
@@ -1133,6 +1133,51 @@ mod tests {
         assert_eq!(event.repository.owner, "org");
         assert_eq!(event.repository.name, "repo");
         assert_eq!(event.head_sha, "5e4e9ed3d19c2d7114eb7da1453913a3ab4f56ca");
+    }
+
+    #[test]
+    fn forgejo_webhook_parses_synchronized_action_variant() {
+        let adapter = test_adapter("https://forge.example");
+        let body = serde_json::json!({
+            "action": "synchronized",
+            "number": 10,
+            "pull_request": {
+                "head": {
+                    "ref": "agent/codex/fix",
+                    "sha": "def456"
+                },
+                "html_url": "https://forge.example/org/repo/pulls/10",
+                "title": "Update"
+            },
+            "repository": {
+                "name": "repo",
+                "owner": {
+                    "login": "org"
+                }
+            }
+        });
+        let body = serde_json::to_vec(&body).expect("valid JSON");
+        let signature = sign_payload("super-secret", &body);
+        let headers = vec![
+            ("x-forgejo-event".to_string(), "pull_request".to_string()),
+            ("x-forgejo-delivery".to_string(), "delivery-456".to_string()),
+            ("x-forgejo-signature".to_string(), signature),
+        ];
+
+        let event = adapter
+            .verify_and_parse_change_request_event(
+                &headers,
+                &body,
+                "internal",
+                domain::ForgeKind::Forgejo,
+                "https://forge.example",
+                "super-secret",
+            )
+            .expect("webhook should parse")
+            .expect("event should be supported");
+
+        assert_eq!(event.action, ChangeRequestEventAction::Synchronized);
+        assert_eq!(event.index, 10);
     }
 
     #[test]
