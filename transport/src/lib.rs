@@ -98,9 +98,11 @@ pub struct CommitPatchTool {
     pub new_branch: String,
     /// Repository owner or organization.
     pub owner: String,
-    /// Unified diff patch to apply. Provide either this or `patch_file`.
+    /// Git-format patch to apply. Must be produced by `git diff` or `git show`
+    /// and begin with `diff --git`; traditional unified diffs are rejected.
+    /// Provide either this or `patch_file`.
     pub patch: Option<String>,
-    /// Path to a file containing the unified diff patch. Use this instead of
+    /// Path to a file containing a git-format patch. Use this instead of
     /// `patch` for large diffs that may exceed tool parameter limits.
     pub patch_file: Option<String>,
     /// Repository name.
@@ -641,8 +643,10 @@ impl McpShim {
              Auth: HTTP Basic -- any non-empty username, password is your agent token.\n\
              git push is blocked -- use the commit_patch tool instead.\n\
              \n\
-             Write workflow: clone via git proxy, make changes, generate a unified diff,\n\
-             submit via commit_patch, then open a PR via open_change_request.\n\
+             Write workflow: clone via git proxy, make changes, generate a git-format patch\n\
+             with git itself (`git diff --no-ext-diff --binary` or `git show`), verify it\n\
+             with `git apply --check`, submit via commit_patch, then open a PR via\n\
+             open_change_request. Do not hand-write traditional unified diffs.\n\
              \n\
              Never commit to the default branch directly. Work on branches matching\n\
              your configured branch_prefix and submit via commit_patch + open_change_request.\n\
@@ -920,10 +924,10 @@ impl McpShim {
         self.gateway_post(url, &body).await
     }
 
-    /// Apply a unified diff patch to a new branch and push it.
+    /// Apply a git-format patch to a new branch and push it.
     #[tool(
         name = "commit_patch",
-        description = "Apply a unified diff patch to a new branch and push it."
+        description = "Apply a git-format patch to a new branch and push it. Patch must come from git itself (for example `git diff --no-ext-diff --binary` or `git show`) and start with `diff --git`; traditional unified diffs are rejected."
     )]
     async fn commit_patch(
         &self,

@@ -54,16 +54,22 @@ All tools require a `forge` parameter — the alias of the target forge instance
 
 | Tool | Purpose |
 |------|---------|
-| `commit_patch` | Apply a unified diff to a new branch and push |
+| `commit_patch` | Apply a git-format patch to a new branch and push |
 | `open_change_request` | Open a pull request |
 
 ### Write Workflow
 
 1. Clone the repo via git proxy
 2. Make changes locally
-3. Generate a unified diff (`git diff`)
-4. Submit via `commit_patch` with the diff, target branch name, and commit message
+3. Generate a git-format patch with git itself, for example `git diff --no-ext-diff --binary`, `git diff --cached --no-ext-diff --binary`, or `git show`
+4. Validate the patch locally with `git apply --check` (or `git apply --check --index`) and then submit via `commit_patch` with the diff, target branch name, and commit message
 5. Open a pull request via `open_change_request`
+
+**Patch format:**
+- `commit_patch` only accepts git diff format starting with `diff --git`
+- Do not hand-write traditional unified diffs; use git to generate the patch
+- New files must use git headers such as `new file mode`, `--- /dev/null`, and `+++ b/<path>`
+- If `git apply --check` fails locally, `commit_patch` will fail too
 
 **Branch naming:** Your branch must start with the configured prefix (e.g. `agent/claude/`). The gateway enforces this.
 
@@ -78,3 +84,4 @@ All tools require a `forge` parameter — the alias of the target forge instance
 | Wrong branch prefix | Check your agent's configured `branch_prefix` |
 | Touching CI/workflow files | These are protected paths -- the gateway will reject |
 | Using Bearer auth with git | Git sends Basic auth -- use password field for token |
+| Hand-written or traditional unified diff patch | Generate the patch with `git diff --no-ext-diff --binary` or `git show`, then verify with `git apply --check` |
