@@ -7,9 +7,17 @@ use transport::{ShimConfig, serve_stdio};
 #[derive(Parser)]
 #[command(name = "forge-mcp-shim", version)]
 struct Cli {
+    /// Enable Claude Code channel notifications and the server-push event stream.
+    #[arg(long, env = "FORGE_MCP_ENABLE_CHANNELS", default_value_t = false)]
+    enable_channels: bool,
+
     /// Control plane gateway URL (e.g. `https://forge-mcp.example:8443`).
     #[arg(long, env = "FORGE_MCP_GATEWAY_URL")]
     gateway_url: String,
+
+    /// Send a single synthetic channel notification on startup for compatibility testing.
+    #[arg(long, env = "FORGE_MCP_CHANNEL_STARTUP_SPIKE", default_value_t = false)]
+    channel_startup_spike: bool,
 
     /// Path to a file containing the bearer token. The token is never
     /// accepted as a CLI value to avoid leaking it in process listings.
@@ -42,6 +50,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let token = read_token(&cli)?;
 
     let config = ShimConfig {
+        channel_startup_spike: cli.channel_startup_spike,
+        enable_channels: cli.enable_channels,
         gateway_url: cli.gateway_url,
         server_name: "forge-mcp-shim".to_string(),
         server_version: server_version(),

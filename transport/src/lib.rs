@@ -1,11 +1,16 @@
 //! MCP shim — translates MCP tool calls into HTTP requests to the control plane.
 
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rmcp::{
     ErrorData as McpError, ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{Implementation, ServerCapabilities, ServerInfo},
+    model::{
+        CustomNotification, Implementation, ServerCapabilities, ServerInfo, ServerNotification,
+    },
+    service::{NotificationContext, RoleServer},
     tool, tool_handler, tool_router,
     transport::stdio,
 };
@@ -16,6 +21,8 @@ use thiserror::Error;
 /// Configuration for the MCP shim.
 #[derive(Clone)]
 pub struct ShimConfig {
+    pub channel_startup_spike: bool,
+    pub enable_channels: bool,
     pub gateway_url: String,
     pub server_name: String,
     pub server_version: String,
@@ -25,6 +32,8 @@ pub struct ShimConfig {
 impl std::fmt::Debug for ShimConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ShimConfig")
+            .field("channel_startup_spike", &self.channel_startup_spike)
+            .field("enable_channels", &self.enable_channels)
             .field("gateway_url", &self.gateway_url)
             .field("server_name", &self.server_name)
             .field("server_version", &self.server_version)
@@ -317,9 +326,125 @@ pub struct SubmitChangeRequestReviewTool {
     pub repo: String,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+struct ChannelEventMetaEnvelope {
+    action: String,
+    change_request: Option<u64>,
+    delivery_id: String,
+    event_kind: String,
+    forge_alias: String,
+    head_sha: Option<String>,
+    owner: String,
+    repo: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct AgentEventEnvelope {
+    content: String,
+    kind: String,
+    meta: ChannelEventMetaEnvelope,
+}
+
+#[derive(Debug, Default)]
+struct PendingSseEvent {
+    data_lines: Vec<String>,
+    event: Option<String>,
+    id: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct SseParser {
+    buffer: Vec<u8>,
+    pending: PendingSseEvent,
+}
+
+#[derive(Debug)]
+struct SseEvent {
+    data: String,
+    event: Option<String>,
+    id: Option<String>,
+}
+
+impl PendingSseEvent {
+    fn process_line(&mut self, line: &str) -> Option<SseEvent> {
+        if line.is_empty() {
+            return self.finish();
+        }
+        if line.starts_with(':') {
+            return None;
+        }
+
+        let (field, value) = match line.split_once(':') {
+            Some((field, value)) => (field, value.strip_prefix(' ').unwrap_or(value)),
+            None => (line, ""),
+        };
+
+        match field {
+            "data" => self.data_lines.push(value.to_string()),
+            "event" => self.event = Some(value.to_string()),
+            "id" => self.id = Some(value.to_string()),
+            _ => {}
+        }
+
+        None
+    }
+
+    fn finish(&mut self) -> Option<SseEvent> {
+        if self.data_lines.is_empty() && self.event.is_none() && self.id.is_none() {
+            return None;
+        }
+
+        let event = SseEvent {
+            data: self.data_lines.join("\n"),
+            event: self.event.take(),
+            id: self.id.take(),
+        };
+        self.data_lines.clear();
+        Some(event)
+    }
+}
+
+impl SseParser {
+    fn push_chunk(&mut self, chunk: &[u8]) -> Vec<SseEvent> {
+        self.buffer.extend_from_slice(chunk);
+
+        let mut events = Vec::new();
+        while let Some(newline_index) = self.buffer.iter().position(|byte| *byte == b'\n') {
+            let mut line = self.buffer.drain(..=newline_index).collect::<Vec<_>>();
+            if line.last() == Some(&b'\n') {
+                line.pop();
+            }
+            if line.last() == Some(&b'\r') {
+                line.pop();
+            }
+
+            let line = String::from_utf8_lossy(&line);
+            if let Some(event) = self.pending.process_line(&line) {
+                events.push(event);
+            }
+        }
+
+        events
+    }
+
+    fn finish(&mut self) -> Option<SseEvent> {
+        if !self.buffer.is_empty() {
+            let line = String::from_utf8_lossy(&self.buffer).to_string();
+            self.buffer.clear();
+            if let Some(event) = self.pending.process_line(&line) {
+                return Some(event);
+            }
+        }
+
+        self.pending.finish()
+    }
+}
+
 pub struct McpShim {
     client: reqwest::Client,
     config: ShimConfig,
+    event_forwarder_started: AtomicBool,
+    subscriber_id: String,
     tool_router: ToolRouter<Self>,
 }
 
@@ -329,6 +454,8 @@ impl McpShim {
         Self {
             client: reqwest::Client::new(),
             config,
+            event_forwarder_started: AtomicBool::new(false),
+            subscriber_id: generate_subscriber_id(),
             tool_router: Self::tool_router(),
         }
     }
@@ -468,6 +595,278 @@ impl McpShim {
         }
 
         Ok(body)
+    }
+
+    async fn send_channel_notification(
+        peer: &rmcp::service::Peer<RoleServer>,
+        event: &AgentEventEnvelope,
+    ) -> Result<(), rmcp::service::ServiceError> {
+        peer.send_notification(ServerNotification::CustomNotification(
+            CustomNotification::new(
+                "notifications/claude/channel",
+                Some(serde_json::json!({
+                    "content": event.content,
+                    "meta": {
+                        "forge": event.meta.forge_alias,
+                        "owner": event.meta.owner,
+                        "repo": event.meta.repo,
+                        "event_kind": event.meta.event_kind,
+                        "action": event.meta.action,
+                        "change_request": event.meta.change_request,
+                        "head_sha": event.meta.head_sha,
+                        "delivery_id": event.meta.delivery_id,
+                    }
+                })),
+            ),
+        ))
+        .await
+    }
+
+    fn channel_capabilities(&self) -> ServerCapabilities {
+        let mut capabilities = ServerCapabilities::builder().enable_tools().build();
+        if self.config.enable_channels {
+            let mut experimental = rmcp::model::ExperimentalCapabilities::new();
+            experimental.insert("claude/channel".to_string(), serde_json::Map::new());
+            capabilities.experimental = Some(experimental);
+        }
+        capabilities
+    }
+
+    fn instructions(&self) -> String {
+        let mut instructions = format!(
+            "MCP shim for forge-mcp control plane. Proxies tool calls to the HTTP API.\n\
+             \n\
+             Git clone/fetch: the gateway provides a read-only git smart HTTP proxy.\n\
+             URL: {gateway_url}/git/{{forge}}/{{owner}}/{{repo}}\n\
+             Auth: HTTP Basic -- any non-empty username, password is your agent token.\n\
+             git push is blocked -- use the commit_patch tool instead.\n\
+             \n\
+             Write workflow: clone via git proxy, make changes, generate a unified diff,\n\
+             submit via commit_patch, then open a PR via open_change_request.\n\
+             \n\
+             Never commit to the default branch directly. Work on branches matching\n\
+             your configured branch_prefix and submit via commit_patch + open_change_request.\n\
+             Use forge_info to discover your available forges.",
+            gateway_url = self.config.gateway_url.trim_end_matches('/'),
+        );
+
+        if self.config.enable_channels {
+            instructions.push_str(
+                "\n\
+                 \n\
+                 Channel events arrive as <channel source=\"forge-mcp\" ...> review triggers.\n\
+                 Always fetch authoritative state with get_change_request,\n\
+                 get_change_request_diff, and get_change_request_comments before acting.\n\
+                 If the current PR head differs from event head_sha, treat the event as stale and skip it.\n\
+                 If you already reviewed the same head_sha from this session, skip duplicate review.\n\
+                 These events are one-way notifications; do not expect a reply tool.\n",
+            );
+        }
+
+        instructions
+    }
+
+    async fn run_event_forwarder(
+        client: reqwest::Client,
+        config: ShimConfig,
+        subscriber_id: String,
+        peer: rmcp::service::Peer<RoleServer>,
+    ) {
+        if config.channel_startup_spike {
+            let startup_event = AgentEventEnvelope {
+                content: "change_request opened on test/org/repo#1 at deadbeef".to_string(),
+                kind: "change_request".to_string(),
+                meta: ChannelEventMetaEnvelope {
+                    action: "opened".to_string(),
+                    change_request: Some(1),
+                    delivery_id: "startup-spike".to_string(),
+                    event_kind: "change_request".to_string(),
+                    forge_alias: "test".to_string(),
+                    head_sha: Some("deadbeef".to_string()),
+                    owner: "org".to_string(),
+                    repo: "repo".to_string(),
+                },
+            };
+            if let Err(error) = Self::send_channel_notification(&peer, &startup_event).await {
+                eprintln!("failed to send startup channel spike: {error}");
+            }
+        }
+
+        let mut backoff = Duration::from_secs(1);
+        let mut last_event_id: Option<String> = None;
+
+        while !peer.is_transport_closed() {
+            let response = match send_event_stream_request(
+                &client,
+                &config,
+                &subscriber_id,
+                last_event_id.as_deref(),
+            )
+            .await
+            {
+                Ok(response) => response,
+                Err(error) => {
+                    eprintln!("event stream connection failed: {error}");
+                    sleep_with_peer_check(&peer, backoff).await;
+                    backoff = (backoff * 2).min(Duration::from_secs(10));
+                    continue;
+                }
+            };
+
+            if !response.status().is_success() {
+                eprintln!("event stream returned HTTP {}", response.status());
+                sleep_with_peer_check(&peer, backoff).await;
+                backoff = (backoff * 2).min(Duration::from_secs(10));
+                continue;
+            }
+
+            backoff = Duration::from_secs(1);
+            if !read_event_stream(&peer, response, &mut last_event_id).await {
+                return;
+            }
+
+            sleep_with_peer_check(&peer, backoff).await;
+            backoff = (backoff * 2).min(Duration::from_secs(10));
+        }
+    }
+}
+
+fn generate_subscriber_id() -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    format!("shim-{}-{now}", std::process::id())
+}
+
+fn build_event_stream_url(gateway_url: &str, subscriber_id: &str) -> Result<reqwest::Url, String> {
+    let mut base = gateway_url.to_string();
+    if !base.ends_with('/') {
+        base.push('/');
+    }
+
+    let mut url =
+        reqwest::Url::parse(&base).map_err(|error| format!("invalid gateway URL: {error}"))?;
+    {
+        let mut segments = url
+            .path_segments_mut()
+            .map_err(|()| "invalid gateway URL path".to_string())?;
+        segments.push("api");
+        segments.push("v1");
+        segments.push("agent");
+        segments.push("events");
+    }
+    url.query_pairs_mut()
+        .append_pair("subscriber_id", subscriber_id);
+    Ok(url)
+}
+
+async fn send_event_stream_request(
+    client: &reqwest::Client,
+    config: &ShimConfig,
+    subscriber_id: &str,
+    last_event_id: Option<&str>,
+) -> Result<reqwest::Response, String> {
+    let url = build_event_stream_url(&config.gateway_url, subscriber_id)?;
+
+    let mut request = client
+        .get(url)
+        .bearer_auth(&config.token)
+        .header("accept", "text/event-stream");
+    if let Some(last_event_id) = last_event_id {
+        request = request.header("last-event-id", last_event_id);
+    }
+    request
+        .send()
+        .await
+        .map_err(|error| format!("HTTP request failed: {error}"))
+}
+
+async fn forward_sse_event(
+    peer: &rmcp::service::Peer<RoleServer>,
+    event: SseEvent,
+    last_event_id: &mut Option<String>,
+) -> bool {
+    if let Some(event_id) = &event.id {
+        last_event_id.replace(event_id.clone());
+    }
+    if let Some(event_name) = &event.event
+        && event_name != "change_request"
+    {
+        return true;
+    }
+
+    let envelope = match serde_json::from_str::<AgentEventEnvelope>(&event.data) {
+        Ok(envelope) => envelope,
+        Err(error) => {
+            eprintln!("dropping invalid SSE event payload: {error}");
+            return true;
+        }
+    };
+    if envelope.kind != "change_request" {
+        return true;
+    }
+
+    match McpShim::send_channel_notification(peer, &envelope).await {
+        Ok(()) => true,
+        Err(error) => {
+            eprintln!("failed to forward channel event: {error}");
+            false
+        }
+    }
+}
+
+async fn read_event_stream(
+    peer: &rmcp::service::Peer<RoleServer>,
+    mut response: reqwest::Response,
+    last_event_id: &mut Option<String>,
+) -> bool {
+    let mut parser = SseParser::default();
+
+    loop {
+        if peer.is_transport_closed() {
+            return false;
+        }
+
+        let next_chunk = tokio::select! {
+            chunk = response.chunk() => chunk,
+            () = tokio::time::sleep(Duration::from_secs(1)) => {
+                continue;
+            }
+        };
+
+        match next_chunk {
+            Ok(Some(chunk)) => {
+                for event in parser.push_chunk(&chunk) {
+                    if !forward_sse_event(peer, event, last_event_id).await {
+                        return false;
+                    }
+                }
+            }
+            Ok(None) => {
+                if let Some(event) = parser.finish()
+                    && !forward_sse_event(peer, event, last_event_id).await
+                {
+                    return false;
+                }
+                return true;
+            }
+            Err(error) => {
+                eprintln!("event stream read failed: {error}");
+                return true;
+            }
+        }
+    }
+}
+
+async fn sleep_with_peer_check(peer: &rmcp::service::Peer<RoleServer>, duration: Duration) {
+    let step = Duration::from_millis(100);
+    let deadline = std::time::Instant::now() + duration;
+    while std::time::Instant::now() < deadline {
+        if peer.is_transport_closed() {
+            return;
+        }
+        tokio::time::sleep(step.min(deadline.saturating_duration_since(std::time::Instant::now())))
+            .await;
     }
 }
 
@@ -882,27 +1281,34 @@ impl McpShim {
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for McpShim {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_instructions(format!(
-                "MCP shim for forge-mcp control plane. Proxies tool calls to the HTTP API.\n\
-                 \n\
-                 Git clone/fetch: the gateway provides a read-only git smart HTTP proxy.\n\
-                 URL: {gateway_url}/git/{{forge}}/{{owner}}/{{repo}}\n\
-                 Auth: HTTP Basic -- any non-empty username, password is your agent token.\n\
-                 git push is blocked -- use the commit_patch tool instead.\n\
-                 \n\
-                 Write workflow: clone via git proxy, make changes, generate a unified diff,\n\
-                 submit via commit_patch, then open a PR via open_change_request.\n\
-                 \n\
-                 Never commit to the default branch directly. Work on branches matching\n\
-                 your configured branch_prefix and submit via commit_patch + open_change_request.\n\
-                 Use forge_info to discover your available forges.",
-                gateway_url = self.config.gateway_url.trim_end_matches('/'),
-            ))
+        ServerInfo::new(self.channel_capabilities())
+            .with_instructions(self.instructions())
             .with_server_info(Implementation::new(
                 self.config.server_name.clone(),
                 self.config.server_version.clone(),
             ))
+    }
+
+    async fn on_initialized(&self, context: NotificationContext<RoleServer>) {
+        if !self.config.enable_channels {
+            return;
+        }
+
+        if self
+            .event_forwarder_started
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return;
+        }
+
+        let peer = context.peer.clone();
+        let client = self.client.clone();
+        let config = self.config.clone();
+        let subscriber_id = self.subscriber_id.clone();
+        tokio::spawn(async move {
+            Self::run_event_forwarder(client, config, subscriber_id, peer).await;
+        });
     }
 }
 
@@ -925,10 +1331,13 @@ pub async fn serve_stdio(config: ShimConfig) -> Result<(), TransportError> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use rmcp::{
         ClientHandler, ServiceExt,
-        model::{CallToolRequestParams, ClientInfo},
+        model::{CallToolRequestParams, ClientInfo, CustomNotification},
     };
+    use tokio::sync::{Mutex, Notify};
 
     use super::*;
 
@@ -941,12 +1350,45 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Debug, Default)]
+    struct ChannelCaptureClient {
+        payload: Arc<Mutex<Option<CapturedNotification>>>,
+        receive_signal: Arc<Notify>,
+    }
+
+    type CapturedNotification = (String, Option<serde_json::Value>);
+
+    impl ClientHandler for ChannelCaptureClient {
+        fn get_info(&self) -> ClientInfo {
+            ClientInfo::default()
+        }
+
+        async fn on_custom_notification(
+            &self,
+            notification: CustomNotification,
+            _context: rmcp::service::NotificationContext<rmcp::RoleClient>,
+        ) {
+            let CustomNotification { method, params, .. } = notification;
+            *self.payload.lock().await = Some((method, params));
+            self.receive_signal.notify_one();
+        }
+    }
+
     fn test_config(gateway_url: &str) -> ShimConfig {
         ShimConfig {
+            channel_startup_spike: false,
+            enable_channels: false,
             gateway_url: gateway_url.to_string(),
             server_name: "forge-mcp-shim".to_string(),
             server_version: "0.1.0-test".to_string(),
             token: "test-token".to_string(),
+        }
+    }
+
+    fn test_channel_config(gateway_url: &str) -> ShimConfig {
+        ShimConfig {
+            enable_channels: true,
+            ..test_config(gateway_url)
         }
     }
 
@@ -956,6 +1398,17 @@ mod tests {
         let debug = format!("{config:?}");
         assert!(!debug.contains("test-token"));
         assert!(debug.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn get_info_advertises_claude_channel_when_enabled() {
+        let shim = McpShim::new(test_channel_config("https://example.com"));
+        let info = shim.get_info();
+        let experimental = info
+            .capabilities
+            .experimental
+            .expect("experimental capabilities");
+        assert!(experimental.contains_key("claude/channel"));
     }
 
     #[test]
@@ -1069,6 +1522,43 @@ mod tests {
 
         let client = DummyClientHandler.serve(client_transport).await?;
         Ok((client, server_handle))
+    }
+
+    async fn spawn_shim_and_channel_client(
+        config: ShimConfig,
+    ) -> Result<
+        (
+            rmcp::service::RunningService<rmcp::service::RoleClient, ChannelCaptureClient>,
+            Arc<Mutex<Option<CapturedNotification>>>,
+            Arc<Notify>,
+            tokio::task::JoinHandle<Result<(), TransportError>>,
+        ),
+        Box<dyn std::error::Error>,
+    > {
+        let (server_transport, client_transport) = tokio::io::duplex(4096);
+
+        let server_handle = tokio::spawn(async move {
+            McpShim::new(config)
+                .serve(server_transport)
+                .await
+                .map_err(Box::new)
+                .map_err(TransportError::Initialize)?
+                .waiting()
+                .await
+                .map_err(TransportError::Runtime)?;
+            Ok::<(), TransportError>(())
+        });
+
+        let payload = Arc::new(Mutex::new(None));
+        let receive_signal = Arc::new(Notify::new());
+        let client = ChannelCaptureClient {
+            payload: Arc::clone(&payload),
+            receive_signal: Arc::clone(&receive_signal),
+        }
+        .serve(client_transport)
+        .await?;
+
+        Ok((client, payload, receive_signal, server_handle))
     }
 
     #[tokio::test]
@@ -1283,6 +1773,105 @@ mod tests {
             .map(|t| t.text.clone())
             .expect("text result");
         assert!(text.contains("looks good"));
+
+        drop(client);
+        server_handle.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn startup_channel_spike_reaches_client() -> Result<(), Box<dyn std::error::Error>> {
+        let mock_server = wiremock::MockServer::start().await;
+        let mut config = test_channel_config(&mock_server.uri());
+        config.channel_startup_spike = true;
+
+        let (client, payload, receive_signal, server_handle) =
+            spawn_shim_and_channel_client(config).await?;
+
+        tokio::time::timeout(Duration::from_secs(5), receive_signal.notified()).await?;
+
+        let (method, params) = payload.lock().await.take().expect("payload set");
+        assert_eq!(method, "notifications/claude/channel");
+        assert_eq!(
+            params
+                .as_ref()
+                .and_then(|value| value["meta"]["forge"].as_str()),
+            Some("test")
+        );
+        assert_eq!(
+            params
+                .as_ref()
+                .and_then(|value| value["meta"]["delivery_id"].as_str()),
+            Some("startup-spike")
+        );
+
+        drop(client);
+        server_handle.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sse_event_is_forwarded_as_channel_notification()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mock_server = wiremock::MockServer::start().await;
+        let event_body = serde_json::json!({
+            "kind": "change_request",
+            "content": "change_request synchronize on internal/org/repo#24 at 5e4e9ed3",
+            "meta": {
+                "forge_alias": "internal",
+                "owner": "org",
+                "repo": "repo",
+                "event_kind": "change_request",
+                "action": "synchronize",
+                "change_request": 24,
+                "head_sha": "5e4e9ed3d19c2d7114eb7da1453913a3ab4f56ca",
+                "delivery_id": "delivery-123"
+            }
+        });
+        let sse = format!(
+            "event: change_request\nid: internal:delivery-123\ndata: {}\n\n",
+            serde_json::to_string(&event_body)?
+        );
+
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/api/v1/agent/events"))
+            .and(wiremock::matchers::header(
+                "authorization",
+                "Bearer test-token",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(sse),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let (client, payload, receive_signal, server_handle) =
+            spawn_shim_and_channel_client(test_channel_config(&mock_server.uri())).await?;
+
+        tokio::time::timeout(Duration::from_secs(5), receive_signal.notified()).await?;
+
+        let (method, params) = payload.lock().await.take().expect("payload set");
+        assert_eq!(method, "notifications/claude/channel");
+        assert_eq!(
+            params
+                .as_ref()
+                .and_then(|value| value["meta"]["forge"].as_str()),
+            Some("internal")
+        );
+        assert_eq!(
+            params
+                .as_ref()
+                .and_then(|value| value["meta"]["change_request"].as_u64()),
+            Some(24)
+        );
+        assert_eq!(
+            params
+                .as_ref()
+                .and_then(|value| value["meta"]["delivery_id"].as_str()),
+            Some("delivery-123")
+        );
 
         drop(client);
         server_handle.await??;
