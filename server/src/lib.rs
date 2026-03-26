@@ -5,6 +5,7 @@
 pub mod api;
 pub mod auth;
 pub mod config;
+pub mod events;
 pub mod git_proxy;
 pub mod handlers;
 pub mod registry;
@@ -17,6 +18,7 @@ use utoipa_scalar::{Scalar, Servable};
 #[derive(OpenApi)]
 #[openapi(
     paths(
+        handlers::agent_events,
         handlers::close_pull,
         handlers::comment_on_pull,
         handlers::get_contents,
@@ -74,6 +76,11 @@ fn add_docs_routes(router: Router<AppState>) -> Router<AppState> {
 pub fn build_router(state: AppState, enable_docs: bool) -> Router {
     let mut router = Router::new()
         .route("/api/v1/agent/info", get(handlers::agent_info))
+        .route("/api/v1/agent/events", get(handlers::agent_events))
+        .route(
+            "/api/v1/forges/{forge}/webhook",
+            post(handlers::post_webhook),
+        )
         .route(
             "/api/v1/repos/{forge}/{owner}/{repo}/contents/{*path}",
             get(handlers::get_contents),

@@ -3,8 +3,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use domain::{RepositoryReadService, RepositoryWriteService};
-use forge::ForgeAdapter;
+use domain::{ForgeKind, RepositoryReadService, RepositoryWriteService};
+use forge::{ForgeAdapter, ForgeWebhookAdapter};
 
 /// A single forge instance with its adapter and services.
 pub struct ForgeInstance {
@@ -12,12 +12,15 @@ pub struct ForgeInstance {
     pub alias: String,
     pub base_url: String,
     pub client: reqwest::Client,
+    pub forge_kind: ForgeKind,
     /// Forge software type (e.g. "forgejo").
     pub forge_type: String,
     /// Username for git smart HTTP Basic auth (empty string for Forgejo).
     pub git_auth_user: String,
     pub read_service: Arc<dyn RepositoryReadService>,
     pub token: Option<String>,
+    pub webhook: Option<crate::config::ForgeWebhookConfig>,
+    pub webhook_adapter: Arc<dyn ForgeWebhookAdapter>,
     pub write_service: Arc<dyn RepositoryWriteService>,
 }
 

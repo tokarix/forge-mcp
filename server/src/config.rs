@@ -28,6 +28,12 @@ pub struct ForgeConfig {
     #[serde(default)]
     pub git_auth_user: String,
     pub token: Option<String>,
+    pub webhook: Option<ForgeWebhookConfig>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct ForgeWebhookConfig {
+    pub secret: String,
 }
 
 impl std::fmt::Debug for ForgeConfig {
@@ -38,6 +44,7 @@ impl std::fmt::Debug for ForgeConfig {
             .field("forge_type", &self.forge_type)
             .field("git_auth_user", &self.git_auth_user)
             .field("token", &self.token.as_ref().map(|_| "[REDACTED]"))
+            .field("webhook", &self.webhook.as_ref().map(|_| "[REDACTED]"))
             .finish()
     }
 }
@@ -199,6 +206,14 @@ pub fn validate_config(config: &ServerConfig) -> Result<(), String> {
                 SUPPORTED_FORGE_TYPES.join(", ")
             ));
         }
+        if let Some(webhook) = &forge.webhook
+            && webhook.secret.trim().is_empty()
+        {
+            return Err(format!(
+                "forge '{}' webhook secret must not be empty",
+                forge.alias
+            ));
+        }
     }
 
     for agent in &config.agents {
@@ -337,6 +352,37 @@ session_id = "s"
     }
 
     #[test]
+    fn parses_forge_webhook_config() {
+        let toml_str = r#"
+[server]
+listen = "0.0.0.0:8443"
+
+[[forges]]
+alias = "public"
+type = "forgejo"
+base_url = "https://public.example"
+
+[forges.webhook]
+secret = "super-secret"
+
+[[agents]]
+token = "t"
+agent_id = "a"
+session_id = "s"
+
+[agents.policy]
+"#;
+        let config = parse_config(toml_str).expect("should parse");
+        assert_eq!(
+            config.forges[0]
+                .webhook
+                .as_ref()
+                .map(|webhook| webhook.secret.as_str()),
+            Some("super-secret")
+        );
+    }
+
+    #[test]
     fn converts_policy_to_domain_type() {
         let config = parse_config(VALID_CONFIG).expect("should parse");
         let policy = config.agents[0].policy.to_policy_config();
@@ -458,6 +504,32 @@ session_id = "s"
 "#;
         let config = parse_config(toml_str).expect("should parse");
         assert!(validate_config(&config).is_err());
+    }
+
+    #[test]
+    fn rejects_empty_webhook_secret() {
+        let toml_str = r#"
+[server]
+listen = "0.0.0.0:8443"
+
+[[forges]]
+alias = "internal"
+type = "forgejo"
+base_url = "https://a.example"
+
+[forges.webhook]
+secret = "   "
+
+[[agents]]
+token = "t"
+agent_id = "a"
+session_id = "s"
+
+[agents.policy]
+"#;
+        let config = parse_config(toml_str).expect("should parse");
+        let err = validate_config(&config).expect_err("should reject empty secret");
+        assert!(err.contains("webhook secret"));
     }
 
     #[test]

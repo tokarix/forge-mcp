@@ -145,7 +145,7 @@ async fn audit_git_read(
             agent: agent.identity.clone(),
             repository: domain::RepositoryRef {
                 alias: path.forge.clone(),
-                forge: domain::ForgeKind::Forgejo,
+                forge: forge.forge_kind.clone(),
                 host: forge.base_url.clone(),
                 name: repo_name.to_string(),
                 owner: path.owner.clone(),
@@ -401,6 +401,20 @@ mod tests {
     use crate::config::AgentPolicyConfig;
 
     struct FakeForgeAdapter;
+
+    impl forge::ForgeWebhookAdapter for FakeForgeAdapter {
+        fn verify_and_parse_change_request_event(
+            &self,
+            _headers: &[(String, String)],
+            _body: &[u8],
+            _forge_alias: &str,
+            _forge_kind: domain::ForgeKind,
+            _host: &str,
+            _secret: &str,
+        ) -> Result<Option<domain::ChangeRequestEvent>, forge::ForgeWebhookError> {
+            unimplemented!()
+        }
+    }
 
     #[async_trait::async_trait]
     impl forge::ForgeAdapter for FakeForgeAdapter {
@@ -664,6 +678,23 @@ mod tests {
         }
     }
 
+    fn test_forge_instance(base_url: &str) -> crate::registry::ForgeInstance {
+        crate::registry::ForgeInstance {
+            adapter: Arc::new(FakeForgeAdapter),
+            alias: "test-forge".to_string(),
+            base_url: base_url.to_string(),
+            client: reqwest::Client::new(),
+            forge_kind: domain::ForgeKind::Forgejo,
+            forge_type: "forgejo".to_string(),
+            git_auth_user: String::new(),
+            read_service: Arc::new(FakeReadService),
+            token: Some("upstream-token".to_string()),
+            webhook: None,
+            webhook_adapter: Arc::new(FakeForgeAdapter),
+            write_service: Arc::new(FakeWriteService),
+        }
+    }
+
     fn test_state_with_forge(base_url: &str) -> (AppState, Arc<audit::InMemoryAuditSink>) {
         let configs = vec![crate::config::AgentConfig {
             agent_id: "codex".to_string(),
@@ -680,24 +711,12 @@ mod tests {
         let audit_sink = Arc::new(audit::InMemoryAuditSink::new());
 
         let mut forges = std::collections::HashMap::new();
-        forges.insert(
-            "test-forge".to_string(),
-            crate::registry::ForgeInstance {
-                adapter: Arc::new(FakeForgeAdapter),
-                alias: "test-forge".to_string(),
-                base_url: base_url.to_string(),
-                client: reqwest::Client::new(),
-                forge_type: "forgejo".to_string(),
-                git_auth_user: String::new(),
-                read_service: Arc::new(FakeReadService),
-                token: Some("upstream-token".to_string()),
-                write_service: Arc::new(FakeWriteService),
-            },
-        );
+        forges.insert("test-forge".to_string(), test_forge_instance(base_url));
 
         let state = AppState {
             agent_registry: AgentRegistry::from_configs(&configs),
             audit_sink: Arc::clone(&audit_sink) as Arc<dyn audit::AuditSink>,
+            event_bus: crate::events::EventBus::new(),
             forge_registry: Arc::new(crate::registry::ForgeRegistry::new(forges)),
         };
         (state, audit_sink)
@@ -838,22 +857,13 @@ mod tests {
         let mut forges = std::collections::HashMap::new();
         forges.insert(
             "test-forge".to_string(),
-            crate::registry::ForgeInstance {
-                adapter: Arc::new(FakeForgeAdapter),
-                alias: "test-forge".to_string(),
-                base_url: mock_server.uri(),
-                client: reqwest::Client::new(),
-                forge_type: "forgejo".to_string(),
-                git_auth_user: String::new(),
-                read_service: Arc::new(FakeReadService),
-                token: Some("upstream-token".to_string()),
-                write_service: Arc::new(FakeWriteService),
-            },
+            test_forge_instance(&mock_server.uri()),
         );
 
         let state = AppState {
             agent_registry: AgentRegistry::from_configs(&configs),
             audit_sink: Arc::clone(&audit_sink) as Arc<dyn audit::AuditSink>,
+            event_bus: crate::events::EventBus::new(),
             forge_registry: Arc::new(crate::registry::ForgeRegistry::new(forges)),
         };
         let app = git_proxy_router(state);

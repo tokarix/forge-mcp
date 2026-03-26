@@ -2,12 +2,17 @@
 #![allow(clippy::missing_errors_doc, clippy::missing_panics_doc)]
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::{
     Json,
+    body::Bytes,
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
-    response::IntoResponse,
+    response::{
+        IntoResponse,
+        sse::{Event, KeepAlive, Sse},
+    },
 };
 use domain::{
     CloseChangeRequestRequest, CommentOnChangeRequestRequest, CommitPatchRequest, ForgeKind,
@@ -17,6 +22,7 @@ use domain::{
     UpdateChangeRequestRequest,
 };
 
+use crate::api::AgentEventsQuery;
 use crate::api::{
     CommentBody, CommitPatchBody, CommitPatchResult, ContentsPath, ContentsQuery, ContentsResult,
     ErrorBody, ListPullsQuery, OpenPullBody, PullPath, RebaseBranchBody, RebaseBranchResult,
@@ -24,13 +30,21 @@ use crate::api::{
     UpdateChangeRequestBody,
 };
 use crate::auth::{AgentRegistry, extract_bearer_token};
+use tokio_stream::StreamExt;
+use tokio_stream::wrappers::ReceiverStream;
 
 /// Shared application state.
 #[derive(Clone)]
 pub struct AppState {
     pub agent_registry: AgentRegistry,
     pub audit_sink: Arc<dyn audit::AuditSink>,
+    pub event_bus: crate::events::EventBus,
     pub forge_registry: Arc<crate::registry::ForgeRegistry>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct WebhookPath {
+    pub forge: String,
 }
 
 fn resolve_forge<'a>(
@@ -42,6 +56,29 @@ fn resolve_forge<'a>(
             StatusCode::NOT_FOUND,
             Json(ErrorBody {
                 error: format!("unknown forge alias '{alias}'"),
+            }),
+        )
+    })
+}
+
+fn resolve_authenticated_agent<'a>(
+    headers: &HeaderMap,
+    registry: &'a AgentRegistry,
+) -> Result<&'a crate::auth::ResolvedAgent, (StatusCode, Json<ErrorBody>)> {
+    let token = extract_bearer_token(headers).ok_or_else(|| {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorBody {
+                error: "missing or invalid Authorization header".to_string(),
+            }),
+        )
+    })?;
+
+    registry.resolve(token).ok_or_else(|| {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorBody {
+                error: "invalid bearer token".to_string(),
             }),
         )
     })
@@ -71,22 +108,7 @@ fn resolve_agent<'a>(
     owner: &str,
     repo: &str,
 ) -> Result<&'a crate::auth::ResolvedAgent, (StatusCode, Json<ErrorBody>)> {
-    let token = extract_bearer_token(headers).ok_or_else(|| {
-        (
-            StatusCode::UNAUTHORIZED,
-            Json(ErrorBody {
-                error: "missing or invalid Authorization header".to_string(),
-            }),
-        )
-    })?;
-    let agent = registry.resolve(token).ok_or_else(|| {
-        (
-            StatusCode::UNAUTHORIZED,
-            Json(ErrorBody {
-                error: "invalid bearer token".to_string(),
-            }),
-        )
-    })?;
+    let agent = resolve_authenticated_agent(headers, registry)?;
 
     // Check repository authorization
     if !agent
@@ -160,11 +182,126 @@ fn repo_ref(
 ) -> RepositoryRef {
     RepositoryRef {
         alias: forge_alias.to_string(),
-        forge: ForgeKind::Forgejo, // TODO: derive from config type field
+        forge: forge.forge_kind.clone(),
         host: forge.base_url.clone(),
         name: repo.to_string(),
         owner: owner.to_string(),
     }
+}
+
+fn map_webhook_error(err: &forge::ForgeWebhookError) -> (StatusCode, Json<ErrorBody>) {
+    let status = match err {
+        forge::ForgeWebhookError::InvalidSignature | forge::ForgeWebhookError::MissingHeader(_) => {
+            StatusCode::UNAUTHORIZED
+        }
+        forge::ForgeWebhookError::InvalidPayload(_) => StatusCode::BAD_REQUEST,
+    };
+    (
+        status,
+        Json(ErrorBody {
+            error: err.to_string(),
+        }),
+    )
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/agent/events",
+    params(
+        ("subscriber_id" = Option<String>, Query, description = "Stable subscriber identifier for reconnects"),
+    ),
+    responses(
+        (status = 200, description = "Server-sent events for normalized channel notifications"),
+        (status = 401, description = "Unauthorized", body = ErrorBody),
+    ),
+    security(("bearer" = []))
+)]
+/// GET /api/v1/agent/events
+pub async fn agent_events(
+    State(state): State<AppState>,
+    Query(query): Query<AgentEventsQuery>,
+    headers: HeaderMap,
+) -> Result<
+    Sse<impl tokio_stream::Stream<Item = Result<Event, std::convert::Infallible>>>,
+    (StatusCode, Json<ErrorBody>),
+> {
+    let agent = resolve_authenticated_agent(&headers, &state.agent_registry)?;
+    let subscriber_id = query
+        .subscriber_id
+        .unwrap_or_else(|| format!("{}-{}", agent.identity.agent_id, agent.identity.session_id));
+    let last_event_id = headers
+        .get("last-event-id")
+        .and_then(|value| value.to_str().ok())
+        .map(ToString::to_string);
+
+    let receiver = state.event_bus.subscribe(
+        agent.identity.agent_id.clone(),
+        agent.policy_config.clone(),
+        subscriber_id,
+        last_event_id.as_deref(),
+    );
+    let stream = ReceiverStream::new(receiver).map(|queued| {
+        Ok::<Event, std::convert::Infallible>(
+            Event::default()
+                .event(queued.event_name)
+                .id(queued.id)
+                .data(queued.data),
+        )
+    });
+
+    Ok(Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("keepalive"),
+    ))
+}
+
+/// POST /api/v1/forges/{forge}/webhook
+pub async fn post_webhook(
+    State(state): State<AppState>,
+    Path(path): Path<WebhookPath>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    let forge = resolve_forge(&state.forge_registry, &path.forge)?;
+    let webhook = forge.webhook.as_ref().ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorBody {
+                error: format!("webhooks are not configured for forge '{}'", path.forge),
+            }),
+        )
+    })?;
+    let normalized_headers: Vec<(String, String)> = headers
+        .iter()
+        .filter_map(|(name, value)| {
+            value
+                .to_str()
+                .ok()
+                .map(|value| (name.as_str().to_ascii_lowercase(), value.to_string()))
+        })
+        .collect();
+
+    let event = forge
+        .webhook_adapter
+        .verify_and_parse_change_request_event(
+            &normalized_headers,
+            body.as_ref(),
+            &forge.alias,
+            forge.forge_kind.clone(),
+            &forge.base_url,
+            &webhook.secret,
+        )
+        .map_err(|error| map_webhook_error(&error))?;
+
+    if let Some(event) = event {
+        state
+            .event_bus
+            .publish_change_request(&event)
+            .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorBody { error })))?;
+    }
+
+    Ok::<_, (StatusCode, Json<ErrorBody>)>(StatusCode::ACCEPTED)
 }
 
 #[utoipa::path(
@@ -1026,6 +1163,20 @@ mod tests {
 
     struct FakeForgeAdapter;
 
+    impl forge::ForgeWebhookAdapter for FakeForgeAdapter {
+        fn verify_and_parse_change_request_event(
+            &self,
+            _headers: &[(String, String)],
+            _body: &[u8],
+            _forge_alias: &str,
+            _forge_kind: domain::ForgeKind,
+            _host: &str,
+            _secret: &str,
+        ) -> Result<Option<domain::ChangeRequestEvent>, forge::ForgeWebhookError> {
+            unimplemented!()
+        }
+    }
+
     #[async_trait::async_trait]
     impl forge::ForgeAdapter for FakeForgeAdapter {
         async fn get_authenticated_user(
@@ -1357,6 +1508,23 @@ mod tests {
             .clone()
     }
 
+    fn test_forge_instance(alias: &str, base_url: &str) -> crate::registry::ForgeInstance {
+        crate::registry::ForgeInstance {
+            adapter: Arc::new(FakeForgeAdapter),
+            alias: alias.to_string(),
+            base_url: base_url.to_string(),
+            client: reqwest::Client::new(),
+            forge_kind: ForgeKind::Forgejo,
+            forge_type: "forgejo".to_string(),
+            git_auth_user: String::new(),
+            read_service: Arc::new(FakeReadService),
+            token: None,
+            webhook: None,
+            webhook_adapter: Arc::new(FakeForgeAdapter),
+            write_service: Arc::new(FakeWriteService),
+        }
+    }
+
     fn test_state() -> AppState {
         let configs = vec![crate::config::AgentConfig {
             agent_id: "codex".to_string(),
@@ -1373,22 +1541,13 @@ mod tests {
         let mut forges = std::collections::HashMap::new();
         forges.insert(
             "test-forge".to_string(),
-            crate::registry::ForgeInstance {
-                adapter: Arc::new(FakeForgeAdapter),
-                alias: "test-forge".to_string(),
-                base_url: "https://forge.example".to_string(),
-                client: reqwest::Client::new(),
-                forge_type: "forgejo".to_string(),
-                git_auth_user: String::new(),
-                read_service: Arc::new(FakeReadService),
-                token: None,
-                write_service: Arc::new(FakeWriteService),
-            },
+            test_forge_instance("test-forge", "https://forge.example"),
         );
 
         AppState {
             agent_registry: AgentRegistry::from_configs(&configs),
             audit_sink: Arc::new(audit::InMemoryAuditSink::new()),
+            event_bus: crate::events::EventBus::new(),
             forge_registry: Arc::new(crate::registry::ForgeRegistry::new(forges)),
         }
     }
@@ -1535,22 +1694,13 @@ mod tests {
         let mut forges = std::collections::HashMap::new();
         forges.insert(
             "test-forge".to_string(),
-            crate::registry::ForgeInstance {
-                adapter: Arc::new(FakeForgeAdapter),
-                alias: "test-forge".to_string(),
-                base_url: "https://forge.example".to_string(),
-                client: reqwest::Client::new(),
-                forge_type: "forgejo".to_string(),
-                git_auth_user: String::new(),
-                read_service: Arc::new(FakeReadService),
-                token: None,
-                write_service: Arc::new(FakeWriteService),
-            },
+            test_forge_instance("test-forge", "https://forge.example"),
         );
 
         let state = AppState {
             agent_registry: AgentRegistry::from_configs(&configs),
             audit_sink: Arc::new(audit::InMemoryAuditSink::new()),
+            event_bus: crate::events::EventBus::new(),
             forge_registry: Arc::new(crate::registry::ForgeRegistry::new(forges)),
         };
         let app = crate::build_router(state, false);
@@ -1708,22 +1858,13 @@ mod tests {
         let mut forges = std::collections::HashMap::new();
         forges.insert(
             "test-forge".to_string(),
-            crate::registry::ForgeInstance {
-                adapter: Arc::new(FakeForgeAdapter),
-                alias: "test-forge".to_string(),
-                base_url: "https://forge.example".to_string(),
-                client: reqwest::Client::new(),
-                forge_type: "forgejo".to_string(),
-                git_auth_user: String::new(),
-                read_service: Arc::new(FakeReadService),
-                token: None,
-                write_service: Arc::new(FakeWriteService),
-            },
+            test_forge_instance("test-forge", "https://forge.example"),
         );
 
         let state = AppState {
             agent_registry: AgentRegistry::from_configs(&configs),
             audit_sink: Arc::new(audit::InMemoryAuditSink::new()),
+            event_bus: crate::events::EventBus::new(),
             forge_registry: Arc::new(crate::registry::ForgeRegistry::new(forges)),
         };
         let app = crate::build_router(state, false);
@@ -1834,36 +1975,17 @@ mod tests {
         let mut forges = std::collections::HashMap::new();
         forges.insert(
             "test-forge".to_string(),
-            crate::registry::ForgeInstance {
-                adapter: Arc::new(FakeForgeAdapter),
-                alias: "test-forge".to_string(),
-                base_url: "https://forge.example".to_string(),
-                client: reqwest::Client::new(),
-                forge_type: "forgejo".to_string(),
-                git_auth_user: String::new(),
-                read_service: Arc::new(FakeReadService),
-                token: None,
-                write_service: Arc::new(FakeWriteService),
-            },
+            test_forge_instance("test-forge", "https://forge.example"),
         );
         forges.insert(
             "other-forge".to_string(),
-            crate::registry::ForgeInstance {
-                adapter: Arc::new(FakeForgeAdapter),
-                alias: "other-forge".to_string(),
-                base_url: "https://other.example".to_string(),
-                client: reqwest::Client::new(),
-                forge_type: "forgejo".to_string(),
-                git_auth_user: String::new(),
-                read_service: Arc::new(FakeReadService),
-                token: None,
-                write_service: Arc::new(FakeWriteService),
-            },
+            test_forge_instance("other-forge", "https://other.example"),
         );
 
         let state = AppState {
             agent_registry: AgentRegistry::from_configs(&configs),
             audit_sink: Arc::new(audit::InMemoryAuditSink::new()),
+            event_bus: crate::events::EventBus::new(),
             forge_registry: Arc::new(crate::registry::ForgeRegistry::new(forges)),
         };
 
@@ -1907,6 +2029,7 @@ mod tests {
         let state = AppState {
             agent_registry: AgentRegistry::from_configs(&configs),
             audit_sink: Arc::clone(&audit_sink) as Arc<dyn audit::AuditSink>,
+            event_bus: crate::events::EventBus::new(),
             forge_registry: Arc::new(crate::registry::ForgeRegistry::new(
                 std::collections::HashMap::new(),
             )),

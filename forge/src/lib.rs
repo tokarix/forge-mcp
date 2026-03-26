@@ -5,11 +5,14 @@ use std::sync::Once;
 use async_trait::async_trait;
 use base64::Engine;
 use domain::{
-    ChangeRequest, ChangeRequestComment, ChangeRequestCommentDetail, ChangeRequestReview,
-    ChangeRequestState, ForgeCredential, ForgeUser, ReadRepositoryFileResponse, RepositoryRef,
+    ChangeRequest, ChangeRequestComment, ChangeRequestCommentDetail, ChangeRequestEvent,
+    ChangeRequestEventAction, ChangeRequestReview, ChangeRequestState, ForgeCredential, ForgeUser,
+    ReadRepositoryFileResponse, RepositoryRef,
 };
+use hmac::{Hmac, Mac};
 use reqwest::StatusCode;
 use serde::Deserialize;
+use sha2::Sha256;
 use thiserror::Error;
 
 static INSTALL_RING_PROVIDER: Once = Once::new();
@@ -22,6 +25,16 @@ pub enum ForgeError {
     UnexpectedStatus { status: StatusCode, body: String },
     #[error("invalid response payload: {0}")]
     InvalidPayload(String),
+}
+
+#[derive(Debug, Error)]
+pub enum ForgeWebhookError {
+    #[error("invalid webhook payload: {0}")]
+    InvalidPayload(String),
+    #[error("invalid webhook signature")]
+    InvalidSignature,
+    #[error("missing webhook header '{0}'")]
+    MissingHeader(String),
 }
 
 #[async_trait]
@@ -133,6 +146,25 @@ pub trait ForgeAdapter: Send + Sync {
         body: Option<&str>,
         credential: &ForgeCredential,
     ) -> Result<ChangeRequest, ForgeError>;
+}
+
+pub trait ForgeWebhookAdapter: Send + Sync {
+    /// Verifies a forge webhook signature and converts a supported payload into
+    /// a normalized change-request event.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the required webhook headers are missing, the
+    /// signature is invalid, or the payload cannot be parsed.
+    fn verify_and_parse_change_request_event(
+        &self,
+        headers: &[(String, String)],
+        body: &[u8],
+        forge_alias: &str,
+        forge_kind: domain::ForgeKind,
+        host: &str,
+        secret: &str,
+    ) -> Result<Option<ChangeRequestEvent>, ForgeWebhookError>;
 }
 
 #[derive(Clone)]
@@ -262,6 +294,42 @@ struct ForgejoPullReview {
     state: String,
     submitted_at: Option<String>,
     user: ForgejoCommentUser,
+}
+
+#[derive(Debug, Deserialize)]
+struct ForgejoWebhookOwner {
+    login: Option<String>,
+    username: Option<String>,
+}
+
+impl ForgejoWebhookOwner {
+    fn into_owner(self) -> Result<String, ForgeWebhookError> {
+        self.login.or(self.username).ok_or_else(|| {
+            ForgeWebhookError::InvalidPayload("repository owner missing".to_string())
+        })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ForgejoWebhookRepository {
+    name: String,
+    owner: ForgejoWebhookOwner,
+}
+
+#[derive(Debug, Deserialize)]
+struct ForgejoWebhookPullRequest {
+    head: ForgejoPullBranch,
+    html_url: String,
+    number: Option<u64>,
+    title: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ForgejoWebhookPullRequestEventPayload {
+    action: String,
+    number: Option<u64>,
+    pull_request: ForgejoWebhookPullRequest,
+    repository: ForgejoWebhookRepository,
 }
 
 #[async_trait]
@@ -774,8 +842,117 @@ impl ForgeAdapter for ForgejoAdapter {
     }
 }
 
+impl ForgeWebhookAdapter for ForgejoAdapter {
+    fn verify_and_parse_change_request_event(
+        &self,
+        headers: &[(String, String)],
+        body: &[u8],
+        forge_alias: &str,
+        forge_kind: domain::ForgeKind,
+        host: &str,
+        secret: &str,
+    ) -> Result<Option<ChangeRequestEvent>, ForgeWebhookError> {
+        verify_forgejo_signature(headers, body, secret)?;
+
+        let event = header_value(headers, &["x-forgejo-event", "x-gitea-event"])
+            .ok_or_else(|| ForgeWebhookError::MissingHeader("x-forgejo-event".to_string()))?;
+        if event != "pull_request" {
+            return Ok(None);
+        }
+
+        let payload: ForgejoWebhookPullRequestEventPayload = serde_json::from_slice(body)
+            .map_err(|e| ForgeWebhookError::InvalidPayload(e.to_string()))?;
+
+        let action = match payload.action.as_str() {
+            "opened" => ChangeRequestEventAction::Opened,
+            "reopened" => ChangeRequestEventAction::Reopened,
+            "synchronize" => ChangeRequestEventAction::Synchronized,
+            _ => return Ok(None),
+        };
+
+        let owner = payload.repository.owner.into_owner()?;
+        let index = payload
+            .number
+            .or(payload.pull_request.number)
+            .ok_or_else(|| {
+                ForgeWebhookError::InvalidPayload("pull request number missing".to_string())
+            })?;
+        let delivery_id = header_value(headers, &["x-forgejo-delivery", "x-gitea-delivery"])
+            .unwrap_or_default()
+            .to_string();
+
+        Ok(Some(ChangeRequestEvent {
+            action,
+            delivery_id,
+            head_sha: payload.pull_request.head.sha,
+            index,
+            repository: RepositoryRef {
+                alias: forge_alias.to_string(),
+                forge: forge_kind,
+                host: host.to_string(),
+                name: payload.repository.name,
+                owner,
+            },
+            title: payload.pull_request.title,
+            url: payload.pull_request.html_url,
+        }))
+    }
+}
+
+fn decode_hex(input: &str) -> Result<Vec<u8>, ForgeWebhookError> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() || (trimmed.len() & 1) != 0 {
+        return Err(ForgeWebhookError::InvalidSignature);
+    }
+
+    let mut bytes = Vec::with_capacity(trimmed.len() / 2);
+    let chars: Vec<char> = trimmed.chars().collect();
+    for pair in chars.chunks(2) {
+        let high = pair[0]
+            .to_digit(16)
+            .ok_or(ForgeWebhookError::InvalidSignature)?;
+        let low = pair[1]
+            .to_digit(16)
+            .ok_or(ForgeWebhookError::InvalidSignature)?;
+        let combined = (high << 4) | low;
+        let combined = u8::try_from(combined).map_err(|_| ForgeWebhookError::InvalidSignature)?;
+        bytes.push(combined);
+    }
+    Ok(bytes)
+}
+
+fn header_value<'a>(headers: &'a [(String, String)], names: &[&str]) -> Option<&'a str> {
+    names.iter().find_map(|name| {
+        headers
+            .iter()
+            .find(|(header_name, _)| header_name.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    })
+}
+
+fn verify_forgejo_signature(
+    headers: &[(String, String)],
+    body: &[u8],
+    secret: &str,
+) -> Result<(), ForgeWebhookError> {
+    let signature = header_value(headers, &["x-forgejo-signature", "x-gitea-signature"])
+        .ok_or_else(|| ForgeWebhookError::MissingHeader("x-forgejo-signature".to_string()))?;
+    let signature = decode_hex(signature)?;
+
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
+        .map_err(|e| ForgeWebhookError::InvalidPayload(format!("invalid secret: {e}")))?;
+    mac.update(body);
+    mac.verify_slice(&signature)
+        .map_err(|_| ForgeWebhookError::InvalidSignature)
+}
+
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
+
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
     use domain::ForgeCredential;
     use wiremock::matchers::{method, path_regex};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -895,5 +1072,150 @@ mod tests {
         assert_eq!(result[2].author, "alice");
         assert_eq!(result[2].created_at, "2026-03-18T12:00:00Z");
         assert_eq!(result[2].kind, "comment");
+    }
+
+    fn sign_payload(secret: &str, body: &[u8]) -> String {
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("valid HMAC key");
+        mac.update(body);
+        let bytes = mac.finalize().into_bytes();
+        let mut signature = String::with_capacity(bytes.len() * 2);
+        for byte in bytes {
+            write!(&mut signature, "{byte:02x}").expect("writing to String cannot fail");
+        }
+        signature
+    }
+
+    #[test]
+    fn forgejo_webhook_parses_supported_change_request_event() {
+        let adapter = test_adapter("https://forge.example");
+        let body = serde_json::json!({
+            "action": "synchronize",
+            "number": 24,
+            "pull_request": {
+                "head": {
+                    "ref": "agent/codex/fix",
+                    "sha": "5e4e9ed3d19c2d7114eb7da1453913a3ab4f56ca"
+                },
+                "html_url": "https://forge.example/org/repo/pulls/24",
+                "title": "Fix channel events"
+            },
+            "repository": {
+                "name": "repo",
+                "owner": {
+                    "login": "org"
+                }
+            }
+        });
+        let body = serde_json::to_vec(&body).expect("valid JSON");
+        let signature = sign_payload("super-secret", &body);
+        let headers = vec![
+            ("x-forgejo-event".to_string(), "pull_request".to_string()),
+            ("x-forgejo-delivery".to_string(), "delivery-123".to_string()),
+            ("x-forgejo-signature".to_string(), signature),
+        ];
+
+        let event = adapter
+            .verify_and_parse_change_request_event(
+                &headers,
+                &body,
+                "internal",
+                domain::ForgeKind::Forgejo,
+                "https://forge.example",
+                "super-secret",
+            )
+            .expect("webhook should parse")
+            .expect("event should be supported");
+
+        assert_eq!(event.action, ChangeRequestEventAction::Synchronized);
+        assert_eq!(event.delivery_id, "delivery-123");
+        assert_eq!(event.index, 24);
+        assert_eq!(event.repository.alias, "internal");
+        assert_eq!(event.repository.owner, "org");
+        assert_eq!(event.repository.name, "repo");
+        assert_eq!(event.head_sha, "5e4e9ed3d19c2d7114eb7da1453913a3ab4f56ca");
+    }
+
+    #[test]
+    fn forgejo_webhook_rejects_invalid_signature() {
+        let adapter = test_adapter("https://forge.example");
+        let body = serde_json::to_vec(&serde_json::json!({
+            "action": "opened",
+            "number": 24,
+            "pull_request": {
+                "head": {
+                    "ref": "agent/codex/fix",
+                    "sha": "abc123"
+                },
+                "html_url": "https://forge.example/org/repo/pulls/24",
+                "title": "Fix channel events"
+            },
+            "repository": {
+                "name": "repo",
+                "owner": {
+                    "login": "org"
+                }
+            }
+        }))
+        .expect("valid JSON");
+        let headers = vec![
+            ("x-forgejo-event".to_string(), "pull_request".to_string()),
+            (
+                "x-forgejo-signature".to_string(),
+                "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string(),
+            ),
+        ];
+
+        let error = adapter
+            .verify_and_parse_change_request_event(
+                &headers,
+                &body,
+                "internal",
+                domain::ForgeKind::Forgejo,
+                "https://forge.example",
+                "super-secret",
+            )
+            .expect_err("signature should be rejected");
+        assert!(matches!(error, ForgeWebhookError::InvalidSignature));
+    }
+
+    #[test]
+    fn forgejo_webhook_ignores_unsupported_action() {
+        let adapter = test_adapter("https://forge.example");
+        let body = serde_json::to_vec(&serde_json::json!({
+            "action": "edited",
+            "number": 24,
+            "pull_request": {
+                "head": {
+                    "ref": "agent/codex/fix",
+                    "sha": "abc123"
+                },
+                "html_url": "https://forge.example/org/repo/pulls/24",
+                "title": "Fix channel events"
+            },
+            "repository": {
+                "name": "repo",
+                "owner": {
+                    "login": "org"
+                }
+            }
+        }))
+        .expect("valid JSON");
+        let signature = sign_payload("super-secret", &body);
+        let headers = vec![
+            ("x-forgejo-event".to_string(), "pull_request".to_string()),
+            ("x-forgejo-signature".to_string(), signature),
+        ];
+
+        let result = adapter
+            .verify_and_parse_change_request_event(
+                &headers,
+                &body,
+                "internal",
+                domain::ForgeKind::Forgejo,
+                "https://forge.example",
+                "super-secret",
+            )
+            .expect("payload should parse");
+        assert!(result.is_none());
     }
 }

@@ -145,6 +145,20 @@ pub struct AgentForgeInfo {
     pub forge_type: String,
 }
 
+/// Query params for GET /api/v1/agent/events
+#[derive(Debug, Deserialize)]
+pub struct AgentEventsQuery {
+    pub subscriber_id: Option<String>,
+}
+
+/// A normalized event envelope sent to connected shims.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AgentEventEnvelope {
+    pub content: String,
+    pub kind: String,
+    pub meta: domain::ChannelEventMeta,
+}
+
 /// Error response body.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ErrorBody {

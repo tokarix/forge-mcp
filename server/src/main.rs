@@ -4,12 +4,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use audit::InMemoryAuditSink;
+use domain::ForgeKind;
 use forge::{ForgejoAdapter, ForgejoConfig};
 use orchestrator::{ReadOrchestrator, WriteOrchestrator};
 use server::{
     auth::AgentRegistry,
     build_router,
     config::{parse_config, validate_config},
+    events::EventBus,
     handlers::AppState,
     registry::{ForgeInstance, ForgeRegistry},
 };
@@ -50,6 +52,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     base_url: forge_config.base_url.clone(),
                     token: forge_config.token.clone(),
                 }));
+                let rest_adapter: Arc<dyn forge::ForgeAdapter> = adapter.clone();
+                let webhook_adapter: Arc<dyn forge::ForgeWebhookAdapter> = adapter.clone();
 
                 let read_service = Arc::new(ReadOrchestrator::new(
                     Arc::clone(&adapter),
@@ -64,14 +68,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 forges.insert(
                     forge_config.alias.clone(),
                     ForgeInstance {
-                        adapter,
+                        adapter: rest_adapter,
                         alias: forge_config.alias.clone(),
                         base_url: forge_config.base_url.clone(),
                         client: client.clone(),
+                        forge_kind: ForgeKind::Forgejo,
                         forge_type: forge_config.forge_type.clone(),
                         git_auth_user: forge_config.git_auth_user.clone(),
                         read_service,
                         token: forge_config.token.clone(),
+                        webhook: forge_config.webhook.clone(),
+                        webhook_adapter,
                         write_service,
                     },
                 );
@@ -92,6 +99,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state = AppState {
         agent_registry,
         audit_sink,
+        event_bus: EventBus::new(),
         forge_registry: Arc::new(ForgeRegistry::new(forges)),
     };
 

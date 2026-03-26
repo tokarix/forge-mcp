@@ -1,7 +1,7 @@
 //! Canonical domain types and service traits for forge-mcp.
 
 use async_trait::async_trait;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub mod diff;
@@ -20,7 +20,7 @@ impl std::fmt::Debug for ForgeCredential {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum ForgeKind {
     Forgejo,
     GitHub,
@@ -33,7 +33,20 @@ pub struct ForgeUser {
     pub username: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+impl TryFrom<&str> for ForgeKind {
+    type Error = String;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "forgejo" => Ok(Self::Forgejo),
+            "github" => Ok(Self::GitHub),
+            "gitlab" => Ok(Self::GitLab),
+            other => Err(format!("unsupported forge type '{other}'")),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RepositoryRef {
     pub alias: String,
     pub forge: ForgeKind,
@@ -85,6 +98,24 @@ pub struct ChangeRequest {
     pub url: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ChannelEvent {
+    pub content: String,
+    pub meta: ChannelEventMeta,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ChannelEventMeta {
+    pub action: String,
+    pub change_request: Option<u64>,
+    pub delivery_id: String,
+    pub event_kind: String,
+    pub forge_alias: String,
+    pub head_sha: Option<String>,
+    pub owner: String,
+    pub repo: String,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ChangeRequestDiff {
     pub index: u64,
@@ -122,6 +153,64 @@ pub struct GetChangeRequestCommentsRequest {
     pub agent: AgentIdentity,
     pub index: u64,
     pub repository: RepositoryRef,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ChangeRequestEvent {
+    pub action: ChangeRequestEventAction,
+    pub delivery_id: String,
+    pub head_sha: String,
+    pub index: u64,
+    pub repository: RepositoryRef,
+    pub title: String,
+    pub url: String,
+}
+
+impl ChangeRequestEvent {
+    #[must_use]
+    pub fn to_channel_event(&self) -> ChannelEvent {
+        ChannelEvent {
+            content: format!(
+                "change_request {} on {}/{}/{}#{} at {}",
+                self.action.as_str(),
+                self.repository.alias,
+                self.repository.owner,
+                self.repository.name,
+                self.index,
+                self.head_sha,
+            ),
+            meta: ChannelEventMeta {
+                action: self.action.as_str().to_string(),
+                change_request: Some(self.index),
+                delivery_id: self.delivery_id.clone(),
+                event_kind: "change_request".to_string(),
+                forge_alias: self.repository.alias.clone(),
+                head_sha: Some(self.head_sha.clone()),
+                owner: self.repository.owner.clone(),
+                repo: self.repository.name.clone(),
+            },
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChangeRequestEventAction {
+    Opened,
+    Reopened,
+    #[serde(rename = "synchronize")]
+    Synchronized,
+}
+
+impl ChangeRequestEventAction {
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Opened => "opened",
+            Self::Reopened => "reopened",
+            Self::Synchronized => "synchronize",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -466,7 +555,7 @@ pub trait RepositoryWriteService: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::validate_repository_path;
-    use super::{ChangeRequest, ChangeRequestState, ForgeCredential};
+    use super::{ChangeRequest, ChangeRequestEventAction, ChangeRequestState, ForgeCredential};
 
     #[test]
     fn forge_credential_debug_redacts_token() {
@@ -503,6 +592,17 @@ mod tests {
         let json = serde_json::to_value(&cr).expect("should serialize");
         assert_eq!(json["index"], 1);
         assert_eq!(json["state"], "Open");
+    }
+
+    #[test]
+    fn change_request_event_action_round_trips_synchronize() {
+        let json = serde_json::to_string(&ChangeRequestEventAction::Synchronized)
+            .expect("should serialize");
+        assert_eq!(json, "\"synchronize\"");
+
+        let parsed: ChangeRequestEventAction =
+            serde_json::from_str(&json).expect("should deserialize");
+        assert_eq!(parsed, ChangeRequestEventAction::Synchronized);
     }
 
     #[test]
