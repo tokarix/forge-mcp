@@ -20,7 +20,7 @@ Use this skill for PR review work done through forge-mcp.
 4. Read PR metadata with `get_change_request` before reviewing. Capture at least the title, body, changed file count, and current `head_sha`.
 5. Read the patch with `get_change_request_diff`.
 6. Read existing discussion with `get_change_request_comments` before drafting findings so you can see prior reviews, avoid duplicate stale findings, and notice whether the PR changed since earlier review comments.
-7. Clone the PR branch via the git proxy and run `git log --oneline <merge_base>..HEAD` to inspect the commit series. This is required for evaluating commit hygiene regardless of diff size.
+7. Inspect the PR branch through the git proxy and run `git log --oneline <merge_base>..HEAD` to inspect the commit series. Prefer fetching the PR branch into an existing local repo and creating a detached `git worktree` for review so objects are reused without touching the active worktree. Fall back to a fresh clone only when no suitable local repo is available. This is required for evaluating commit hygiene regardless of diff size.
 8. Optionally, if the runtime supports subagents, delegate the review pass to a subagent using the prompt template below. Otherwise, perform the review directly in the main agent context.
 9. Validate the highest-signal findings locally, run verification if needed, and then post the review back to the PR.
 
@@ -51,10 +51,16 @@ Use `comment_on_change_request` only as a fallback when a formal review cannot b
 
 ## Required Review Criteria
 
-Commit hygiene is review-blocking when violated. Always clone the PR
+Commit hygiene is review-blocking when violated. Always inspect the PR
 branch via the git proxy and inspect the commit series with `git log`
 to verify structure — the final diff alone cannot reveal fixup churn,
 revert/re-add cycles, or unrelated changes split across commits.
+
+Preferred local workflow:
+- If a suitable local checkout of the repo already exists, fetch the PR branch through the git proxy into that repo.
+- Create a detached `git worktree` for the PR head and review there.
+- Do not switch the active worktree to the PR branch, especially if it may be dirty.
+- Use a full fresh clone only as a fallback when no suitable local repo is available.
 
 - Each commit must be self-contained, minimal, and logically independent.
 - Never accept unrelated changes mixed into one commit.
@@ -81,9 +87,10 @@ Treat these git rules as mandatory review criteria:
 - Never accept unrelated changes mixed into one commit.
 - Follow Linux kernel-style patch hygiene: small commits, one thing per commit, with clear what/why commit messages.
 
-Always clone the PR branch via the git proxy and inspect the commit
-series with git log. The final diff alone cannot reveal commit-structure
-problems.
+Always inspect the PR branch via the git proxy and inspect the commit
+series with git log. Prefer fetch + detached worktree from an existing
+repo over a fresh clone, and do not switch the active worktree to the
+PR branch. The final diff alone cannot reveal commit-structure problems.
 
 Read the current PR metadata, diff, and existing comments/reviews before concluding.
 Call out commit-structure violations as findings, not optional notes.
