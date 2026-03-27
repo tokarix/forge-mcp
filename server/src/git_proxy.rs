@@ -792,10 +792,7 @@ mod tests {
             .respond_with(
                 ResponseTemplate::new(200)
                     .set_body_bytes(b"0008NAK\n" as &[u8])
-                    .insert_header(
-                        "content-type",
-                        "application/x-git-upload-pack-result",
-                    ),
+                    .insert_header("content-type", "application/x-git-upload-pack-result"),
             )
             .expect(1)
             .mount(&mock_server)
