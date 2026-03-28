@@ -45,6 +45,15 @@ pub trait ForgeAdapter: Send + Sync {
         credential: &ForgeCredential,
     ) -> Result<ForgeUser, ForgeError>;
 
+    /// Assigns an issue to a user.
+    async fn assign_issue(
+        &self,
+        repository: &RepositoryRef,
+        index: u64,
+        assignee: &str,
+        credential: &ForgeCredential,
+    ) -> Result<domain::Issue, ForgeError>;
+
     /// Closes a change request (pull request) on the forge.
     async fn close_change_request(
         &self,
@@ -52,6 +61,23 @@ pub trait ForgeAdapter: Send + Sync {
         index: u64,
         credential: &ForgeCredential,
     ) -> Result<ChangeRequest, ForgeError>;
+
+    /// Closes an issue.
+    async fn close_issue(
+        &self,
+        repository: &RepositoryRef,
+        index: u64,
+        credential: &ForgeCredential,
+    ) -> Result<domain::Issue, ForgeError>;
+
+    /// Posts a comment on an issue.
+    async fn comment_on_issue(
+        &self,
+        repository: &RepositoryRef,
+        index: u64,
+        body: &str,
+        credential: &ForgeCredential,
+    ) -> Result<domain::IssueComment, ForgeError>;
 
     /// Posts a general comment on a change request.
     async fn comment_on_change_request(
@@ -96,12 +122,36 @@ pub trait ForgeAdapter: Send + Sync {
         index: u64,
     ) -> Result<String, ForgeError>;
 
+    /// Gets a single issue by index.
+    async fn get_issue(
+        &self,
+        repository: &RepositoryRef,
+        index: u64,
+        credential: &ForgeCredential,
+    ) -> Result<domain::Issue, ForgeError>;
+
+    /// Gets all comments for an issue.
+    async fn get_issue_comments(
+        &self,
+        repository: &RepositoryRef,
+        index: u64,
+        credential: &ForgeCredential,
+    ) -> Result<Vec<domain::IssueComment>, ForgeError>;
+
     /// Lists change requests for a repository.
     async fn list_change_requests(
         &self,
         repository: &RepositoryRef,
         state: Option<&ChangeRequestState>,
     ) -> Result<Vec<ChangeRequest>, ForgeError>;
+
+    /// Lists issues for a repository.
+    async fn list_issues(
+        &self,
+        repository: &RepositoryRef,
+        state: Option<&str>,
+        credential: &ForgeCredential,
+    ) -> Result<Vec<domain::Issue>, ForgeError>;
 
     /// Schedules a pull request for automatic merge when all branch
     /// protection requirements are met.
@@ -296,6 +346,65 @@ struct ForgejoPullReview {
     user: ForgejoCommentUser,
 }
 
+#[derive(Debug, Deserialize)]
+struct ForgejoIssueResponse {
+    assignees: Option<Vec<ForgejoCommentUser>>,
+    body: Option<String>,
+    html_url: String,
+    labels: Option<Vec<ForgejoLabelResponse>>,
+    number: u64,
+    state: String,
+    title: String,
+}
+
+impl ForgejoIssueResponse {
+    fn into_issue(self) -> domain::Issue {
+        domain::Issue {
+            assignees: self
+                .assignees
+                .unwrap_or_default()
+                .into_iter()
+                .map(|u| u.login)
+                .collect(),
+            body: self.body.unwrap_or_default(),
+            index: self.number,
+            labels: self
+                .labels
+                .unwrap_or_default()
+                .into_iter()
+                .map(|l| l.name)
+                .collect(),
+            state: self.state,
+            title: self.title,
+            url: self.html_url,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ForgejoIssueCommentResponse {
+    body: String,
+    created_at: String,
+    id: u64,
+    user: ForgejoCommentUser,
+}
+
+impl ForgejoIssueCommentResponse {
+    fn into_issue_comment(self) -> domain::IssueComment {
+        domain::IssueComment {
+            author: self.user.login,
+            body: self.body,
+            created_at: self.created_at,
+            id: self.id,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ForgejoLabelResponse {
+    name: String,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum WebhookEventType {
     IssueComment,
@@ -408,6 +517,39 @@ impl ForgeAdapter for ForgejoAdapter {
         })
     }
 
+    async fn assign_issue(
+        &self,
+        repository: &RepositoryRef,
+        index: u64,
+        assignee: &str,
+        credential: &ForgeCredential,
+    ) -> Result<domain::Issue, ForgeError> {
+        let url = format!(
+            "{}/api/v1/repos/{}/{}/issues/{index}",
+            self.config.base_url.trim_end_matches('/'),
+            repository.owner,
+            repository.name,
+        );
+
+        let effective_token = credential.token.as_deref().or(self.config.token.as_deref());
+        let mut request = self.client.patch(&url).json(&serde_json::json!({
+            "assignees": [assignee]
+        }));
+        if let Some(token) = effective_token {
+            request = request.bearer_auth(token);
+        }
+
+        let response = request.send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(ForgeError::UnexpectedStatus { status, body });
+        }
+
+        let issue: ForgejoIssueResponse = response.json().await?;
+        Ok(issue.into_issue())
+    }
+
     async fn close_change_request(
         &self,
         repository: &RepositoryRef,
@@ -439,6 +581,74 @@ impl ForgeAdapter for ForgejoAdapter {
 
         let pr: ForgejoPullRequest = response.json().await?;
         Ok(pr.into_change_request())
+    }
+
+    async fn close_issue(
+        &self,
+        repository: &RepositoryRef,
+        index: u64,
+        credential: &ForgeCredential,
+    ) -> Result<domain::Issue, ForgeError> {
+        let url = format!(
+            "{}/api/v1/repos/{}/{}/issues/{index}",
+            self.config.base_url.trim_end_matches('/'),
+            repository.owner,
+            repository.name,
+        );
+
+        let effective_token = credential.token.as_deref().or(self.config.token.as_deref());
+        let mut request = self.client.patch(&url).json(&serde_json::json!({
+            "state": "closed"
+        }));
+        if let Some(token) = effective_token {
+            request = request.bearer_auth(token);
+        }
+
+        let response = request.send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(ForgeError::UnexpectedStatus { status, body });
+        }
+
+        let issue: ForgejoIssueResponse = response.json().await?;
+        Ok(issue.into_issue())
+    }
+
+    async fn comment_on_issue(
+        &self,
+        repository: &RepositoryRef,
+        index: u64,
+        body: &str,
+        credential: &ForgeCredential,
+    ) -> Result<domain::IssueComment, ForgeError> {
+        let url = format!(
+            "{}/api/v1/repos/{}/{}/issues/{index}/comments",
+            self.config.base_url.trim_end_matches('/'),
+            repository.owner,
+            repository.name,
+        );
+
+        let effective_token = credential.token.as_deref().or(self.config.token.as_deref());
+        let mut request = self.client.post(&url).json(&serde_json::json!({
+            "body": body
+        }));
+        if let Some(token) = effective_token {
+            request = request.bearer_auth(token);
+        }
+
+        let response = request.send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let resp_body = response.text().await.unwrap_or_default();
+            return Err(ForgeError::UnexpectedStatus {
+                status,
+                body: resp_body,
+            });
+        }
+
+        let comment: ForgejoIssueCommentResponse = response.json().await?;
+        Ok(comment.into_issue_comment())
     }
 
     async fn comment_on_change_request(
@@ -625,6 +835,69 @@ impl ForgeAdapter for ForgejoAdapter {
         Ok(pr.into_change_request())
     }
 
+    async fn get_issue(
+        &self,
+        repository: &RepositoryRef,
+        index: u64,
+        credential: &ForgeCredential,
+    ) -> Result<domain::Issue, ForgeError> {
+        let url = format!(
+            "{}/api/v1/repos/{}/{}/issues/{index}",
+            self.config.base_url.trim_end_matches('/'),
+            repository.owner,
+            repository.name,
+        );
+
+        let effective_token = credential.token.as_deref().or(self.config.token.as_deref());
+        let mut request = self.client.get(&url);
+        if let Some(token) = effective_token {
+            request = request.bearer_auth(token);
+        }
+
+        let response = request.send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(ForgeError::UnexpectedStatus { status, body });
+        }
+
+        let issue: ForgejoIssueResponse = response.json().await?;
+        Ok(issue.into_issue())
+    }
+
+    async fn get_issue_comments(
+        &self,
+        repository: &RepositoryRef,
+        index: u64,
+        credential: &ForgeCredential,
+    ) -> Result<Vec<domain::IssueComment>, ForgeError> {
+        let url = format!(
+            "{}/api/v1/repos/{}/{}/issues/{index}/comments",
+            self.config.base_url.trim_end_matches('/'),
+            repository.owner,
+            repository.name,
+        );
+
+        let effective_token = credential.token.as_deref().or(self.config.token.as_deref());
+        let mut request = self.client.get(&url);
+        if let Some(token) = effective_token {
+            request = request.bearer_auth(token);
+        }
+
+        let response = request.send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(ForgeError::UnexpectedStatus { status, body });
+        }
+
+        let comments: Vec<ForgejoIssueCommentResponse> = response.json().await?;
+        Ok(comments
+            .into_iter()
+            .map(ForgejoIssueCommentResponse::into_issue_comment)
+            .collect())
+    }
+
     async fn get_change_request_diff(
         &self,
         repository: &RepositoryRef,
@@ -691,6 +964,42 @@ impl ForgeAdapter for ForgejoAdapter {
         Ok(prs
             .into_iter()
             .map(ForgejoPullRequest::into_change_request)
+            .collect())
+    }
+
+    async fn list_issues(
+        &self,
+        repository: &RepositoryRef,
+        state: Option<&str>,
+        credential: &ForgeCredential,
+    ) -> Result<Vec<domain::Issue>, ForgeError> {
+        let mut url = format!(
+            "{}/api/v1/repos/{}/{}/issues?type=issues",
+            self.config.base_url.trim_end_matches('/'),
+            repository.owner,
+            repository.name,
+        );
+        if let Some(state) = state {
+            url.push_str(&format!("&state={state}"));
+        }
+
+        let effective_token = credential.token.as_deref().or(self.config.token.as_deref());
+        let mut request = self.client.get(&url);
+        if let Some(token) = effective_token {
+            request = request.bearer_auth(token);
+        }
+
+        let response = request.send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(ForgeError::UnexpectedStatus { status, body });
+        }
+
+        let issues: Vec<ForgejoIssueResponse> = response.json().await?;
+        Ok(issues
+            .into_iter()
+            .map(ForgejoIssueResponse::into_issue)
             .collect())
     }
 

@@ -423,6 +423,56 @@ mod tests {
 
     #[async_trait::async_trait]
     impl forge::ForgeAdapter for FakeForgeAdapter {
+        async fn assign_issue(
+            &self,
+            _: &domain::RepositoryRef,
+            _: u64,
+            _: &str,
+            _: &domain::ForgeCredential,
+        ) -> Result<domain::Issue, forge::ForgeError> {
+            unimplemented!()
+        }
+        async fn close_issue(
+            &self,
+            _: &domain::RepositoryRef,
+            _: u64,
+            _: &domain::ForgeCredential,
+        ) -> Result<domain::Issue, forge::ForgeError> {
+            unimplemented!()
+        }
+        async fn comment_on_issue(
+            &self,
+            _: &domain::RepositoryRef,
+            _: u64,
+            _: &str,
+            _: &domain::ForgeCredential,
+        ) -> Result<domain::IssueComment, forge::ForgeError> {
+            unimplemented!()
+        }
+        async fn get_issue(
+            &self,
+            _: &domain::RepositoryRef,
+            _: u64,
+            _: &domain::ForgeCredential,
+        ) -> Result<domain::Issue, forge::ForgeError> {
+            unimplemented!()
+        }
+        async fn get_issue_comments(
+            &self,
+            _: &domain::RepositoryRef,
+            _: u64,
+            _: &domain::ForgeCredential,
+        ) -> Result<Vec<domain::IssueComment>, forge::ForgeError> {
+            unimplemented!()
+        }
+        async fn list_issues(
+            &self,
+            _: &domain::RepositoryRef,
+            _: Option<&str>,
+            _: &domain::ForgeCredential,
+        ) -> Result<Vec<domain::Issue>, forge::ForgeError> {
+            unimplemented!()
+        }
         async fn get_authenticated_user(
             &self,
             _: &domain::ForgeCredential,

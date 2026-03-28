@@ -937,10 +937,10 @@ mod tests {
     use audit::{AuditError, AuditRecord, AuditSink, InMemoryAuditSink};
     use domain::{
         AgentIdentity, ChangeRequest, ChangeRequestCommentDetail, ChangeRequestState,
-        CloseChangeRequestRequest, CommentOnChangeRequestRequest, CommitPatchRequest, ForgeKind,
-        OpenChangeRequestRequest, ReadRepositoryFileRequest, RepositoryReadService, RepositoryRef,
-        RepositoryWriteService, ServiceError, SubmitChangeRequestReviewRequest,
-        UpdateChangeRequestRequest,
+        CloseChangeRequestRequest, CommentOnChangeRequestRequest, CommitPatchRequest,
+        ForgeCredential, ForgeKind, OpenChangeRequestRequest, ReadRepositoryFileRequest,
+        RepositoryReadService, RepositoryRef, RepositoryWriteService, ServiceError,
+        SubmitChangeRequestReviewRequest, UpdateChangeRequestRequest,
     };
     use forge::{ForgeAdapter, ForgeError};
 
@@ -970,6 +970,56 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ForgeAdapter for FakeForgeAdapter {
+        async fn assign_issue(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            unimplemented!()
+        }
+        async fn close_issue(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            unimplemented!()
+        }
+        async fn comment_on_issue(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<domain::IssueComment, ForgeError> {
+            unimplemented!()
+        }
+        async fn get_issue(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            unimplemented!()
+        }
+        async fn get_issue_comments(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<Vec<domain::IssueComment>, ForgeError> {
+            unimplemented!()
+        }
+        async fn list_issues(
+            &self,
+            _: &RepositoryRef,
+            _: Option<&str>,
+            _: &ForgeCredential,
+        ) -> Result<Vec<domain::Issue>, ForgeError> {
+            unimplemented!()
+        }
         async fn get_authenticated_user(
             &self,
             _: &domain::ForgeCredential,
@@ -1097,6 +1147,56 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ForgeAdapter for FailingForgeAdapter {
+        async fn assign_issue(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            unimplemented!()
+        }
+        async fn close_issue(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            unimplemented!()
+        }
+        async fn comment_on_issue(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<domain::IssueComment, ForgeError> {
+            unimplemented!()
+        }
+        async fn get_issue(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            unimplemented!()
+        }
+        async fn get_issue_comments(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<Vec<domain::IssueComment>, ForgeError> {
+            unimplemented!()
+        }
+        async fn list_issues(
+            &self,
+            _: &RepositoryRef,
+            _: Option<&str>,
+            _: &ForgeCredential,
+        ) -> Result<Vec<domain::Issue>, ForgeError> {
+            unimplemented!()
+        }
         async fn get_authenticated_user(
             &self,
             _: &domain::ForgeCredential,
@@ -1305,6 +1405,56 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ForgeAdapter for WriteTestForgeAdapter {
+        async fn assign_issue(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            unimplemented!()
+        }
+        async fn close_issue(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            unimplemented!()
+        }
+        async fn comment_on_issue(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<domain::IssueComment, ForgeError> {
+            unimplemented!()
+        }
+        async fn get_issue(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            unimplemented!()
+        }
+        async fn get_issue_comments(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<Vec<domain::IssueComment>, ForgeError> {
+            unimplemented!()
+        }
+        async fn list_issues(
+            &self,
+            _: &RepositoryRef,
+            _: Option<&str>,
+            _: &ForgeCredential,
+        ) -> Result<Vec<domain::Issue>, ForgeError> {
+            unimplemented!()
+        }
         async fn get_authenticated_user(
             &self,
             _: &domain::ForgeCredential,
@@ -1741,6 +1891,56 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
 
     #[async_trait::async_trait]
     impl ForgeAdapter for CloseTestForgeAdapter {
+        async fn assign_issue(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            unimplemented!()
+        }
+        async fn close_issue(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            unimplemented!()
+        }
+        async fn comment_on_issue(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<domain::IssueComment, ForgeError> {
+            unimplemented!()
+        }
+        async fn get_issue(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            unimplemented!()
+        }
+        async fn get_issue_comments(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<Vec<domain::IssueComment>, ForgeError> {
+            unimplemented!()
+        }
+        async fn list_issues(
+            &self,
+            _: &RepositoryRef,
+            _: Option<&str>,
+            _: &ForgeCredential,
+        ) -> Result<Vec<domain::Issue>, ForgeError> {
+            unimplemented!()
+        }
         async fn get_authenticated_user(
             &self,
             _: &domain::ForgeCredential,
@@ -2106,6 +2306,56 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
 
     #[async_trait::async_trait]
     impl ForgeAdapter for CredentialCapturingAdapter {
+        async fn assign_issue(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            unimplemented!()
+        }
+        async fn close_issue(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            unimplemented!()
+        }
+        async fn comment_on_issue(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<domain::IssueComment, ForgeError> {
+            unimplemented!()
+        }
+        async fn get_issue(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            unimplemented!()
+        }
+        async fn get_issue_comments(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<Vec<domain::IssueComment>, ForgeError> {
+            unimplemented!()
+        }
+        async fn list_issues(
+            &self,
+            _: &RepositoryRef,
+            _: Option<&str>,
+            _: &ForgeCredential,
+        ) -> Result<Vec<domain::Issue>, ForgeError> {
+            unimplemented!()
+        }
         async fn get_authenticated_user(
             &self,
             _: &domain::ForgeCredential,
@@ -2278,6 +2528,56 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
 
     #[async_trait::async_trait]
     impl ForgeAdapter for AutoMergeTestForgeAdapter {
+        async fn assign_issue(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            unimplemented!()
+        }
+        async fn close_issue(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            unimplemented!()
+        }
+        async fn comment_on_issue(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<domain::IssueComment, ForgeError> {
+            unimplemented!()
+        }
+        async fn get_issue(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            unimplemented!()
+        }
+        async fn get_issue_comments(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<Vec<domain::IssueComment>, ForgeError> {
+            unimplemented!()
+        }
+        async fn list_issues(
+            &self,
+            _: &RepositoryRef,
+            _: Option<&str>,
+            _: &ForgeCredential,
+        ) -> Result<Vec<domain::Issue>, ForgeError> {
+            unimplemented!()
+        }
         async fn get_authenticated_user(
             &self,
             _: &domain::ForgeCredential,
