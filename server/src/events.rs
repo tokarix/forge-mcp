@@ -113,19 +113,17 @@ impl EventBus {
         receiver
     }
 
-    /// Publishes a normalized change-request event to all authorized subscribers.
+    /// Publishes a normalized event to all authorized subscribers.
     ///
     /// # Errors
     ///
     /// Returns an error if the normalized event envelope cannot be serialized.
-    pub fn publish_change_request(
-        &self,
-        event: &domain::ChangeRequestEvent,
-    ) -> Result<PublishStatus, String> {
+    pub fn publish<E: PublishableEvent>(&self, event: &E) -> Result<PublishStatus, String> {
         let channel_event = event.to_channel_event();
+        let delivery_id = channel_event.meta.delivery_id.clone();
         let envelope = AgentEventEnvelope {
             content: channel_event.content,
-            kind: "change_request".to_string(),
+            kind: event.event_name().to_string(),
             meta: channel_event.meta,
         };
         let data = serde_json::to_string(&envelope)
@@ -135,26 +133,24 @@ impl EventBus {
             let mut state = self.lock_state();
             state.prune_dedupe();
 
-            let dedupe_key = dedupe_key(event);
+            let dedupe_key = event.dedupe_key();
             if state.dedupe.contains_key(&dedupe_key) {
                 return Ok(PublishStatus::Duplicate);
             }
             state.dedupe.insert(dedupe_key, Instant::now());
 
-            let id = if event.delivery_id.is_empty() {
+            let repo = event.repository_ref();
+            let id = if delivery_id.is_empty() {
                 state.next_synthetic_id += 1;
-                format!(
-                    "{}:synthetic:{}",
-                    event.repository.alias, state.next_synthetic_id
-                )
+                format!("{}:synthetic:{}", repo.alias, state.next_synthetic_id)
             } else {
-                format!("{}:{}", event.repository.alias, event.delivery_id)
+                format!("{}:{}", repo.alias, delivery_id)
             };
 
             let queued = QueuedEvent {
                 data,
                 envelope,
-                event_name: "change_request".to_string(),
+                event_name: event.event_name().to_string(),
                 id,
             };
             state.push_replay(queued.clone());
@@ -164,13 +160,13 @@ impl EventBus {
         let mut delivered = 0;
         let mut stale_subscribers = Vec::new();
         {
+            let repo = event.repository_ref();
             let mut bus_state = self.lock_state();
             for (key, subscriber) in &bus_state.subscribers {
-                if !subscriber.policy.is_repo_allowed(
-                    &queued.envelope.meta.forge_alias,
-                    &queued.envelope.meta.owner,
-                    &queued.envelope.meta.repo,
-                ) {
+                if !subscriber
+                    .policy
+                    .is_repo_allowed(&repo.alias, &repo.owner, &repo.name)
+                {
                     continue;
                 }
 
@@ -247,22 +243,6 @@ impl EventBusState {
     }
 }
 
-fn dedupe_key(event: &domain::ChangeRequestEvent) -> String {
-    if !event.delivery_id.is_empty() {
-        return format!("{}:{}", event.repository.alias, event.delivery_id);
-    }
-
-    format!(
-        "{}:{}/{}/{}:{}:{}",
-        event.repository.alias,
-        event.repository.owner,
-        event.repository.name,
-        event.index,
-        event.head_sha,
-        event.action.as_str(),
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use tokio::time::{Duration, timeout};
@@ -325,7 +305,7 @@ mod tests {
         );
 
         let status = bus
-            .publish_change_request(&change_request_event(
+            .publish(&change_request_event(
                 domain::ChangeRequestEventAction::Opened,
                 "delivery-1",
                 "abc123",
@@ -355,7 +335,7 @@ mod tests {
         );
 
         let first = bus
-            .publish_change_request(&change_request_event(
+            .publish(&change_request_event(
                 domain::ChangeRequestEventAction::Opened,
                 "delivery-1",
                 "abc123",
@@ -364,7 +344,7 @@ mod tests {
         assert_eq!(first, PublishStatus::Enqueued { delivered: 1 });
 
         let second = bus
-            .publish_change_request(&change_request_event(
+            .publish(&change_request_event(
                 domain::ChangeRequestEventAction::Opened,
                 "delivery-1",
                 "abc123",
@@ -384,13 +364,13 @@ mod tests {
     async fn replays_events_after_last_seen_id() {
         let bus = EventBus::new();
 
-        bus.publish_change_request(&change_request_event(
+        bus.publish(&change_request_event(
             domain::ChangeRequestEventAction::Opened,
             "delivery-1",
             "abc123",
         ))
         .expect("publish should succeed");
-        bus.publish_change_request(&change_request_event(
+        bus.publish(&change_request_event(
             domain::ChangeRequestEventAction::Synchronized,
             "delivery-2",
             "def456",
@@ -416,20 +396,20 @@ mod tests {
     async fn replay_filters_unauthorized_events() {
         let bus = EventBus::new();
 
-        bus.publish_change_request(&change_request_event(
+        bus.publish(&change_request_event(
             domain::ChangeRequestEventAction::Opened,
             "delivery-0",
             "aaa111",
         ))
         .expect("publish should succeed");
-        bus.publish_change_request(&change_request_event_for_repo(
+        bus.publish(&change_request_event_for_repo(
             domain::ChangeRequestEventAction::Opened,
             "delivery-1",
             "bbb222",
             "other",
         ))
         .expect("publish should succeed");
-        bus.publish_change_request(&change_request_event(
+        bus.publish(&change_request_event(
             domain::ChangeRequestEventAction::Synchronized,
             "delivery-2",
             "ccc333",
@@ -452,5 +432,42 @@ mod tests {
 
         let extra = timeout(Duration::from_millis(100), receiver.recv()).await;
         assert!(extra.is_err());
+    }
+
+    #[tokio::test]
+    async fn publishes_issue_event_to_authorized_subscribers() {
+        let bus = EventBus::new();
+        let mut receiver = bus.subscribe(
+            "codex".to_string(),
+            policy(&["test-forge/org/repo"]),
+            "sub-a".to_string(),
+            None,
+        );
+
+        let event = domain::IssueEvent {
+            action: domain::IssueEventAction::Opened,
+            delivery_id: "delivery-issue-1".to_string(),
+            index: 42,
+            repository: domain::RepositoryRef {
+                alias: "test-forge".to_string(),
+                forge: domain::ForgeKind::Forgejo,
+                host: "https://forge.example".to_string(),
+                name: "repo".to_string(),
+                owner: "org".to_string(),
+            },
+            title: "Bug".to_string(),
+            url: "https://forge.example/org/repo/issues/42".to_string(),
+        };
+
+        let status = bus.publish(&event).expect("publish should succeed");
+        assert_eq!(status, PublishStatus::Enqueued { delivered: 1 });
+
+        let queued = timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .expect("timed out")
+            .expect("connected");
+        assert_eq!(queued.event_name, "issue");
+        assert_eq!(queued.envelope.meta.issue, Some(42));
+        assert_eq!(queued.envelope.meta.change_request, None);
     }
 }

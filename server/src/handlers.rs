@@ -297,7 +297,7 @@ pub async fn post_webhook(
     if let Some(event) = event {
         state
             .event_bus
-            .publish_change_request(&event)
+            .publish(&event)
             .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorBody { error })))?;
     }
 
