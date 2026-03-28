@@ -24,10 +24,10 @@ use domain::{
 
 use crate::api::AgentEventsQuery;
 use crate::api::{
-    CommentBody, CommitPatchBody, CommitPatchResult, ContentsPath, ContentsQuery, ContentsResult,
-    ErrorBody, ListPullsQuery, OpenPullBody, PullPath, RebaseBranchBody, RebaseBranchResult,
-    RebaseOperationBody, RepoPath, ScheduleAutoMergeBody, SubmitReviewBody,
-    UpdateChangeRequestBody,
+    CommentBody, CommentOnIssueBody, CommitPatchBody, CommitPatchResult, ContentsPath,
+    ContentsQuery, ContentsResult, ErrorBody, IssuePath, ListIssuesQuery, ListPullsQuery,
+    OpenPullBody, PullPath, RebaseBranchBody, RebaseBranchResult, RebaseOperationBody, RepoPath,
+    ScheduleAutoMergeBody, SubmitReviewBody, UpdateChangeRequestBody, UpdateIssueBody,
 };
 use crate::auth::{AgentRegistry, extract_bearer_token};
 use tokio_stream::StreamExt;
@@ -1081,6 +1081,285 @@ pub async fn submit_pull_review(
     Ok::<_, (StatusCode, Json<ErrorBody>)>((
         StatusCode::CREATED,
         Json(serde_json::to_value(&result).expect("serializable")),
+    ))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/repos/{forge}/{owner}/{repo}/issues",
+    params(
+        ("forge" = String, Path, description = "Forge alias"),
+        ("owner" = String, Path, description = "Repository owner"),
+        ("repo" = String, Path, description = "Repository name"),
+        ("state" = Option<String>, Query, description = "Optional state filter: open, closed"),
+    ),
+    responses(
+        (status = 200, description = "List of issues"),
+        (status = 401, description = "Unauthorized", body = ErrorBody),
+    ),
+    security(("bearer" = []))
+)]
+/// GET /api/v1/repos/{forge}/{owner}/{repo}/issues
+pub async fn list_issues(
+    State(state): State<AppState>,
+    Path(path): Path<RepoPath>,
+    Query(query): Query<ListIssuesQuery>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let forge = resolve_forge(&state.forge_registry, &path.forge)?;
+    let agent = resolve_agent(
+        &headers,
+        &state.agent_registry,
+        &path.forge,
+        &path.owner,
+        &path.repo,
+    )?;
+
+    let result = forge
+        .read_service
+        .list_issues(domain::ListIssuesRequest {
+            agent: agent.identity.clone(),
+            repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
+            state: query.state,
+        })
+        .await
+        .map_err(map_service_error)?;
+
+    Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(
+        serde_json::to_value(&result).expect("serializable"),
+    ))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/repos/{forge}/{owner}/{repo}/issues/{index}",
+    params(
+        ("forge" = String, Path, description = "Forge alias"),
+        ("owner" = String, Path, description = "Repository owner"),
+        ("repo" = String, Path, description = "Repository name"),
+        ("index" = u64, Path, description = "Issue index"),
+    ),
+    responses(
+        (status = 200, description = "Issue details"),
+        (status = 401, description = "Unauthorized", body = ErrorBody),
+    ),
+    security(("bearer" = []))
+)]
+/// GET /api/v1/repos/{forge}/{owner}/{repo}/issues/{index}
+pub async fn get_issue(
+    State(state): State<AppState>,
+    Path(path): Path<IssuePath>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let forge = resolve_forge(&state.forge_registry, &path.forge)?;
+    let agent = resolve_agent(
+        &headers,
+        &state.agent_registry,
+        &path.forge,
+        &path.owner,
+        &path.repo,
+    )?;
+
+    let result = forge
+        .read_service
+        .get_issue(domain::GetIssueRequest {
+            agent: agent.identity.clone(),
+            index: path.index,
+            repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
+        })
+        .await
+        .map_err(map_service_error)?;
+
+    Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(
+        serde_json::to_value(&result).expect("serializable"),
+    ))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/repos/{forge}/{owner}/{repo}/issues/{index}/comments",
+    params(
+        ("forge" = String, Path, description = "Forge alias"),
+        ("owner" = String, Path, description = "Repository owner"),
+        ("repo" = String, Path, description = "Repository name"),
+        ("index" = u64, Path, description = "Issue index"),
+    ),
+    responses(
+        (status = 200, description = "List of comments"),
+        (status = 401, description = "Unauthorized", body = ErrorBody),
+    ),
+    security(("bearer" = []))
+)]
+/// GET /api/v1/repos/{forge}/{owner}/{repo}/issues/{index}/comments
+pub async fn get_issue_comments(
+    State(state): State<AppState>,
+    Path(path): Path<IssuePath>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let forge = resolve_forge(&state.forge_registry, &path.forge)?;
+    let agent = resolve_agent(
+        &headers,
+        &state.agent_registry,
+        &path.forge,
+        &path.owner,
+        &path.repo,
+    )?;
+
+    let result = forge
+        .read_service
+        .get_issue_comments(domain::GetIssueCommentsRequest {
+            agent: agent.identity.clone(),
+            index: path.index,
+            repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
+        })
+        .await
+        .map_err(map_service_error)?;
+
+    Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(
+        serde_json::to_value(&result).expect("serializable"),
+    ))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/repos/{forge}/{owner}/{repo}/issues/{index}/comments",
+    params(
+        ("forge" = String, Path, description = "Forge alias"),
+        ("owner" = String, Path, description = "Repository owner"),
+        ("repo" = String, Path, description = "Repository name"),
+        ("index" = u64, Path, description = "Issue index"),
+    ),
+    request_body = CommentOnIssueBody,
+    responses(
+        (status = 200, description = "Comment created"),
+        (status = 401, description = "Unauthorized", body = ErrorBody),
+    ),
+    security(("bearer" = []))
+)]
+/// POST /api/v1/repos/{forge}/{owner}/{repo}/issues/{index}/comments
+pub async fn comment_on_issue(
+    State(state): State<AppState>,
+    Path(path): Path<IssuePath>,
+    headers: HeaderMap,
+    Json(body): Json<CommentOnIssueBody>,
+) -> impl IntoResponse {
+    let forge = resolve_forge(&state.forge_registry, &path.forge)?;
+    let agent = resolve_agent(
+        &headers,
+        &state.agent_registry,
+        &path.forge,
+        &path.owner,
+        &path.repo,
+    )?;
+    let credential = resolve_credential(agent, &path.forge, forge);
+    let authorized = domain::policy::AuthorizedWrite {
+        policy: agent.policy.clone(),
+    };
+
+    let result = forge
+        .write_service
+        .comment_on_issue(
+            domain::CommentOnIssueRequest {
+                agent: agent.identity.clone(),
+                body: body.body,
+                index: path.index,
+                repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
+            },
+            authorized,
+            &credential,
+        )
+        .await
+        .map_err(map_service_error)?;
+
+    Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(
+        serde_json::to_value(&result).expect("serializable"),
+    ))
+}
+
+#[utoipa::path(
+    patch,
+    path = "/api/v1/repos/{forge}/{owner}/{repo}/issues/{index}",
+    params(
+        ("forge" = String, Path, description = "Forge alias"),
+        ("owner" = String, Path, description = "Repository owner"),
+        ("repo" = String, Path, description = "Repository name"),
+        ("index" = u64, Path, description = "Issue index"),
+    ),
+    request_body = UpdateIssueBody,
+    responses(
+        (status = 200, description = "Issue updated"),
+        (status = 401, description = "Unauthorized", body = ErrorBody),
+    ),
+    security(("bearer" = []))
+)]
+/// PATCH /api/v1/repos/{forge}/{owner}/{repo}/issues/{index}
+pub async fn update_issue(
+    State(state): State<AppState>,
+    Path(path): Path<IssuePath>,
+    headers: HeaderMap,
+    Json(body): Json<UpdateIssueBody>,
+) -> impl IntoResponse {
+    let forge = resolve_forge(&state.forge_registry, &path.forge)?;
+    let agent = resolve_agent(
+        &headers,
+        &state.agent_registry,
+        &path.forge,
+        &path.owner,
+        &path.repo,
+    )?;
+    let credential = resolve_credential(agent, &path.forge, forge);
+    let authorized = domain::policy::AuthorizedWrite {
+        policy: agent.policy.clone(),
+    };
+
+    let repo = repo_ref(&path.forge, &path.owner, &path.repo, forge);
+
+    // Handle close
+    if body.state.as_deref() == Some("closed") {
+        let result = forge
+            .write_service
+            .close_issue(
+                domain::CloseIssueRequest {
+                    agent: agent.identity.clone(),
+                    index: path.index,
+                    repository: repo,
+                },
+                authorized,
+                &credential,
+            )
+            .await
+            .map_err(map_service_error)?;
+
+        return Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(
+            serde_json::to_value(&result).expect("serializable"),
+        ));
+    }
+
+    // Handle assign
+    if let Some(assignee) = body.assignees.as_ref().and_then(|a| a.first()) {
+        let result = forge
+            .write_service
+            .assign_issue(
+                domain::AssignIssueRequest {
+                    agent: agent.identity.clone(),
+                    assignee: assignee.clone(),
+                    index: path.index,
+                    repository: repo,
+                },
+                authorized,
+                &credential,
+            )
+            .await
+            .map_err(map_service_error)?;
+
+        return Ok(Json(serde_json::to_value(&result).expect("serializable")));
+    }
+
+    Err((
+        StatusCode::BAD_REQUEST,
+        Json(ErrorBody {
+            error: "update_issue requires either state or assignees".to_string(),
+        }),
     ))
 }
 

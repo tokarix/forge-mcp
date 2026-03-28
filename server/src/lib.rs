@@ -20,21 +20,27 @@ use utoipa_scalar::{Scalar, Servable};
     paths(
         handlers::agent_events,
         handlers::close_pull,
+        handlers::comment_on_issue,
         handlers::comment_on_pull,
         handlers::get_contents,
+        handlers::get_issue,
+        handlers::get_issue_comments,
         handlers::get_pull,
         handlers::get_pull_comments,
         handlers::get_pull_diff,
+        handlers::list_issues,
         handlers::list_pulls,
         handlers::post_patches,
         handlers::post_pulls,
         handlers::post_rebase,
         handlers::schedule_auto_merge,
         handlers::submit_pull_review,
+        handlers::update_issue,
         handlers::update_pull,
     ),
     components(schemas(
         api::CommentBody,
+        api::CommentOnIssueBody,
         api::CommitPatchBody,
         api::CommitPatchResult,
         api::ContentsResult,
@@ -46,6 +52,7 @@ use utoipa_scalar::{Scalar, Servable};
         api::ScheduleAutoMergeBody,
         api::SubmitReviewBody,
         api::UpdateChangeRequestBody,
+        api::UpdateIssueBody,
     )),
     modifiers(&SecurityAddon),
 )]
@@ -88,6 +95,18 @@ pub fn build_router(state: AppState, enable_docs: bool) -> Router {
         .route(
             "/api/v1/repos/{forge}/{owner}/{repo}/patches",
             post(handlers::post_patches),
+        )
+        .route(
+            "/api/v1/repos/{forge}/{owner}/{repo}/issues",
+            get(handlers::list_issues),
+        )
+        .route(
+            "/api/v1/repos/{forge}/{owner}/{repo}/issues/{index}",
+            get(handlers::get_issue).patch(handlers::update_issue),
+        )
+        .route(
+            "/api/v1/repos/{forge}/{owner}/{repo}/issues/{index}/comments",
+            get(handlers::get_issue_comments).post(handlers::comment_on_issue),
         )
         .route(
             "/api/v1/repos/{forge}/{owner}/{repo}/pulls",

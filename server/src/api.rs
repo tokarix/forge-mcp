@@ -120,6 +120,15 @@ pub struct PullPath {
     pub repo: String,
 }
 
+/// Path parameters for issue endpoints.
+#[derive(Debug, Deserialize)]
+pub struct IssuePath {
+    pub forge: String,
+    pub index: u64,
+    pub owner: String,
+    pub repo: String,
+}
+
 /// Path parameters for contents endpoint. The `path` field captures
 /// the remainder of the URL path after `/contents/`.
 #[derive(Debug, Deserialize)]
@@ -128,6 +137,25 @@ pub struct ContentsPath {
     pub owner: String,
     pub path: String,
     pub repo: String,
+}
+
+/// Query parameters for listing issues.
+#[derive(Debug, Deserialize)]
+pub struct ListIssuesQuery {
+    pub state: Option<String>,
+}
+
+/// Request body for commenting on an issue.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CommentOnIssueBody {
+    pub body: String,
+}
+
+/// Request body for updating an issue (close, assign).
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpdateIssueBody {
+    pub assignees: Option<Vec<String>>,
+    pub state: Option<String>,
 }
 
 /// Response for GET /api/v1/agent/info
