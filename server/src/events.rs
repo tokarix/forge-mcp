@@ -6,6 +6,8 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 
+use domain::PublishableEvent;
+
 use crate::api::AgentEventEnvelope;
 use crate::config::AgentPolicyConfig;
 

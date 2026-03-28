@@ -112,6 +112,8 @@ pub struct ChannelEventMeta {
     pub event_kind: String,
     pub forge_alias: String,
     pub head_sha: Option<String>,
+    pub issue: Option<u64>,
+    pub issue_comment: Option<u64>,
     pub owner: String,
     pub repo: String,
 }
@@ -155,6 +157,13 @@ pub struct GetChangeRequestCommentsRequest {
     pub repository: RepositoryRef,
 }
 
+pub trait PublishableEvent {
+    fn dedupe_key(&self) -> String;
+    fn event_name(&self) -> &str;
+    fn repository_ref(&self) -> &RepositoryRef;
+    fn to_channel_event(&self) -> ChannelEvent;
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ChangeRequestEvent {
     pub action: ChangeRequestEventAction,
@@ -166,9 +175,31 @@ pub struct ChangeRequestEvent {
     pub url: String,
 }
 
-impl ChangeRequestEvent {
-    #[must_use]
-    pub fn to_channel_event(&self) -> ChannelEvent {
+impl PublishableEvent for ChangeRequestEvent {
+    fn dedupe_key(&self) -> String {
+        if !self.delivery_id.is_empty() {
+            return format!("{}:{}", self.repository.alias, self.delivery_id);
+        }
+        format!(
+            "{}:{}/{}/{}:{}:{}",
+            self.repository.alias,
+            self.repository.owner,
+            self.repository.name,
+            self.index,
+            self.head_sha,
+            self.action.as_str(),
+        )
+    }
+
+    fn event_name(&self) -> &str {
+        "change_request"
+    }
+
+    fn repository_ref(&self) -> &RepositoryRef {
+        &self.repository
+    }
+
+    fn to_channel_event(&self) -> ChannelEvent {
         ChannelEvent {
             content: format!(
                 "change_request {} on {}/{}/{}#{} at {}",
@@ -186,6 +217,8 @@ impl ChangeRequestEvent {
                 event_kind: "change_request".to_string(),
                 forge_alias: self.repository.alias.clone(),
                 head_sha: Some(self.head_sha.clone()),
+                issue: None,
+                issue_comment: None,
                 owner: self.repository.owner.clone(),
                 repo: self.repository.name.clone(),
             },
