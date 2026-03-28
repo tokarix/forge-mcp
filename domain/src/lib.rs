@@ -254,6 +254,175 @@ pub struct ChangeRequestReview {
     pub index: u64,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct Issue {
+    pub assignees: Vec<String>,
+    pub body: String,
+    pub index: u64,
+    pub labels: Vec<String>,
+    pub state: String,
+    pub title: String,
+    pub url: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct IssueComment {
+    pub author: String,
+    pub body: String,
+    pub created_at: String,
+    pub id: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueCommentEventAction {
+    Created,
+}
+
+impl IssueCommentEventAction {
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Created => "created",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct IssueCommentEvent {
+    pub action: IssueCommentEventAction,
+    pub body: String,
+    pub comment_id: u64,
+    pub delivery_id: String,
+    pub issue_index: u64,
+    pub repository: RepositoryRef,
+}
+
+impl PublishableEvent for IssueCommentEvent {
+    fn dedupe_key(&self) -> String {
+        if !self.delivery_id.is_empty() {
+            return format!("{}:{}", self.repository.alias, self.delivery_id);
+        }
+        format!(
+            "{}:{}/{}/{}:issue_comment:{}",
+            self.repository.alias,
+            self.repository.owner,
+            self.repository.name,
+            self.issue_index,
+            self.comment_id,
+        )
+    }
+
+    fn event_name(&self) -> &str {
+        "issue_comment"
+    }
+
+    fn repository_ref(&self) -> &RepositoryRef {
+        &self.repository
+    }
+
+    fn to_channel_event(&self) -> ChannelEvent {
+        ChannelEvent {
+            content: format!(
+                "issue_comment {} on {}/{}/{}#{}",
+                self.action.as_str(),
+                self.repository.alias,
+                self.repository.owner,
+                self.repository.name,
+                self.issue_index,
+            ),
+            meta: ChannelEventMeta {
+                action: self.action.as_str().to_string(),
+                change_request: None,
+                delivery_id: self.delivery_id.clone(),
+                event_kind: "issue_comment".to_string(),
+                forge_alias: self.repository.alias.clone(),
+                head_sha: None,
+                issue: Some(self.issue_index),
+                issue_comment: Some(self.comment_id),
+                owner: self.repository.owner.clone(),
+                repo: self.repository.name.clone(),
+            },
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct IssueEvent {
+    pub action: IssueEventAction,
+    pub delivery_id: String,
+    pub index: u64,
+    pub repository: RepositoryRef,
+    pub title: String,
+    pub url: String,
+}
+
+impl PublishableEvent for IssueEvent {
+    fn dedupe_key(&self) -> String {
+        if !self.delivery_id.is_empty() {
+            return format!("{}:{}", self.repository.alias, self.delivery_id);
+        }
+        format!(
+            "{}:{}/{}/{}:issue:{}",
+            self.repository.alias,
+            self.repository.owner,
+            self.repository.name,
+            self.index,
+            self.action.as_str(),
+        )
+    }
+
+    fn event_name(&self) -> &str {
+        "issue"
+    }
+
+    fn repository_ref(&self) -> &RepositoryRef {
+        &self.repository
+    }
+
+    fn to_channel_event(&self) -> ChannelEvent {
+        ChannelEvent {
+            content: format!(
+                "issue {} on {}/{}/{}#{}",
+                self.action.as_str(),
+                self.repository.alias,
+                self.repository.owner,
+                self.repository.name,
+                self.index,
+            ),
+            meta: ChannelEventMeta {
+                action: self.action.as_str().to_string(),
+                change_request: None,
+                delivery_id: self.delivery_id.clone(),
+                event_kind: "issue".to_string(),
+                forge_alias: self.repository.alias.clone(),
+                head_sha: None,
+                issue: Some(self.index),
+                issue_comment: None,
+                owner: self.repository.owner.clone(),
+                repo: self.repository.name.clone(),
+            },
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueEventAction {
+    Closed,
+    Opened,
+}
+
+impl IssueEventAction {
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Closed => "closed",
+            Self::Opened => "opened",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CloseChangeRequestRequest {
     pub agent: AgentIdentity,
@@ -687,5 +856,56 @@ mod tests {
         assert!(validate_repository_path(".gitignore").is_ok());
         assert!(validate_repository_path("src/.hidden").is_ok());
         assert!(validate_repository_path("./src/main.rs").is_ok());
+    }
+
+    #[test]
+    fn issue_event_to_channel_event_sets_meta_fields() {
+        use super::{ForgeKind, IssueEvent, IssueEventAction, PublishableEvent, RepositoryRef};
+        let event = IssueEvent {
+            action: IssueEventAction::Opened,
+            delivery_id: "delivery-1".to_string(),
+            index: 42,
+            repository: RepositoryRef {
+                alias: "test".to_string(),
+                forge: ForgeKind::Forgejo,
+                host: "https://forge.example".to_string(),
+                name: "repo".to_string(),
+                owner: "org".to_string(),
+            },
+            title: "Bug report".to_string(),
+            url: "https://forge.example/org/repo/issues/42".to_string(),
+        };
+        let channel = event.to_channel_event();
+        assert_eq!(channel.meta.event_kind, "issue");
+        assert_eq!(channel.meta.issue, Some(42));
+        assert_eq!(channel.meta.change_request, None);
+        assert_eq!(channel.meta.head_sha, None);
+        assert_eq!(channel.meta.issue_comment, None);
+    }
+
+    #[test]
+    fn issue_comment_event_to_channel_event_sets_meta_fields() {
+        use super::{
+            ForgeKind, IssueCommentEvent, IssueCommentEventAction, PublishableEvent, RepositoryRef,
+        };
+        let event = IssueCommentEvent {
+            action: IssueCommentEventAction::Created,
+            body: "looks good".to_string(),
+            comment_id: 99,
+            delivery_id: "delivery-2".to_string(),
+            issue_index: 42,
+            repository: RepositoryRef {
+                alias: "test".to_string(),
+                forge: ForgeKind::Forgejo,
+                host: "https://forge.example".to_string(),
+                name: "repo".to_string(),
+                owner: "org".to_string(),
+            },
+        };
+        let channel = event.to_channel_event();
+        assert_eq!(channel.meta.event_kind, "issue_comment");
+        assert_eq!(channel.meta.issue, Some(42));
+        assert_eq!(channel.meta.issue_comment, Some(99));
+        assert_eq!(channel.meta.change_request, None);
     }
 }
