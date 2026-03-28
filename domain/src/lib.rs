@@ -423,6 +423,13 @@ impl IssueEventAction {
     }
 }
 
+#[derive(Clone, Debug)]
+pub enum WebhookEvent {
+    ChangeRequest(ChangeRequestEvent),
+    Issue(IssueEvent),
+    IssueComment(IssueCommentEvent),
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AssignIssueRequest {
     pub agent: AgentIdentity,

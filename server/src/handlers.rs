@@ -284,7 +284,7 @@ pub async fn post_webhook(
 
     let event = forge
         .webhook_adapter
-        .verify_and_parse_change_request_event(
+        .verify_and_parse_webhook_event(
             &normalized_headers,
             body.as_ref(),
             &forge.alias,
@@ -295,9 +295,12 @@ pub async fn post_webhook(
         .map_err(|error| map_webhook_error(&error))?;
 
     if let Some(event) = event {
-        state
-            .event_bus
-            .publish(&event)
+        let publish_result = match &event {
+            domain::WebhookEvent::ChangeRequest(e) => state.event_bus.publish(e),
+            domain::WebhookEvent::Issue(e) => state.event_bus.publish(e),
+            domain::WebhookEvent::IssueComment(e) => state.event_bus.publish(e),
+        };
+        publish_result
             .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorBody { error })))?;
     }
 
@@ -1164,7 +1167,7 @@ mod tests {
     struct FakeForgeAdapter;
 
     impl forge::ForgeWebhookAdapter for FakeForgeAdapter {
-        fn verify_and_parse_change_request_event(
+        fn verify_and_parse_webhook_event(
             &self,
             _headers: &[(String, String)],
             _body: &[u8],
@@ -1172,7 +1175,7 @@ mod tests {
             _forge_kind: domain::ForgeKind,
             _host: &str,
             _secret: &str,
-        ) -> Result<Option<domain::ChangeRequestEvent>, forge::ForgeWebhookError> {
+        ) -> Result<Option<domain::WebhookEvent>, forge::ForgeWebhookError> {
             unimplemented!()
         }
     }

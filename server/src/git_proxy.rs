@@ -408,7 +408,7 @@ mod tests {
     struct FakeForgeAdapter;
 
     impl forge::ForgeWebhookAdapter for FakeForgeAdapter {
-        fn verify_and_parse_change_request_event(
+        fn verify_and_parse_webhook_event(
             &self,
             _headers: &[(String, String)],
             _body: &[u8],
@@ -416,7 +416,7 @@ mod tests {
             _forge_kind: domain::ForgeKind,
             _host: &str,
             _secret: &str,
-        ) -> Result<Option<domain::ChangeRequestEvent>, forge::ForgeWebhookError> {
+        ) -> Result<Option<domain::WebhookEvent>, forge::ForgeWebhookError> {
             unimplemented!()
         }
     }

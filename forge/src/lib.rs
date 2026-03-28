@@ -150,13 +150,13 @@ pub trait ForgeAdapter: Send + Sync {
 
 pub trait ForgeWebhookAdapter: Send + Sync {
     /// Verifies a forge webhook signature and converts a supported payload into
-    /// a normalized change-request event.
+    /// a normalized webhook event.
     ///
     /// # Errors
     ///
     /// Returns an error if the required webhook headers are missing, the
     /// signature is invalid, or the payload cannot be parsed.
-    fn verify_and_parse_change_request_event(
+    fn verify_and_parse_webhook_event(
         &self,
         headers: &[(String, String)],
         body: &[u8],
@@ -164,7 +164,7 @@ pub trait ForgeWebhookAdapter: Send + Sync {
         forge_kind: domain::ForgeKind,
         host: &str,
         secret: &str,
-    ) -> Result<Option<ChangeRequestEvent>, ForgeWebhookError>;
+    ) -> Result<Option<domain::WebhookEvent>, ForgeWebhookError>;
 }
 
 #[derive(Clone)]
@@ -294,6 +294,54 @@ struct ForgejoPullReview {
     state: String,
     submitted_at: Option<String>,
     user: ForgejoCommentUser,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum WebhookEventType {
+    IssueComment,
+    Issues,
+    PullRequest,
+    Unknown(String),
+}
+
+impl WebhookEventType {
+    fn parse(value: &str) -> Self {
+        match value {
+            "issue_comment" => Self::IssueComment,
+            "issues" => Self::Issues,
+            "pull_request" => Self::PullRequest,
+            other => Self::Unknown(other.to_string()),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ForgejoWebhookComment {
+    body: String,
+    id: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct ForgejoWebhookIssue {
+    html_url: String,
+    number: Option<u64>,
+    title: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ForgejoWebhookIssueCommentPayload {
+    action: String,
+    comment: ForgejoWebhookComment,
+    issue: ForgejoWebhookIssue,
+    repository: ForgejoWebhookRepository,
+}
+
+#[derive(Debug, Deserialize)]
+struct ForgejoWebhookIssueEventPayload {
+    action: String,
+    issue: ForgejoWebhookIssue,
+    number: Option<u64>,
+    repository: ForgejoWebhookRepository,
 }
 
 #[derive(Debug, Deserialize)]
@@ -843,7 +891,7 @@ impl ForgeAdapter for ForgejoAdapter {
 }
 
 impl ForgeWebhookAdapter for ForgejoAdapter {
-    fn verify_and_parse_change_request_event(
+    fn verify_and_parse_webhook_event(
         &self,
         headers: &[(String, String)],
         body: &[u8],
@@ -851,51 +899,121 @@ impl ForgeWebhookAdapter for ForgejoAdapter {
         forge_kind: domain::ForgeKind,
         host: &str,
         secret: &str,
-    ) -> Result<Option<ChangeRequestEvent>, ForgeWebhookError> {
+    ) -> Result<Option<domain::WebhookEvent>, ForgeWebhookError> {
         verify_forgejo_signature(headers, body, secret)?;
 
-        let event = header_value(headers, &["x-forgejo-event", "x-gitea-event"])
+        let event_header = header_value(headers, &["x-forgejo-event", "x-gitea-event"])
             .ok_or_else(|| ForgeWebhookError::MissingHeader("x-forgejo-event".to_string()))?;
-        if event != "pull_request" {
-            return Ok(None);
-        }
-
-        let payload: ForgejoWebhookPullRequestEventPayload = serde_json::from_slice(body)
-            .map_err(|e| ForgeWebhookError::InvalidPayload(e.to_string()))?;
-
-        let action = match payload.action.as_str() {
-            "opened" => ChangeRequestEventAction::Opened,
-            "reopened" => ChangeRequestEventAction::Reopened,
-            "synchronize" | "synchronized" => ChangeRequestEventAction::Synchronized,
-            _ => return Ok(None),
-        };
-
-        let owner = payload.repository.owner.into_owner()?;
-        let index = payload
-            .number
-            .or(payload.pull_request.number)
-            .ok_or_else(|| {
-                ForgeWebhookError::InvalidPayload("pull request number missing".to_string())
-            })?;
+        let event_type = WebhookEventType::parse(event_header);
         let delivery_id = header_value(headers, &["x-forgejo-delivery", "x-gitea-delivery"])
             .unwrap_or_default()
             .to_string();
 
-        Ok(Some(ChangeRequestEvent {
-            action,
-            delivery_id,
-            head_sha: payload.pull_request.head.sha,
-            index,
-            repository: RepositoryRef {
-                alias: forge_alias.to_string(),
-                forge: forge_kind,
-                host: host.to_string(),
-                name: payload.repository.name,
-                owner,
-            },
-            title: payload.pull_request.title,
-            url: payload.pull_request.html_url,
-        }))
+        match event_type {
+            WebhookEventType::PullRequest => {
+                let payload: ForgejoWebhookPullRequestEventPayload =
+                    serde_json::from_slice(body)
+                        .map_err(|e| ForgeWebhookError::InvalidPayload(e.to_string()))?;
+
+                let action = match payload.action.as_str() {
+                    "opened" => ChangeRequestEventAction::Opened,
+                    "reopened" => ChangeRequestEventAction::Reopened,
+                    "synchronize" | "synchronized" => ChangeRequestEventAction::Synchronized,
+                    _ => return Ok(None),
+                };
+
+                let owner = payload.repository.owner.into_owner()?;
+                let index = payload
+                    .number
+                    .or(payload.pull_request.number)
+                    .ok_or_else(|| {
+                        ForgeWebhookError::InvalidPayload("pull request number missing".to_string())
+                    })?;
+
+                Ok(Some(domain::WebhookEvent::ChangeRequest(
+                    ChangeRequestEvent {
+                        action,
+                        delivery_id,
+                        head_sha: payload.pull_request.head.sha,
+                        index,
+                        repository: RepositoryRef {
+                            alias: forge_alias.to_string(),
+                            forge: forge_kind,
+                            host: host.to_string(),
+                            name: payload.repository.name,
+                            owner,
+                        },
+                        title: payload.pull_request.title,
+                        url: payload.pull_request.html_url,
+                    },
+                )))
+            }
+            WebhookEventType::Issues => {
+                let payload: ForgejoWebhookIssueEventPayload = serde_json::from_slice(body)
+                    .map_err(|e| ForgeWebhookError::InvalidPayload(e.to_string()))?;
+
+                let action = match payload.action.as_str() {
+                    "closed" => domain::IssueEventAction::Closed,
+                    "opened" => domain::IssueEventAction::Opened,
+                    _ => return Ok(None),
+                };
+
+                let owner = payload.repository.owner.into_owner()?;
+                let index = payload.number.or(payload.issue.number).ok_or_else(|| {
+                    ForgeWebhookError::InvalidPayload("issue number missing".to_string())
+                })?;
+
+                Ok(Some(domain::WebhookEvent::Issue(domain::IssueEvent {
+                    action,
+                    delivery_id,
+                    index,
+                    repository: RepositoryRef {
+                        alias: forge_alias.to_string(),
+                        forge: forge_kind,
+                        host: host.to_string(),
+                        name: payload.repository.name,
+                        owner,
+                    },
+                    title: payload.issue.title,
+                    url: payload.issue.html_url,
+                })))
+            }
+            WebhookEventType::IssueComment => {
+                let payload: ForgejoWebhookIssueCommentPayload = serde_json::from_slice(body)
+                    .map_err(|e| ForgeWebhookError::InvalidPayload(e.to_string()))?;
+
+                let action = match payload.action.as_str() {
+                    "created" => domain::IssueCommentEventAction::Created,
+                    _ => return Ok(None),
+                };
+
+                let owner = payload.repository.owner.into_owner()?;
+                let issue_index = payload.issue.number.ok_or_else(|| {
+                    ForgeWebhookError::InvalidPayload("issue number missing".to_string())
+                })?;
+
+                Ok(Some(domain::WebhookEvent::IssueComment(
+                    domain::IssueCommentEvent {
+                        action,
+                        body: payload.comment.body,
+                        comment_id: payload.comment.id,
+                        delivery_id,
+                        issue_index,
+                        repository: RepositoryRef {
+                            alias: forge_alias.to_string(),
+                            forge: forge_kind,
+                            host: host.to_string(),
+                            name: payload.repository.name,
+                            owner,
+                        },
+                    },
+                )))
+            }
+            WebhookEventType::Unknown(name) => {
+                eprintln!("ignoring unhandled webhook event type: {name}");
+                Ok(None)
+            }
+        }
     }
 }
 
@@ -1115,7 +1233,7 @@ mod tests {
         ];
 
         let event = adapter
-            .verify_and_parse_change_request_event(
+            .verify_and_parse_webhook_event(
                 &headers,
                 &body,
                 "internal",
@@ -1126,6 +1244,10 @@ mod tests {
             .expect("webhook should parse")
             .expect("event should be supported");
 
+        let event = match event {
+            domain::WebhookEvent::ChangeRequest(e) => e,
+            other => panic!("expected ChangeRequest, got {other:?}"),
+        };
         assert_eq!(event.action, ChangeRequestEventAction::Synchronized);
         assert_eq!(event.delivery_id, "delivery-123");
         assert_eq!(event.index, 24);
@@ -1165,7 +1287,7 @@ mod tests {
         ];
 
         let event = adapter
-            .verify_and_parse_change_request_event(
+            .verify_and_parse_webhook_event(
                 &headers,
                 &body,
                 "internal",
@@ -1176,6 +1298,10 @@ mod tests {
             .expect("webhook should parse")
             .expect("event should be supported");
 
+        let event = match event {
+            domain::WebhookEvent::ChangeRequest(e) => e,
+            other => panic!("expected ChangeRequest, got {other:?}"),
+        };
         assert_eq!(event.action, ChangeRequestEventAction::Synchronized);
         assert_eq!(event.index, 10);
     }
@@ -1211,7 +1337,7 @@ mod tests {
         ];
 
         let error = adapter
-            .verify_and_parse_change_request_event(
+            .verify_and_parse_webhook_event(
                 &headers,
                 &body,
                 "internal",
@@ -1252,7 +1378,7 @@ mod tests {
         ];
 
         let result = adapter
-            .verify_and_parse_change_request_event(
+            .verify_and_parse_webhook_event(
                 &headers,
                 &body,
                 "internal",
