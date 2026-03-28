@@ -53,10 +53,36 @@ pub enum TransportError {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct AssignIssueTool {
+    /// User to assign the issue to.
+    pub assignee: String,
+    /// Forge alias -- use `forge_info` to discover available aliases.
+    pub forge: String,
+    /// Issue index number.
+    pub index: u64,
+    /// Repository owner or organization.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct CloseChangeRequestTool {
     /// Forge alias -- use `forge_info` to discover available aliases.
     pub forge: String,
     /// Change request index number.
+    pub index: u64,
+    /// Repository owner or organization.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CloseIssueTool {
+    /// Forge alias -- use `forge_info` to discover available aliases.
+    pub forge: String,
+    /// Issue index number.
     pub index: u64,
     /// Repository owner or organization.
     pub owner: String,
@@ -71,6 +97,20 @@ pub struct CommentOnChangeRequestTool {
     /// Forge alias -- use `forge_info` to discover available aliases.
     pub forge: String,
     /// Change request index number.
+    pub index: u64,
+    /// Repository owner or organization.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CommentOnIssueTool {
+    /// Comment body text.
+    pub body: String,
+    /// Forge alias -- use `forge_info` to discover available aliases.
+    pub forge: String,
+    /// Issue index number.
     pub index: u64,
     /// Repository owner or organization.
     pub owner: String,
@@ -211,6 +251,30 @@ pub struct GetChangeRequestTool {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct GetIssueTool {
+    /// Forge alias -- use `forge_info` to discover available aliases.
+    pub forge: String,
+    /// Issue index number.
+    pub index: u64,
+    /// Repository owner or organization.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GetIssueCommentsTool {
+    /// Forge alias -- use `forge_info` to discover available aliases.
+    pub forge: String,
+    /// Issue index number.
+    pub index: u64,
+    /// Repository owner or organization.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct ListChangeRequestsTool {
     /// Forge alias -- use `forge_info` to discover available aliases.
     pub forge: String,
@@ -219,6 +283,18 @@ pub struct ListChangeRequestsTool {
     /// Repository name.
     pub repo: String,
     /// Optional state filter: open, closed, merged.
+    pub state: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ListIssuesTool {
+    /// Forge alias -- use `forge_info` to discover available aliases.
+    pub forge: String,
+    /// Repository owner or organization.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+    /// Optional state filter: open, closed.
     pub state: Option<String>,
 }
 
@@ -883,6 +959,26 @@ async fn sleep_with_peer_check(peer: &rmcp::service::Peer<RoleServer>, duration:
 
 #[tool_router]
 impl McpShim {
+    /// Assign an issue to a user.
+    #[tool(name = "assign_issue", description = "Assign an issue to a user.")]
+    async fn assign_issue(
+        &self,
+        Parameters(request): Parameters<AssignIssueTool>,
+    ) -> Result<String, McpError> {
+        let url = self.build_url(&[
+            "api",
+            "v1",
+            "repos",
+            &request.forge,
+            &request.owner,
+            &request.repo,
+            "issues",
+            &request.index.to_string(),
+        ])?;
+        let body = serde_json::json!({"assignees": [request.assignee]});
+        self.gateway_patch(url, &body).await
+    }
+
     /// Close a change request (pull request) on the forge.
     #[tool(
         name = "close_change_request",
@@ -903,6 +999,47 @@ impl McpShim {
             &request.index.to_string(),
         ])?;
         self.gateway_delete(url).await
+    }
+
+    /// Close an issue.
+    #[tool(name = "close_issue", description = "Close an issue.")]
+    async fn close_issue(
+        &self,
+        Parameters(request): Parameters<CloseIssueTool>,
+    ) -> Result<String, McpError> {
+        let url = self.build_url(&[
+            "api",
+            "v1",
+            "repos",
+            &request.forge,
+            &request.owner,
+            &request.repo,
+            "issues",
+            &request.index.to_string(),
+        ])?;
+        let body = serde_json::json!({"state": "closed"});
+        self.gateway_patch(url, &body).await
+    }
+
+    /// Post a comment on an issue.
+    #[tool(name = "comment_on_issue", description = "Post a comment on an issue.")]
+    async fn comment_on_issue(
+        &self,
+        Parameters(request): Parameters<CommentOnIssueTool>,
+    ) -> Result<String, McpError> {
+        let url = self.build_url(&[
+            "api",
+            "v1",
+            "repos",
+            &request.forge,
+            &request.owner,
+            &request.repo,
+            "issues",
+            &request.index.to_string(),
+            "comments",
+        ])?;
+        let body = serde_json::json!({"body": request.body});
+        self.gateway_post(url, &body).await
     }
 
     /// Post a general comment on a change request (pull request).
@@ -1045,6 +1182,48 @@ impl McpShim {
         self.gateway_get(url).await
     }
 
+    /// Get a single issue by index.
+    #[tool(name = "get_issue", description = "Get a single issue by index.")]
+    async fn get_issue(
+        &self,
+        Parameters(request): Parameters<GetIssueTool>,
+    ) -> Result<String, McpError> {
+        let url = self.build_url(&[
+            "api",
+            "v1",
+            "repos",
+            &request.forge,
+            &request.owner,
+            &request.repo,
+            "issues",
+            &request.index.to_string(),
+        ])?;
+        self.gateway_get(url).await
+    }
+
+    /// Get all comments for an issue.
+    #[tool(
+        name = "get_issue_comments",
+        description = "Get all comments for an issue."
+    )]
+    async fn get_issue_comments(
+        &self,
+        Parameters(request): Parameters<GetIssueCommentsTool>,
+    ) -> Result<String, McpError> {
+        let url = self.build_url(&[
+            "api",
+            "v1",
+            "repos",
+            &request.forge,
+            &request.owner,
+            &request.repo,
+            "issues",
+            &request.index.to_string(),
+            "comments",
+        ])?;
+        self.gateway_get(url).await
+    }
+
     /// List change requests for a repository.
     #[tool(
         name = "list_change_requests",
@@ -1062,6 +1241,27 @@ impl McpShim {
             &request.owner,
             &request.repo,
             "pulls",
+        ])?;
+        if let Some(state) = &request.state {
+            url.query_pairs_mut().append_pair("state", state);
+        }
+        self.gateway_get(url).await
+    }
+
+    /// List issues for a repository.
+    #[tool(name = "list_issues", description = "List issues for a repository.")]
+    async fn list_issues(
+        &self,
+        Parameters(request): Parameters<ListIssuesTool>,
+    ) -> Result<String, McpError> {
+        let mut url = self.build_url(&[
+            "api",
+            "v1",
+            "repos",
+            &request.forge,
+            &request.owner,
+            &request.repo,
+            "issues",
         ])?;
         if let Some(state) = &request.state {
             url.query_pairs_mut().append_pair("state", state);
@@ -1902,6 +2102,136 @@ mod tests {
                 .and_then(|value| value["meta"]["delivery_id"].as_str()),
             Some("delivery-123")
         );
+
+        drop(client);
+        server_handle.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn list_issues_calls_gateway() -> Result<(), Box<dyn std::error::Error>> {
+        let mock_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(
+                "/api/v1/repos/test-forge/org/repo/issues",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!([{"number": 1, "title": "Bug"}])),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let (client, server_handle) =
+            spawn_shim_and_client(test_config(&mock_server.uri())).await?;
+
+        let args = serde_json::json!({
+            "forge": "test-forge",
+            "owner": "org",
+            "repo": "repo",
+            "state": "open"
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+
+        let result = client
+            .call_tool(CallToolRequestParams::new("list_issues").with_arguments(args))
+            .await?;
+        let text = result
+            .content
+            .first()
+            .and_then(|c| c.raw.as_text())
+            .map(|t| t.text.clone())
+            .expect("text result");
+        assert!(text.contains("Bug"));
+
+        drop(client);
+        server_handle.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_issue_calls_gateway() -> Result<(), Box<dyn std::error::Error>> {
+        let mock_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(
+                "/api/v1/repos/test-forge/org/repo/issues/42",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"number": 42, "title": "Fix login"})),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let (client, server_handle) =
+            spawn_shim_and_client(test_config(&mock_server.uri())).await?;
+
+        let args = serde_json::json!({
+            "forge": "test-forge",
+            "owner": "org",
+            "repo": "repo",
+            "index": 42
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+
+        let result = client
+            .call_tool(CallToolRequestParams::new("get_issue").with_arguments(args))
+            .await?;
+        let text = result
+            .content
+            .first()
+            .and_then(|c| c.raw.as_text())
+            .map(|t| t.text.clone())
+            .expect("text result");
+        assert!(text.contains("Fix login"));
+
+        drop(client);
+        server_handle.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn comment_on_issue_calls_gateway() -> Result<(), Box<dyn std::error::Error>> {
+        let mock_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path(
+                "/api/v1/repos/test-forge/org/repo/issues/42/comments",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(201)
+                    .set_body_json(serde_json::json!({"id": 1, "body": "noted"})),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let (client, server_handle) =
+            spawn_shim_and_client(test_config(&mock_server.uri())).await?;
+
+        let args = serde_json::json!({
+            "forge": "test-forge",
+            "owner": "org",
+            "repo": "repo",
+            "index": 42,
+            "body": "noted"
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+
+        let result = client
+            .call_tool(CallToolRequestParams::new("comment_on_issue").with_arguments(args))
+            .await?;
+        let text = result
+            .content
+            .first()
+            .and_then(|c| c.raw.as_text())
+            .map(|t| t.text.clone())
+            .expect("text result");
+        assert!(text.contains("noted"));
 
         drop(client);
         server_handle.await??;
