@@ -414,6 +414,8 @@ struct ChannelEventMetaEnvelope {
     event_kind: String,
     forge_alias: String,
     head_sha: Option<String>,
+    issue: Option<u64>,
+    issue_comment: Option<u64>,
     owner: String,
     repo: String,
 }
@@ -428,7 +430,6 @@ struct AgentEventEnvelope {
 #[derive(Debug, Default)]
 struct PendingSseEvent {
     data_lines: Vec<String>,
-    event: Option<String>,
     id: Option<String>,
 }
 
@@ -441,7 +442,6 @@ struct SseParser {
 #[derive(Debug)]
 struct SseEvent {
     data: String,
-    event: Option<String>,
     id: Option<String>,
 }
 
@@ -461,7 +461,6 @@ impl PendingSseEvent {
 
         match field {
             "data" => self.data_lines.push(value.to_string()),
-            "event" => self.event = Some(value.to_string()),
             "id" => self.id = Some(value.to_string()),
             _ => {}
         }
@@ -470,13 +469,12 @@ impl PendingSseEvent {
     }
 
     fn finish(&mut self) -> Option<SseEvent> {
-        if self.data_lines.is_empty() && self.event.is_none() && self.id.is_none() {
+        if self.data_lines.is_empty() && self.id.is_none() {
             return None;
         }
 
         let event = SseEvent {
             data: self.data_lines.join("\n"),
-            event: self.event.take(),
             id: self.id.take(),
         };
         self.data_lines.clear();
@@ -689,14 +687,16 @@ impl McpShim {
                 Some(serde_json::json!({
                     "content": event.content,
                     "meta": {
-                        "forge": event.meta.forge_alias,
-                        "owner": event.meta.owner,
-                        "repo": event.meta.repo,
-                        "event_kind": event.meta.event_kind,
                         "action": event.meta.action,
                         "change_request": event.meta.change_request,
-                        "head_sha": event.meta.head_sha,
                         "delivery_id": event.meta.delivery_id,
+                        "event_kind": event.meta.event_kind,
+                        "forge": event.meta.forge_alias,
+                        "head_sha": event.meta.head_sha,
+                        "issue": event.meta.issue,
+                        "issue_comment": event.meta.issue_comment,
+                        "owner": event.meta.owner,
+                        "repo": event.meta.repo,
                     }
                 })),
             ),
@@ -768,6 +768,8 @@ impl McpShim {
                     event_kind: "change_request".to_string(),
                     forge_alias: "test".to_string(),
                     head_sha: Some("deadbeef".to_string()),
+                    issue: None,
+                    issue_comment: None,
                     owner: "org".to_string(),
                     repo: "repo".to_string(),
                 },
@@ -866,6 +868,8 @@ async fn send_event_stream_request(
         .map_err(|error| format!("HTTP request failed: {error}"))
 }
 
+const KNOWN_EVENT_KINDS: &[&str] = &["change_request", "issue", "issue_comment"];
+
 async fn buffer_sse_event(
     peer: &rmcp::service::Peer<RoleServer>,
     event_buffer: &Mutex<VecDeque<AgentEventEnvelope>>,
@@ -875,11 +879,6 @@ async fn buffer_sse_event(
     if let Some(event_id) = &event.id {
         last_event_id.replace(event_id.clone());
     }
-    if let Some(event_name) = &event.event
-        && event_name != "change_request"
-    {
-        return;
-    }
 
     let envelope = match serde_json::from_str::<AgentEventEnvelope>(&event.data) {
         Ok(envelope) => envelope,
@@ -888,7 +887,8 @@ async fn buffer_sse_event(
             return;
         }
     };
-    if envelope.kind != "change_request" {
+
+    if !KNOWN_EVENT_KINDS.contains(&envelope.kind.as_str()) {
         return;
     }
 
@@ -2302,6 +2302,126 @@ mod tests {
             .map(|t| t.text.clone())
             .expect("text content");
         assert_eq!(text, "[]");
+
+        drop(client);
+        server_handle.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn issue_event_is_buffered_for_polling() -> Result<(), Box<dyn std::error::Error>> {
+        let mock_server = wiremock::MockServer::start().await;
+        let event_body = serde_json::json!({
+            "kind": "issue",
+            "content": "issue opened on internal/org/repo#42",
+            "meta": {
+                "forge_alias": "internal",
+                "owner": "org",
+                "repo": "repo",
+                "event_kind": "issue",
+                "action": "opened",
+                "change_request": null,
+                "head_sha": null,
+                "issue": 42,
+                "issue_comment": null,
+                "delivery_id": "delivery-issue-1"
+            }
+        });
+        let sse = format!(
+            "event: issue\nid: internal:delivery-issue-1\ndata: {}\n\n",
+            event_body
+        );
+
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/api/v1/agent/events"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(sse),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let (client, _payload, _receive_signal, server_handle) =
+            spawn_shim_and_channel_client(test_channel_config(&mock_server.uri())).await?;
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let result = client
+            .call_tool(CallToolRequestParams::new("poll_events"))
+            .await?;
+        let text = result
+            .content
+            .first()
+            .and_then(|c| c.raw.as_text())
+            .map(|t| t.text.clone())
+            .expect("text content");
+        let events: Vec<serde_json::Value> = serde_json::from_str(&text)?;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["meta"]["event_kind"], "issue");
+        assert_eq!(events[0]["meta"]["issue"], 42);
+        assert!(events[0]["meta"]["change_request"].is_null());
+
+        drop(client);
+        server_handle.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn issue_comment_event_is_buffered_for_polling() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mock_server = wiremock::MockServer::start().await;
+        let event_body = serde_json::json!({
+            "kind": "issue_comment",
+            "content": "issue_comment created on internal/org/repo#42",
+            "meta": {
+                "forge_alias": "internal",
+                "owner": "org",
+                "repo": "repo",
+                "event_kind": "issue_comment",
+                "action": "created",
+                "change_request": null,
+                "head_sha": null,
+                "issue": 42,
+                "issue_comment": 99,
+                "delivery_id": "delivery-comment-1"
+            }
+        });
+        let sse = format!(
+            "event: issue_comment\nid: internal:delivery-comment-1\ndata: {}\n\n",
+            event_body
+        );
+
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/api/v1/agent/events"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(sse),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let (client, _payload, _receive_signal, server_handle) =
+            spawn_shim_and_channel_client(test_channel_config(&mock_server.uri())).await?;
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let result = client
+            .call_tool(CallToolRequestParams::new("poll_events"))
+            .await?;
+        let text = result
+            .content
+            .first()
+            .and_then(|c| c.raw.as_text())
+            .map(|t| t.text.clone())
+            .expect("text content");
+        let events: Vec<serde_json::Value> = serde_json::from_str(&text)?;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["meta"]["event_kind"], "issue_comment");
+        assert_eq!(events[0]["meta"]["issue"], 42);
+        assert_eq!(events[0]["meta"]["issue_comment"], 99);
+        assert!(events[0]["meta"]["change_request"].is_null());
 
         drop(client);
         server_handle.await??;
