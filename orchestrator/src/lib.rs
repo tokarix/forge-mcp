@@ -202,19 +202,70 @@ where
             .map_err(|e| ServiceError::Upstream(e.to_string()))
     }
 
-    async fn get_issue(&self, _request: GetIssueRequest) -> Result<Issue, ServiceError> {
-        todo!("issue read support")
+    async fn get_issue(&self, request: GetIssueRequest) -> Result<Issue, ServiceError> {
+        self.audit_sink
+            .record(AuditRecord {
+                agent: request.agent,
+                action: "get_issue".to_string(),
+                repository: request.repository.clone(),
+                target: request.index.to_string(),
+            })
+            .await
+            .map_err(|e| ServiceError::Audit(e.to_string()))?;
+
+        self.adapter
+            .get_issue(
+                &request.repository,
+                request.index,
+                &ForgeCredential { token: None },
+            )
+            .await
+            .map_err(|e| ServiceError::Upstream(e.to_string()))
     }
 
     async fn get_issue_comments(
         &self,
-        _request: GetIssueCommentsRequest,
+        request: GetIssueCommentsRequest,
     ) -> Result<Vec<IssueComment>, ServiceError> {
-        todo!("issue comments read support")
+        self.audit_sink
+            .record(AuditRecord {
+                agent: request.agent,
+                action: "get_issue_comments".to_string(),
+                repository: request.repository.clone(),
+                target: request.index.to_string(),
+            })
+            .await
+            .map_err(|e| ServiceError::Audit(e.to_string()))?;
+
+        self.adapter
+            .get_issue_comments(
+                &request.repository,
+                request.index,
+                &ForgeCredential { token: None },
+            )
+            .await
+            .map_err(|e| ServiceError::Upstream(e.to_string()))
     }
 
-    async fn list_issues(&self, _request: ListIssuesRequest) -> Result<Vec<Issue>, ServiceError> {
-        todo!("issue list support")
+    async fn list_issues(&self, request: ListIssuesRequest) -> Result<Vec<Issue>, ServiceError> {
+        self.audit_sink
+            .record(AuditRecord {
+                agent: request.agent,
+                action: "list_issues".to_string(),
+                repository: request.repository.clone(),
+                target: String::new(),
+            })
+            .await
+            .map_err(|e| ServiceError::Audit(e.to_string()))?;
+
+        self.adapter
+            .list_issues(
+                &request.repository,
+                request.state.as_deref(),
+                &ForgeCredential { token: None },
+            )
+            .await
+            .map_err(|e| ServiceError::Upstream(e.to_string()))
     }
 }
 
@@ -333,11 +384,29 @@ where
 {
     async fn assign_issue(
         &self,
-        _request: AssignIssueRequest,
+        request: AssignIssueRequest,
         _authorized: domain::policy::AuthorizedWrite,
-        _credential: &ForgeCredential,
+        credential: &ForgeCredential,
     ) -> Result<Issue, ServiceError> {
-        todo!("issue assign support")
+        self.audit_sink
+            .record(AuditRecord {
+                agent: request.agent,
+                action: "assign_issue".to_string(),
+                repository: request.repository.clone(),
+                target: format!("#{} -> {}", request.index, request.assignee),
+            })
+            .await
+            .map_err(|e| ServiceError::Audit(e.to_string()))?;
+
+        self.adapter
+            .assign_issue(
+                &request.repository,
+                request.index,
+                &request.assignee,
+                credential,
+            )
+            .await
+            .map_err(|e| ServiceError::Upstream(e.to_string()))
     }
 
     async fn close_change_request(
@@ -421,20 +490,51 @@ where
 
     async fn close_issue(
         &self,
-        _request: CloseIssueRequest,
+        request: CloseIssueRequest,
         _authorized: domain::policy::AuthorizedWrite,
-        _credential: &ForgeCredential,
+        credential: &ForgeCredential,
     ) -> Result<Issue, ServiceError> {
-        todo!("issue close support")
+        self.audit_sink
+            .record(AuditRecord {
+                agent: request.agent,
+                action: "close_issue".to_string(),
+                repository: request.repository.clone(),
+                target: request.index.to_string(),
+            })
+            .await
+            .map_err(|e| ServiceError::Audit(e.to_string()))?;
+
+        self.adapter
+            .close_issue(&request.repository, request.index, credential)
+            .await
+            .map_err(|e| ServiceError::Upstream(e.to_string()))
     }
 
     async fn comment_on_issue(
         &self,
-        _request: CommentOnIssueRequest,
+        request: CommentOnIssueRequest,
         _authorized: domain::policy::AuthorizedWrite,
-        _credential: &ForgeCredential,
+        credential: &ForgeCredential,
     ) -> Result<IssueComment, ServiceError> {
-        todo!("issue comment support")
+        self.audit_sink
+            .record(AuditRecord {
+                agent: request.agent,
+                action: "comment_on_issue".to_string(),
+                repository: request.repository.clone(),
+                target: request.index.to_string(),
+            })
+            .await
+            .map_err(|e| ServiceError::Audit(e.to_string()))?;
+
+        self.adapter
+            .comment_on_issue(
+                &request.repository,
+                request.index,
+                &request.body,
+                credential,
+            )
+            .await
+            .map_err(|e| ServiceError::Upstream(e.to_string()))
     }
 
     async fn commit_patch(
