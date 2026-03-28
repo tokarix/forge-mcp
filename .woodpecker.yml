@@ -1,0 +1,25 @@
+steps:
+  fmt:
+    image: rust:1.94-slim
+    commands:
+      - cargo fmt --check
+
+  check:
+    image: rust:1.94-slim
+    commands:
+      - cargo check --all-features --all-targets
+    depends_on:
+      - fmt
+
+  clippy:
+    image: rust:1.94-slim
+    commands:
+      - cargo clippy --all-features --all-targets --no-deps -- -D warnings
+    depends_on:
+      - fmt
+
+  test:
+    image: rust:1.94-slim
+    commands:
+      - cargo test --all-features --all-targets
+    depends_on:
