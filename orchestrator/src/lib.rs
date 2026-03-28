@@ -5,13 +5,14 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use audit::{AuditRecord, AuditSink};
 use domain::{
-    ChangeRequest, ChangeRequestComment, ChangeRequestCommentDetail, ChangeRequestDiff,
-    ChangeRequestReview, CloseChangeRequestRequest, CommentOnChangeRequestRequest, ForgeCredential,
+    AssignIssueRequest, ChangeRequest, ChangeRequestComment, ChangeRequestCommentDetail,
+    ChangeRequestDiff, ChangeRequestReview, CloseChangeRequestRequest, CloseIssueRequest,
+    CommentOnChangeRequestRequest, CommentOnIssueRequest, ForgeCredential,
     GetChangeRequestCommentsRequest, GetChangeRequestDiffRequest, GetChangeRequestRequest,
-    ListChangeRequestsRequest, ReadRepositoryFileRequest, ReadRepositoryFileResponse,
-    RebaseBranchRequest, RebaseBranchResponse, RepositoryReadService, ScheduleAutoMergeRequest,
-    ServiceError, SubmitChangeRequestReviewRequest, UpdateChangeRequestRequest,
-    validate_repository_path,
+    GetIssueCommentsRequest, GetIssueRequest, Issue, IssueComment, ListChangeRequestsRequest,
+    ListIssuesRequest, ReadRepositoryFileRequest, ReadRepositoryFileResponse, RebaseBranchRequest,
+    RebaseBranchResponse, RepositoryReadService, ScheduleAutoMergeRequest, ServiceError,
+    SubmitChangeRequestReviewRequest, UpdateChangeRequestRequest, validate_repository_path,
 };
 use forge::ForgeAdapter;
 
@@ -200,6 +201,21 @@ where
             .await
             .map_err(|e| ServiceError::Upstream(e.to_string()))
     }
+
+    async fn get_issue(&self, _request: GetIssueRequest) -> Result<Issue, ServiceError> {
+        todo!("issue read support")
+    }
+
+    async fn get_issue_comments(
+        &self,
+        _request: GetIssueCommentsRequest,
+    ) -> Result<Vec<IssueComment>, ServiceError> {
+        todo!("issue comments read support")
+    }
+
+    async fn list_issues(&self, _request: ListIssuesRequest) -> Result<Vec<Issue>, ServiceError> {
+        todo!("issue list support")
+    }
 }
 
 /// Validates rebase operations against the list of commits in the branch.
@@ -315,6 +331,15 @@ where
     A: ForgeAdapter + 'static,
     S: AuditSink + 'static,
 {
+    async fn assign_issue(
+        &self,
+        _request: AssignIssueRequest,
+        _authorized: domain::policy::AuthorizedWrite,
+        _credential: &ForgeCredential,
+    ) -> Result<Issue, ServiceError> {
+        todo!("issue assign support")
+    }
+
     async fn close_change_request(
         &self,
         request: CloseChangeRequestRequest,
@@ -392,6 +417,24 @@ where
             )
             .await
             .map_err(|e| ServiceError::Upstream(e.to_string()))
+    }
+
+    async fn close_issue(
+        &self,
+        _request: CloseIssueRequest,
+        _authorized: domain::policy::AuthorizedWrite,
+        _credential: &ForgeCredential,
+    ) -> Result<Issue, ServiceError> {
+        todo!("issue close support")
+    }
+
+    async fn comment_on_issue(
+        &self,
+        _request: CommentOnIssueRequest,
+        _authorized: domain::policy::AuthorizedWrite,
+        _credential: &ForgeCredential,
+    ) -> Result<IssueComment, ServiceError> {
+        todo!("issue comment support")
     }
 
     async fn commit_patch(

@@ -534,6 +534,25 @@ mod tests {
 
     #[async_trait::async_trait]
     impl domain::RepositoryReadService for FakeReadService {
+        async fn get_issue(
+            &self,
+            _: domain::GetIssueRequest,
+        ) -> Result<domain::Issue, ServiceError> {
+            todo!()
+        }
+        async fn get_issue_comments(
+            &self,
+            _: domain::GetIssueCommentsRequest,
+        ) -> Result<Vec<domain::IssueComment>, ServiceError> {
+            todo!()
+        }
+        async fn list_issues(
+            &self,
+            _: domain::ListIssuesRequest,
+        ) -> Result<Vec<domain::Issue>, ServiceError> {
+            todo!()
+        }
+
         async fn read_repository_file(
             &self,
             request: domain::ReadRepositoryFileRequest,
@@ -591,6 +610,31 @@ mod tests {
 
     #[async_trait::async_trait]
     impl domain::RepositoryWriteService for FakeWriteService {
+        async fn assign_issue(
+            &self,
+            _: domain::AssignIssueRequest,
+            _: domain::policy::AuthorizedWrite,
+            _: &domain::ForgeCredential,
+        ) -> Result<domain::Issue, ServiceError> {
+            todo!()
+        }
+        async fn close_issue(
+            &self,
+            _: domain::CloseIssueRequest,
+            _: domain::policy::AuthorizedWrite,
+            _: &domain::ForgeCredential,
+        ) -> Result<domain::Issue, ServiceError> {
+            todo!()
+        }
+        async fn comment_on_issue(
+            &self,
+            _: domain::CommentOnIssueRequest,
+            _: domain::policy::AuthorizedWrite,
+            _: &domain::ForgeCredential,
+        ) -> Result<domain::IssueComment, ServiceError> {
+            todo!()
+        }
+
         async fn close_change_request(
             &self,
             _request: domain::CloseChangeRequestRequest,

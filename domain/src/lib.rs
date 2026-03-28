@@ -424,6 +424,14 @@ impl IssueEventAction {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AssignIssueRequest {
+    pub agent: AgentIdentity,
+    pub assignee: String,
+    pub index: u64,
+    pub repository: RepositoryRef,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CloseChangeRequestRequest {
     pub agent: AgentIdentity,
     pub index: u64,
@@ -431,7 +439,22 @@ pub struct CloseChangeRequestRequest {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CloseIssueRequest {
+    pub agent: AgentIdentity,
+    pub index: u64,
+    pub repository: RepositoryRef,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommentOnChangeRequestRequest {
+    pub agent: AgentIdentity,
+    pub body: String,
+    pub index: u64,
+    pub repository: RepositoryRef,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommentOnIssueRequest {
     pub agent: AgentIdentity,
     pub body: String,
     pub index: u64,
@@ -472,10 +495,31 @@ pub struct GetChangeRequestRequest {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GetIssueCommentsRequest {
+    pub agent: AgentIdentity,
+    pub index: u64,
+    pub repository: RepositoryRef,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GetIssueRequest {
+    pub agent: AgentIdentity,
+    pub index: u64,
+    pub repository: RepositoryRef,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ListChangeRequestsRequest {
     pub agent: AgentIdentity,
     pub repository: RepositoryRef,
     pub state: Option<ChangeRequestState>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ListIssuesRequest {
+    pub agent: AgentIdentity,
+    pub repository: RepositoryRef,
+    pub state: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -634,6 +678,33 @@ pub trait RepositoryReadService: Send + Sync {
         request: ListChangeRequestsRequest,
     ) -> Result<Vec<ChangeRequest>, ServiceError>;
 
+    /// Retrieves a single issue by index.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the upstream forge request fails or audit
+    /// recording fails.
+    async fn get_issue(&self, request: GetIssueRequest) -> Result<Issue, ServiceError>;
+
+    /// Retrieves all comments for an issue.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the upstream forge request fails or audit
+    /// recording fails.
+    async fn get_issue_comments(
+        &self,
+        request: GetIssueCommentsRequest,
+    ) -> Result<Vec<IssueComment>, ServiceError>;
+
+    /// Lists issues, optionally filtered by state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the upstream forge request fails or audit
+    /// recording fails.
+    async fn list_issues(&self, request: ListIssuesRequest) -> Result<Vec<Issue>, ServiceError>;
+
     /// Reads a single text file from a repository through the control plane.
     ///
     /// # Errors
@@ -648,6 +719,19 @@ pub trait RepositoryReadService: Send + Sync {
 
 #[async_trait]
 pub trait RepositoryWriteService: Send + Sync {
+    /// Assigns an issue to a user.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the upstream forge request fails or audit
+    /// recording fails.
+    async fn assign_issue(
+        &self,
+        request: AssignIssueRequest,
+        authorized: policy::AuthorizedWrite,
+        credential: &ForgeCredential,
+    ) -> Result<Issue, ServiceError>;
+
     /// Closes a change request after verifying branch-scope policy.
     ///
     /// # Errors
@@ -673,6 +757,32 @@ pub trait RepositoryWriteService: Send + Sync {
         authorized: policy::AuthorizedWrite,
         credential: &ForgeCredential,
     ) -> Result<ChangeRequestComment, ServiceError>;
+
+    /// Closes an issue.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the upstream forge request fails or audit
+    /// recording fails.
+    async fn close_issue(
+        &self,
+        request: CloseIssueRequest,
+        authorized: policy::AuthorizedWrite,
+        credential: &ForgeCredential,
+    ) -> Result<Issue, ServiceError>;
+
+    /// Posts a comment on an issue.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the upstream forge request fails or audit
+    /// recording fails.
+    async fn comment_on_issue(
+        &self,
+        request: CommentOnIssueRequest,
+        authorized: policy::AuthorizedWrite,
+        credential: &ForgeCredential,
+    ) -> Result<IssueComment, ServiceError>;
 
     /// Applies a patch to a new branch and pushes it.
     ///
