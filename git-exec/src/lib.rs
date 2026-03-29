@@ -38,6 +38,7 @@ fn auth_header(token: &str) -> String {
 /// An operation to apply during an interactive rebase.
 #[derive(Clone, Debug)]
 pub enum RebaseOperation {
+    Drop { commit: String },
     Fixup { commit: String, into: String },
 }
 
@@ -270,12 +271,16 @@ with open(sys.argv[1]) as f:
     lines = f.readlines()
 
 # Parse operations
+drops = set()  # full SHAs to drop
 fixups = {}  # commit_prefix -> into_prefix
 ",
         );
 
         for op in operations {
             match op {
+                RebaseOperation::Drop { commit } => {
+                    let _ = writeln!(py_script, "drops.add('{commit}')");
+                }
                 RebaseOperation::Fixup { commit, into } => {
                     // Use full SHAs — git's todo uses abbreviated SHAs which are
                     // prefixes of these, so startswith() matching still works.
@@ -302,6 +307,13 @@ for line in lines:
         continue
 
     action, sha = parts[0], parts[1]
+
+    # Check if this commit should be dropped
+    is_drop = any(full_sha.startswith(sha) for full_sha in drops)
+    if is_drop:
+        drop_line = line.replace(action, 'drop', 1)
+        regular.append(drop_line)
+        continue
 
     # Check if this commit should be a fixup (full SHA starts with todo's abbreviated SHA)
     matched_full_sha = None
@@ -675,6 +687,89 @@ index 7e59600..1234567 100644
         // Should now have 2 commits
         let commits_after = ws.list_commits_in_range(&mb).unwrap();
         assert_eq!(commits_after.len(), 2);
+    }
+
+    #[test]
+    fn rebase_drop_removes_commit() {
+        let (_remote_dir, remote_path) = setup_remote_with_initial_commit();
+        let remote_url = format!("file://{}", remote_path.display());
+
+        let ws = GitWorkspace::clone_repo(&remote_url, "main", None, false).unwrap();
+        ws.create_branch("agent/test-drop").unwrap();
+
+        add_commit(&ws, "file1.txt", "content1", "commit 1");
+        let sha2 = add_commit(&ws, "file2.txt", "content2", "commit 2");
+        add_commit(&ws, "file3.txt", "content3", "commit 3");
+
+        ws.push_branch("agent/test-drop").unwrap();
+
+        let mb = ws.merge_base("HEAD", "origin/main").unwrap();
+
+        let commits = ws.list_commits_in_range(&mb).unwrap();
+        assert_eq!(commits.len(), 3);
+
+        // Drop commit 2
+        ws.rebase_interactive(
+            &mb,
+            &[RebaseOperation::Drop {
+                commit: sha2.clone(),
+            }],
+            "Test Committer",
+            "committer@test",
+        )
+        .unwrap();
+
+        // Should now have 2 commits
+        let commits_after = ws.list_commits_in_range(&mb).unwrap();
+        assert_eq!(commits_after.len(), 2);
+
+        // file2.txt should not exist (its commit was dropped)
+        assert!(!ws.repo_path.join("file2.txt").exists());
+
+        // file1.txt and file3.txt should still exist
+        assert!(ws.repo_path.join("file1.txt").exists());
+        assert!(ws.repo_path.join("file3.txt").exists());
+    }
+
+    #[test]
+    fn rebase_drop_and_fixup_combined() {
+        let (_remote_dir, remote_path) = setup_remote_with_initial_commit();
+        let remote_url = format!("file://{}", remote_path.display());
+
+        let ws = GitWorkspace::clone_repo(&remote_url, "main", None, false).unwrap();
+        ws.create_branch("agent/test-drop-fixup").unwrap();
+
+        let sha1 = add_commit(&ws, "file1.txt", "content1", "commit 1");
+        let sha2 = add_commit(&ws, "file2.txt", "content2", "commit 2");
+        let sha3 = add_commit(&ws, "file3.txt", "content3", "commit 3");
+
+        ws.push_branch("agent/test-drop-fixup").unwrap();
+        let mb = ws.merge_base("HEAD", "origin/main").unwrap();
+
+        // Drop commit 2, fixup commit 3 into commit 1
+        ws.rebase_interactive(
+            &mb,
+            &[
+                RebaseOperation::Drop {
+                    commit: sha2.clone(),
+                },
+                RebaseOperation::Fixup {
+                    commit: sha3.clone(),
+                    into: sha1.clone(),
+                },
+            ],
+            "Test Committer",
+            "committer@test",
+        )
+        .unwrap();
+
+        let commits_after = ws.list_commits_in_range(&mb).unwrap();
+        assert_eq!(commits_after.len(), 1);
+
+        // file2.txt dropped, file1.txt and file3.txt squashed into one commit
+        assert!(!ws.repo_path.join("file2.txt").exists());
+        assert!(ws.repo_path.join("file1.txt").exists());
+        assert!(ws.repo_path.join("file3.txt").exists());
     }
 
     #[test]
