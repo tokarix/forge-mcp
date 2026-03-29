@@ -299,6 +299,7 @@ pub async fn post_webhook(
             domain::WebhookEvent::ChangeRequest(e) => state.event_bus.publish(e),
             domain::WebhookEvent::Issue(e) => state.event_bus.publish(e),
             domain::WebhookEvent::IssueComment(e) => state.event_bus.publish(e),
+            domain::WebhookEvent::PullRequestReview(e) => state.event_bus.publish(e),
         };
         publish_result
             .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorBody { error })))?;
