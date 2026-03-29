@@ -66,6 +66,18 @@ Preferred local workflow:
 - Never accept unrelated changes mixed into one commit.
 - Follow Linux kernel-style patch hygiene: small commits, one thing per commit, with clear what/why commit messages.
 
+## Addressing Review Feedback on Your Own PRs
+
+When a reviewer posts `REQUEST_CHANGES` on a PR you authored:
+
+1. Read the review with `get_change_request_comments` to understand all findings.
+2. For each finding, make the fix locally and generate a patch with `git diff --no-ext-diff --binary`.
+3. Submit each fix with `commit_patch` using `existing_branch: true`.
+4. After all fixes are pushed, use `rebase_branch` to squash fixup commits into the correct logical commits. The final series must have clean, self-contained commits — never leave fixup-style follow-ups.
+5. Fetch the branch and verify the commit series with `git log` before considering the work done.
+
+**Never ask the user to run git commands manually.** All operations — committing, squashing, and force-pushing — are handled by forge-mcp tools.
+
 ## Suggested Subagent Prompt
 
 Use this template when delegating to a subagent. When the runtime does
