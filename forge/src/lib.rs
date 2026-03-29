@@ -1730,7 +1730,10 @@ mod tests {
             domain::WebhookEvent::PullRequestReview(e) => e,
             other => panic!("expected PullRequestReview, got {other:?}"),
         };
-        assert_eq!(event.action, domain::PullRequestReviewEventAction::Submitted);
+        assert_eq!(
+            event.action,
+            domain::PullRequestReviewEventAction::Submitted
+        );
         assert_eq!(event.delivery_id, "delivery-789");
         assert_eq!(event.head_sha, "abc123def456");
         assert_eq!(event.index, 7);

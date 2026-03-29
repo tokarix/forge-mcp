@@ -423,6 +423,7 @@ struct ChannelEventMetaEnvelope {
     issue_comment: Option<u64>,
     owner: String,
     repo: String,
+    review_state: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -702,6 +703,7 @@ impl McpShim {
                         "issue_comment": event.meta.issue_comment,
                         "owner": event.meta.owner,
                         "repo": event.meta.repo,
+                        "review_state": event.meta.review_state,
                     }
                 })),
             ),
@@ -777,6 +779,7 @@ impl McpShim {
                     issue_comment: None,
                     owner: "org".to_string(),
                     repo: "repo".to_string(),
+                    review_state: None,
                 },
             };
             if let Err(error) = Self::send_channel_notification(&peer, &startup_event).await {
@@ -873,7 +876,12 @@ async fn send_event_stream_request(
         .map_err(|error| format!("HTTP request failed: {error}"))
 }
 
-const KNOWN_EVENT_KINDS: &[&str] = &["change_request", "issue", "issue_comment"];
+const KNOWN_EVENT_KINDS: &[&str] = &[
+    "change_request",
+    "issue",
+    "issue_comment",
+    "pull_request_review",
+];
 
 async fn buffer_sse_event(
     peer: &rmcp::service::Peer<RoleServer>,
@@ -2433,6 +2441,68 @@ mod tests {
         assert_eq!(events[0]["meta"]["issue"], 42);
         assert_eq!(events[0]["meta"]["issue_comment"], 99);
         assert!(events[0]["meta"]["change_request"].is_null());
+
+        drop(client);
+        server_handle.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pull_request_review_event_is_buffered_for_polling()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mock_server = wiremock::MockServer::start().await;
+        let event_body = serde_json::json!({
+            "kind": "pull_request_review",
+            "content": "pull_request_review submitted (approved) on internal/org/repo#7 at abc123",
+            "meta": {
+                "forge_alias": "internal",
+                "owner": "org",
+                "repo": "repo",
+                "event_kind": "pull_request_review",
+                "action": "submitted",
+                "change_request": 7,
+                "head_sha": "abc123",
+                "issue": null,
+                "issue_comment": null,
+                "delivery_id": "delivery-review-1",
+                "review_state": "approved"
+            }
+        });
+        let sse = format!(
+            "event: pull_request_review\nid: internal:delivery-review-1\ndata: {}\n\n",
+            event_body
+        );
+
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/api/v1/agent/events"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(sse),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let (client, _payload, _receive_signal, server_handle) =
+            spawn_shim_and_channel_client(test_channel_config(&mock_server.uri())).await?;
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let result = client
+            .call_tool(CallToolRequestParams::new("poll_events"))
+            .await?;
+        let text = result
+            .content
+            .first()
+            .and_then(|c| c.raw.as_text())
+            .map(|t| t.text.clone())
+            .expect("text content");
+        let events: Vec<serde_json::Value> = serde_json::from_str(&text)?;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["meta"]["event_kind"], "pull_request_review");
+        assert_eq!(events[0]["meta"]["change_request"], 7);
+        assert_eq!(events[0]["meta"]["review_state"], "approved");
+        assert!(events[0]["meta"]["issue"].is_null());
 
         drop(client);
         server_handle.await??;
