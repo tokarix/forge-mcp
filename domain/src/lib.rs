@@ -116,6 +116,7 @@ pub struct ChannelEventMeta {
     pub issue_comment: Option<u64>,
     pub owner: String,
     pub repo: String,
+    pub review_state: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -221,6 +222,7 @@ impl PublishableEvent for ChangeRequestEvent {
                 issue_comment: None,
                 owner: self.repository.owner.clone(),
                 repo: self.repository.name.clone(),
+                review_state: None,
             },
         }
     }
@@ -342,6 +344,7 @@ impl PublishableEvent for IssueCommentEvent {
                 issue_comment: Some(self.comment_id),
                 owner: self.repository.owner.clone(),
                 repo: self.repository.name.clone(),
+                review_state: None,
             },
         }
     }
@@ -401,6 +404,7 @@ impl PublishableEvent for IssueEvent {
                 issue_comment: None,
                 owner: self.repository.owner.clone(),
                 repo: self.repository.name.clone(),
+                review_state: None,
             },
         }
     }
@@ -423,11 +427,93 @@ impl IssueEventAction {
     }
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PullRequestReviewEvent {
+    pub action: PullRequestReviewEventAction,
+    pub delivery_id: String,
+    pub head_sha: String,
+    pub index: u64,
+    pub repository: RepositoryRef,
+    pub review_body: String,
+    pub review_id: u64,
+    pub review_state: String,
+    pub title: String,
+    pub url: String,
+}
+
+impl PublishableEvent for PullRequestReviewEvent {
+    fn dedupe_key(&self) -> String {
+        if !self.delivery_id.is_empty() {
+            return format!("{}:{}", self.repository.alias, self.delivery_id);
+        }
+        format!(
+            "{}:{}/{}/{}:pull_request_review:{}",
+            self.repository.alias,
+            self.repository.owner,
+            self.repository.name,
+            self.index,
+            self.review_id,
+        )
+    }
+
+    fn event_name(&self) -> &str {
+        "pull_request_review"
+    }
+
+    fn repository_ref(&self) -> &RepositoryRef {
+        &self.repository
+    }
+
+    fn to_channel_event(&self) -> ChannelEvent {
+        ChannelEvent {
+            content: format!(
+                "pull_request_review {} ({}) on {}/{}/{}#{} at {}",
+                self.action.as_str(),
+                self.review_state,
+                self.repository.alias,
+                self.repository.owner,
+                self.repository.name,
+                self.index,
+                self.head_sha,
+            ),
+            meta: ChannelEventMeta {
+                action: self.action.as_str().to_string(),
+                change_request: Some(self.index),
+                delivery_id: self.delivery_id.clone(),
+                event_kind: "pull_request_review".to_string(),
+                forge_alias: self.repository.alias.clone(),
+                head_sha: Some(self.head_sha.clone()),
+                issue: None,
+                issue_comment: None,
+                owner: self.repository.owner.clone(),
+                repo: self.repository.name.clone(),
+                review_state: Some(self.review_state.clone()),
+            },
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PullRequestReviewEventAction {
+    Submitted,
+}
+
+impl PullRequestReviewEventAction {
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Submitted => "submitted",
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum WebhookEvent {
     ChangeRequest(ChangeRequestEvent),
     Issue(IssueEvent),
     IssueComment(IssueCommentEvent),
+    PullRequestReview(PullRequestReviewEvent),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -999,6 +1085,41 @@ mod tests {
         assert_eq!(channel.meta.change_request, None);
         assert_eq!(channel.meta.head_sha, None);
         assert_eq!(channel.meta.issue_comment, None);
+    }
+
+    #[test]
+    fn pull_request_review_event_to_channel_event_sets_meta_fields() {
+        use super::{
+            ForgeKind, PublishableEvent, PullRequestReviewEvent, PullRequestReviewEventAction,
+            RepositoryRef,
+        };
+        let event = PullRequestReviewEvent {
+            action: PullRequestReviewEventAction::Submitted,
+            delivery_id: "delivery-3".to_string(),
+            head_sha: "abc123".to_string(),
+            index: 7,
+            repository: RepositoryRef {
+                alias: "test".to_string(),
+                forge: ForgeKind::Forgejo,
+                host: "https://forge.example".to_string(),
+                name: "repo".to_string(),
+                owner: "org".to_string(),
+            },
+            review_body: "Approved!".to_string(),
+            review_id: 55,
+            review_state: "approved".to_string(),
+            title: "Fix typo".to_string(),
+            url: "https://forge.example/org/repo/pulls/7".to_string(),
+        };
+        let channel = event.to_channel_event();
+        assert_eq!(channel.meta.event_kind, "pull_request_review");
+        assert_eq!(channel.meta.change_request, Some(7));
+        assert_eq!(channel.meta.head_sha, Some("abc123".to_string()));
+        assert_eq!(channel.meta.review_state, Some("approved".to_string()));
+        assert_eq!(channel.meta.issue, None);
+        assert_eq!(channel.meta.issue_comment, None);
+        assert_eq!(event.event_name(), "pull_request_review");
+        assert_eq!(event.dedupe_key(), "test:delivery-3");
     }
 
     #[test]
