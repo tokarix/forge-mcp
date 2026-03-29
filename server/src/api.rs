@@ -41,6 +41,7 @@ pub struct RebaseBranchBody {
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RebaseOperationBody {
+    Drop { commit: String },
     Fixup { commit: String, into: String },
 }
 

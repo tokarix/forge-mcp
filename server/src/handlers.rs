@@ -651,6 +651,7 @@ pub async fn post_rebase(
         .operations
         .into_iter()
         .map(|op| match op {
+            RebaseOperationBody::Drop { commit } => domain::RebaseOperation::Drop { commit },
             RebaseOperationBody::Fixup { commit, into } => {
                 domain::RebaseOperation::Fixup { commit, into }
             }
