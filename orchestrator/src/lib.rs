@@ -290,11 +290,24 @@ fn validate_rebase_operations(
         .map(|(i, c)| (c.as_str(), i))
         .collect();
 
+    let mut drop_commits: HashSet<String> = HashSet::new();
     let mut fixup_sources: HashSet<String> = HashSet::new();
     let mut fixup_targets: HashSet<String> = HashSet::new();
 
     for op in operations {
         match op {
+            domain::RebaseOperation::Drop { commit } => {
+                if !commit_set.contains(commit.as_str()) {
+                    return Err(ServiceError::Validation(format!(
+                        "drop commit '{commit}' not found in branch commits"
+                    )));
+                }
+                if !drop_commits.insert(commit.clone()) {
+                    return Err(ServiceError::Validation(format!(
+                        "commit '{commit}' is dropped more than once"
+                    )));
+                }
+            }
             domain::RebaseOperation::Fixup { commit, into } => {
                 // Check SHAs exist
                 if !commit_set.contains(commit.as_str()) {
@@ -342,6 +355,22 @@ fn validate_rebase_operations(
         return Err(ServiceError::Validation(format!(
             "commit(s) used as both fixup source and target: {}",
             conflicts
+                .iter()
+                .map(|c| &c[..std::cmp::min(7, c.len())])
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
+    }
+
+    // A commit cannot be both dropped and used in a fixup
+    let drop_fixup_conflicts: Vec<_> = drop_commits
+        .intersection(&fixup_sources)
+        .chain(drop_commits.intersection(&fixup_targets))
+        .collect();
+    if !drop_fixup_conflicts.is_empty() {
+        return Err(ServiceError::Validation(format!(
+            "commit(s) used in both drop and fixup operations: {}",
+            drop_fixup_conflicts
                 .iter()
                 .map(|c| &c[..std::cmp::min(7, c.len())])
                 .collect::<Vec<_>>()
@@ -786,6 +815,9 @@ where
             let git_ops: Vec<git_exec::RebaseOperation> = operations
                 .iter()
                 .map(|op| match op {
+                    domain::RebaseOperation::Drop { commit } => git_exec::RebaseOperation::Drop {
+                        commit: commit.clone(),
+                    },
                     domain::RebaseOperation::Fixup { commit, into } => {
                         git_exec::RebaseOperation::Fixup {
                             commit: commit.clone(),
@@ -808,8 +840,12 @@ where
                 .rev_parse("HEAD^{tree}")
                 .map_err(|e| ServiceError::GitExec(e.to_string()))?;
 
-            // 11. Verify tree integrity
-            if old_tree != new_tree {
+            // 11. Verify tree integrity (skip when drops are present — drops
+            //     intentionally remove content, so the tree is expected to change)
+            let has_drops = operations
+                .iter()
+                .any(|op| matches!(op, domain::RebaseOperation::Drop { .. }));
+            if !has_drops && old_tree != new_tree {
                 return Err(ServiceError::Validation(format!(
                     "rebase changed the tree: old={old_tree}, new={new_tree}; \
                      this indicates a conflict or data loss"
@@ -3046,6 +3082,130 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
         assert_eq!(audit.records().len(), 1);
         assert_eq!(audit.records()[0].action, "update_change_request");
         assert_eq!(audit.records()[0].target, "#42");
+    }
+
+    // --- rebase_branch integration tests ---
+
+    /// Set up a bare remote repo with an initial commit, clone it, create a
+    /// branch with extra commits, push, and return the remote path + commit SHAs.
+    fn setup_rebase_test_repo(branch: &str) -> (tempfile::TempDir, Vec<String>) {
+        use std::process::Command;
+
+        fn run(dir: &std::path::Path, args: &[&str]) -> String {
+            let out = Command::new("git")
+                .current_dir(dir)
+                .args(args)
+                .output()
+                .expect("git command");
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        }
+
+        let remote_dir = tempfile::TempDir::new().unwrap();
+        run(remote_dir.path(), &["init", "--bare", "remote.git"]);
+        let remote_path = remote_dir.path().join("remote.git");
+
+        let work_dir = tempfile::TempDir::new().unwrap();
+        let work = work_dir.path().join("work");
+        run(
+            work_dir.path(),
+            &["clone", remote_path.to_str().unwrap(), "work"],
+        );
+        std::fs::write(work.join("README.md"), "# Hello\n").unwrap();
+        run(&work, &["add", "README.md"]);
+        run(
+            &work,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@test",
+                "commit",
+                "-m",
+                "init",
+            ],
+        );
+        run(&work, &["push", "-u", "origin", "HEAD:main"]);
+
+        run(&work, &["checkout", "-b", branch]);
+        let mut shas = Vec::new();
+        for i in 1..=3 {
+            let name = format!("file{i}.txt");
+            std::fs::write(work.join(&name), format!("content{i}")).unwrap();
+            run(&work, &["add", &name]);
+            run(
+                &work,
+                &[
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@test",
+                    "commit",
+                    "-m",
+                    &format!("commit {i}"),
+                ],
+            );
+            let sha = run(&work, &["rev-parse", "HEAD"]);
+            shas.push(sha);
+        }
+        run(&work, &["push", "-u", "origin", branch]);
+
+        (remote_dir, shas)
+    }
+
+    #[tokio::test]
+    async fn rebase_branch_drop_succeeds_through_orchestrator() {
+        let branch_name = "agent/test-drop";
+        let (remote_dir, shas) = setup_rebase_test_repo(branch_name);
+
+        let remote_path = remote_dir.path().join("remote.git");
+        let adapter = Arc::new(FakeForgeAdapter);
+        let audit = Arc::new(InMemoryAuditSink::new());
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
+
+        let request = domain::RebaseBranchRequest {
+            agent: AgentIdentity {
+                agent_id: "test-agent".to_string(),
+                session_id: "test-session".to_string(),
+            },
+            base_branch: "main".to_string(),
+            branch: branch_name.to_string(),
+            operations: vec![domain::RebaseOperation::Drop {
+                commit: shas[1].clone(),
+            }],
+            repository: RepositoryRef {
+                alias: "test".to_string(),
+                forge: domain::ForgeKind::Forgejo,
+                host: format!("file://{}", remote_path.parent().unwrap().display()),
+                name: "remote".to_string(),
+                owner: ".".to_string(),
+            },
+        };
+
+        let authorized = domain::policy::AuthorizedWrite {
+            policy: domain::policy::PolicyConfig {
+                branch_prefix: Some("agent/".to_string()),
+                ..domain::policy::PolicyConfig::default()
+            },
+        };
+
+        let result = orchestrator
+            .rebase_branch(
+                request,
+                authorized,
+                &domain::ForgeCredential { token: None },
+            )
+            .await
+            .expect("rebase with drop should succeed");
+
+        assert_eq!(result.branch, branch_name);
+        assert_eq!(audit.records().len(), 1);
+        assert_eq!(audit.records()[0].action, "rebase_branch");
     }
 
     // --- resolve_committer_identity tests ---
