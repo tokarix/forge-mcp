@@ -325,7 +325,8 @@ pub struct RebaseBranchTool {
     /// Forge alias -- use `forge_info` to discover available aliases.
     pub forge: String,
     /// List of rebase operations as JSON objects. Each object must have a
-    /// `"type"` field. Currently supported: `{"type": "fixup", "commit": "<sha>", "into": "<sha>"}`.
+    /// `"type"` field. Supported: `{"type": "fixup", "commit": "<sha>", "into": "<sha>"}`,
+    /// `{"type": "drop", "commit": "<sha>"}`.
     pub operations: Vec<RebaseBranchOperationTool>,
     /// Repository owner or organization.
     pub owner: String,
@@ -336,6 +337,10 @@ pub struct RebaseBranchTool {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RebaseBranchOperationTool {
+    Drop {
+        /// Full SHA of the commit to remove.
+        commit: String,
+    },
     Fixup {
         /// Full SHA of the commit to squash.
         commit: String,
@@ -1296,10 +1301,10 @@ impl McpShim {
         self.gateway_post(url, &body).await
     }
 
-    /// Rebase a branch by squashing (fixup) commits.
+    /// Rebase a branch by squashing (fixup) or removing (drop) commits.
     #[tool(
         name = "rebase_branch",
-        description = "Rebase a branch by squashing (fixup) commits. Performs a full clone, validates operations, runs interactive rebase, verifies tree integrity, and force-pushes with lease. Only works on branches matching your configured branch prefix."
+        description = "Rebase a branch by squashing (fixup) or removing (drop) commits. Performs a full clone, validates operations, runs interactive rebase, verifies tree integrity, and force-pushes with lease. Only works on branches matching your configured branch prefix."
     )]
     async fn rebase_branch(
         &self,
@@ -1319,6 +1324,12 @@ impl McpShim {
             .operations
             .iter()
             .map(|op| match op {
+                RebaseBranchOperationTool::Drop { commit } => {
+                    serde_json::json!({
+                        "type": "drop",
+                        "commit": commit,
+                    })
+                }
                 RebaseBranchOperationTool::Fixup { commit, into } => {
                     serde_json::json!({
                         "type": "fixup",
