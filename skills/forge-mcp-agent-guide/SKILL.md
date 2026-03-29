@@ -40,7 +40,14 @@ git clone http://gateway:8443/git/myforge/org/repo
 
 ## MCP Tools
 
-All tools require a `forge` parameter — the alias of the target forge instance.
+Most tools require a `forge` parameter — the alias of the target forge instance.
+
+### Discovery
+
+| Tool | Purpose |
+|------|---------|
+| `forge_info` | Discover available forges, gateway URL, and git proxy URL |
+| `poll_events` | Poll for buffered channel events (webhooks, notifications) |
 
 ### Reading
 
@@ -49,13 +56,27 @@ All tools require a `forge` parameter — the alias of the target forge instance
 | `read_repository_file` | Read a single file (with optional git ref) |
 | `list_change_requests` | List pull requests (filter by state) |
 | `get_change_request` | Get details of a specific pull request |
+| `get_change_request_diff` | Get the unified diff for a pull request |
+| `get_change_request_comments` | Get all comments and reviews on a pull request |
+| `list_issues` | List issues (filter by state) |
+| `get_issue` | Get a single issue by index |
+| `get_issue_comments` | Get all comments on an issue |
 
 ### Writing
 
 | Tool | Purpose |
 |------|---------|
-| `commit_patch` | Apply a git-format patch to a new branch and push |
+| `commit_patch` | Apply a git-format patch to a branch and push |
 | `open_change_request` | Open a pull request |
+| `update_change_request` | Update a pull request's title and/or body |
+| `close_change_request` | Close a pull request |
+| `comment_on_change_request` | Post a comment on a pull request |
+| `submit_change_request_review` | Submit a formal review (APPROVED, REQUEST_CHANGES, COMMENT) |
+| `rebase_branch` | Squash (fixup) commits on a branch |
+| `schedule_auto_merge` | Schedule a PR for auto-merge when checks pass |
+| `assign_issue` | Assign an issue to a user |
+| `close_issue` | Close an issue |
+| `comment_on_issue` | Post a comment on an issue |
 
 ### Write Workflow
 
@@ -75,12 +96,24 @@ All tools require a `forge` parameter — the alias of the target forge instance
 
 **Protected paths:** Diffs touching protected paths (e.g. `.forgejo/`, `.github/`) are rejected.
 
+## Addressing Review Feedback
+
+When a reviewer requests changes on a PR:
+
+1. Read the review with `get_change_request_comments`
+2. Make fixes locally, generate patches with `git diff --no-ext-diff --binary`
+3. Push fixes with `commit_patch` using `existing_branch: true`
+4. Squash fixup commits into the right logical commits with `rebase_branch` — never leave fixup-style follow-up commits in the final series
+5. Each commit in the result must be self-contained and independently buildable
+
+**Never ask the user to run git commands manually.** The tools above cover the full workflow: committing, rebasing, and force-pushing are all handled server-side.
+
 ## Common Mistakes
 
 | Mistake | Fix |
 |---------|-----|
 | `git push` through the proxy | Use `commit_patch` MCP tool |
-| Forgetting `forge` parameter | Every MCP tool requires it |
+| Forgetting `forge` parameter | Most tools require it (`forge_info` and `poll_events` do not) |
 | Wrong branch prefix | Check your agent's configured `branch_prefix` |
 | Touching CI/workflow files | These are protected paths -- the gateway will reject |
 | Using Bearer auth with git | Git sends Basic auth -- use password field for token |
