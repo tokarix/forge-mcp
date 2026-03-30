@@ -37,3 +37,5 @@ steps:
       - apt-get update -qq && apt-get install -y -qq git python3 > /dev/null
       - cargo test --all-features --all-targets
     depends_on:
+      - check
+      - clippy
