@@ -1,3 +1,8 @@
+when:
+  - event: pull_request
+  - event: push
+    branch: master
+
 steps:
   fmt:
     image: rust:1.94-slim
