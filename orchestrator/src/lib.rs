@@ -935,7 +935,22 @@ where
             )));
         }
 
-        // 5. Audit before action
+        // 5. Validate merge style is allowed by the repository.
+        let allowed = self
+            .adapter
+            .get_allowed_merge_styles(&request.repository, credential)
+            .await
+            .map_err(|e| ServiceError::Upstream(e.to_string()))?;
+
+        if !allowed.iter().any(|s| s == &request.merge_style) {
+            return Err(ServiceError::Validation(format!(
+                "merge style '{}' is not allowed by this repository (allowed: {})",
+                request.merge_style,
+                allowed.join(", "),
+            )));
+        }
+
+        // 6. Audit before action
         self.audit_sink
             .record(AuditRecord {
                 agent: request.agent,
@@ -949,7 +964,7 @@ where
             .await
             .map_err(|e| ServiceError::Audit(e.to_string()))?;
 
-        // 6. Call adapter
+        // 7. Call adapter
         self.adapter
             .schedule_auto_merge(
                 &request.repository,
@@ -1132,6 +1147,13 @@ mod tests {
         ) -> Result<domain::IssueComment, ForgeError> {
             unimplemented!()
         }
+        async fn get_allowed_merge_styles(
+            &self,
+            _: &RepositoryRef,
+            _: &ForgeCredential,
+        ) -> Result<Vec<String>, ForgeError> {
+            unimplemented!()
+        }
         async fn get_issue(
             &self,
             _: &RepositoryRef,
@@ -1307,6 +1329,13 @@ mod tests {
             _: &str,
             _: &ForgeCredential,
         ) -> Result<domain::IssueComment, ForgeError> {
+            unimplemented!()
+        }
+        async fn get_allowed_merge_styles(
+            &self,
+            _: &RepositoryRef,
+            _: &ForgeCredential,
+        ) -> Result<Vec<String>, ForgeError> {
             unimplemented!()
         }
         async fn get_issue(
@@ -1565,6 +1594,13 @@ mod tests {
             _: &str,
             _: &ForgeCredential,
         ) -> Result<domain::IssueComment, ForgeError> {
+            unimplemented!()
+        }
+        async fn get_allowed_merge_styles(
+            &self,
+            _: &RepositoryRef,
+            _: &ForgeCredential,
+        ) -> Result<Vec<String>, ForgeError> {
             unimplemented!()
         }
         async fn get_issue(
@@ -2053,6 +2089,13 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
         ) -> Result<domain::IssueComment, ForgeError> {
             unimplemented!()
         }
+        async fn get_allowed_merge_styles(
+            &self,
+            _: &RepositoryRef,
+            _: &ForgeCredential,
+        ) -> Result<Vec<String>, ForgeError> {
+            unimplemented!()
+        }
         async fn get_issue(
             &self,
             _: &RepositoryRef,
@@ -2468,6 +2511,13 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
         ) -> Result<domain::IssueComment, ForgeError> {
             unimplemented!()
         }
+        async fn get_allowed_merge_styles(
+            &self,
+            _: &RepositoryRef,
+            _: &ForgeCredential,
+        ) -> Result<Vec<String>, ForgeError> {
+            unimplemented!()
+        }
         async fn get_issue(
             &self,
             _: &RepositoryRef,
@@ -2659,7 +2709,17 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
     // --- schedule_auto_merge tests ---
 
     struct AutoMergeTestForgeAdapter {
+        allowed_merge_styles: Vec<String>,
         head_sha: Option<String>,
+    }
+
+    impl AutoMergeTestForgeAdapter {
+        fn new(head_sha: &str) -> Self {
+            Self {
+                allowed_merge_styles: vec!["rebase".to_string(), "squash".to_string()],
+                head_sha: Some(head_sha.to_string()),
+            }
+        }
     }
 
     #[async_trait::async_trait]
@@ -2689,6 +2749,13 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             _: &ForgeCredential,
         ) -> Result<domain::IssueComment, ForgeError> {
             unimplemented!()
+        }
+        async fn get_allowed_merge_styles(
+            &self,
+            _: &RepositoryRef,
+            _: &ForgeCredential,
+        ) -> Result<Vec<String>, ForgeError> {
+            Ok(self.allowed_merge_styles.clone())
         }
         async fn get_issue(
             &self,
@@ -2868,9 +2935,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
 
     #[tokio::test]
     async fn schedule_auto_merge_valid_merge_style() {
-        let adapter = Arc::new(AutoMergeTestForgeAdapter {
-            head_sha: Some("abc123".to_string()),
-        });
+        let adapter = Arc::new(AutoMergeTestForgeAdapter::new("abc123"));
         let audit = Arc::new(InMemoryAuditSink::new());
         let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
 
@@ -2886,9 +2951,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
 
     #[tokio::test]
     async fn schedule_auto_merge_invalid_merge_style() {
-        let adapter = Arc::new(AutoMergeTestForgeAdapter {
-            head_sha: Some("abc123".to_string()),
-        });
+        let adapter = Arc::new(AutoMergeTestForgeAdapter::new("abc123"));
         let audit = Arc::new(InMemoryAuditSink::new());
         let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
 
@@ -2907,9 +2970,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
 
     #[tokio::test]
     async fn schedule_auto_merge_head_sha_mismatch() {
-        let adapter = Arc::new(AutoMergeTestForgeAdapter {
-            head_sha: Some("abc123".to_string()),
-        });
+        let adapter = Arc::new(AutoMergeTestForgeAdapter::new("abc123"));
         let audit = Arc::new(InMemoryAuditSink::new());
         let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
 
@@ -2928,7 +2989,10 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
 
     #[tokio::test]
     async fn schedule_auto_merge_missing_head_sha() {
-        let adapter = Arc::new(AutoMergeTestForgeAdapter { head_sha: None });
+        let adapter = Arc::new(AutoMergeTestForgeAdapter {
+            allowed_merge_styles: vec!["rebase".to_string(), "squash".to_string()],
+            head_sha: None,
+        });
         let audit = Arc::new(InMemoryAuditSink::new());
         let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
 
@@ -2948,9 +3012,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
     #[tokio::test]
     async fn schedule_auto_merge_records_audit() {
         let full_sha = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2";
-        let adapter = Arc::new(AutoMergeTestForgeAdapter {
-            head_sha: Some(full_sha.to_string()),
-        });
+        let adapter = Arc::new(AutoMergeTestForgeAdapter::new(full_sha));
         let audit = Arc::new(InMemoryAuditSink::new());
         let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
 
@@ -2973,6 +3035,33 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
                 .contains(&format!("head:{full_sha}"))
         );
         assert!(audit.records()[0].target.contains("#42"));
+    }
+
+    #[tokio::test]
+    async fn schedule_auto_merge_rejects_disallowed_strategy() {
+        let adapter = AutoMergeTestForgeAdapter::new("abc123");
+        let audit = Arc::new(InMemoryAuditSink::new());
+        let orchestrator = WriteOrchestrator::new(Arc::new(adapter), Arc::clone(&audit));
+
+        let err = orchestrator
+            .schedule_auto_merge(
+                auto_merge_test_request("merge", "abc123"),
+                default_authorized(),
+                &domain::ForgeCredential { token: None },
+            )
+            .await
+            .expect_err("disallowed merge style should be rejected");
+
+        match err {
+            ServiceError::Validation(msg) => {
+                assert!(
+                    msg.contains("not allowed"),
+                    "expected 'not allowed' in error, got: {msg}"
+                );
+            }
+            other => panic!("expected Validation error, got: {other:?}"),
+        }
+        assert_eq!(audit.records().len(), 0);
     }
 
     // --- update_change_request tests ---

@@ -1558,6 +1558,13 @@ mod tests {
         ) -> Result<Vec<domain::ChangeRequestCommentDetail>, forge::ForgeError> {
             unimplemented!()
         }
+        async fn get_allowed_merge_styles(
+            &self,
+            _: &domain::RepositoryRef,
+            _: &domain::ForgeCredential,
+        ) -> Result<Vec<String>, forge::ForgeError> {
+            unimplemented!()
+        }
         async fn get_change_request(
             &self,
             _: &domain::RepositoryRef,
