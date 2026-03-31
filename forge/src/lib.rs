@@ -99,6 +99,15 @@ pub trait ForgeAdapter: Send + Sync {
         credential: &ForgeCredential,
     ) -> Result<ChangeRequest, ForgeError>;
 
+    /// Creates a new issue.
+    async fn create_issue(
+        &self,
+        repository: &RepositoryRef,
+        title: &str,
+        body: &str,
+        credential: &ForgeCredential,
+    ) -> Result<domain::Issue, ForgeError>;
+
     /// Returns the set of merge style strings the repository allows.
     async fn get_allowed_merge_styles(
         &self,
@@ -757,6 +766,43 @@ impl ForgeAdapter for ForgejoAdapter {
 
         let pr: ForgejoPullRequest = response.json().await?;
         Ok(pr.into_change_request())
+    }
+
+    async fn create_issue(
+        &self,
+        repository: &RepositoryRef,
+        title: &str,
+        body: &str,
+        credential: &ForgeCredential,
+    ) -> Result<domain::Issue, ForgeError> {
+        let url = format!(
+            "{}/api/v1/repos/{}/{}/issues",
+            self.config.base_url.trim_end_matches('/'),
+            repository.owner,
+            repository.name,
+        );
+
+        let effective_token = credential.token.as_deref().or(self.config.token.as_deref());
+        let mut request = self.client.post(&url).json(&serde_json::json!({
+            "title": title,
+            "body": body
+        }));
+        if let Some(token) = effective_token {
+            request = request.bearer_auth(token);
+        }
+
+        let response = request.send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let resp_body = response.text().await.unwrap_or_default();
+            return Err(ForgeError::UnexpectedStatus {
+                status,
+                body: resp_body,
+            });
+        }
+
+        let issue: ForgejoIssueResponse = response.json().await?;
+        Ok(issue.into_issue())
     }
 
     async fn get_allowed_merge_styles(
@@ -2052,5 +2098,44 @@ mod tests {
             )
             .expect("payload should parse");
         assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn create_issue_sends_correct_body() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path_regex(r"/api/v1/repos/.+/.+/issues$"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "number": 42,
+                "title": "Bug report",
+                "body": "Something is broken",
+                "state": "open",
+                "html_url": "https://forge.example/org/repo/issues/42",
+                "labels": [{"name": "bug"}],
+                "assignees": []
+            })))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let issue = adapter
+            .create_issue(&test_repo(), "Bug report", "Something is broken", &cred)
+            .await
+            .unwrap();
+
+        assert_eq!(issue.index, 42);
+        assert_eq!(issue.title, "Bug report");
+        assert_eq!(issue.body, "Something is broken");
+        assert_eq!(issue.state, "open");
+        assert_eq!(issue.labels, vec!["bug"]);
+
+        let requests = mock.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        let req_body: serde_json::Value =
+            serde_json::from_slice(&requests[0].body).expect("valid JSON");
+        assert_eq!(req_body["title"], "Bug report");
+        assert_eq!(req_body["body"], "Something is broken");
     }
 }

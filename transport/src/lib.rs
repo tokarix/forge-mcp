@@ -215,6 +215,20 @@ where
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct CreateIssueTool {
+    /// Issue body text.
+    pub body: String,
+    /// Forge alias -- use `forge_info` to discover available aliases.
+    pub forge: String,
+    /// Repository owner or organization.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+    /// Issue title.
+    pub title: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct GetChangeRequestDiffTool {
     /// Forge alias -- use `forge_info` to discover available aliases.
     pub forge: String,
@@ -1052,6 +1066,25 @@ impl McpShim {
             "comments",
         ])?;
         let body = serde_json::json!({"body": request.body});
+        self.gateway_post(url, &body).await
+    }
+
+    /// Create a new issue.
+    #[tool(name = "create_issue", description = "Create a new issue.")]
+    async fn create_issue(
+        &self,
+        Parameters(request): Parameters<CreateIssueTool>,
+    ) -> Result<String, McpError> {
+        let url = self.build_url(&[
+            "api",
+            "v1",
+            "repos",
+            &request.forge,
+            &request.owner,
+            &request.repo,
+            "issues",
+        ])?;
+        let body = serde_json::json!({"title": request.title, "body": request.body});
         self.gateway_post(url, &body).await
     }
 
@@ -2251,6 +2284,57 @@ mod tests {
             .map(|t| t.text.clone())
             .expect("text result");
         assert!(text.contains("noted"));
+
+        drop(client);
+        server_handle.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn create_issue_calls_gateway() -> Result<(), Box<dyn std::error::Error>> {
+        let mock_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path(
+                "/api/v1/repos/test-forge/org/repo/issues",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                    "number": 42,
+                    "title": "Bug report",
+                    "body": "Something is broken",
+                    "state": "open",
+                    "html_url": "https://forge.example/org/repo/issues/42",
+                    "labels": [],
+                    "assignees": []
+                })),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let (client, server_handle) =
+            spawn_shim_and_client(test_config(&mock_server.uri())).await?;
+
+        let args = serde_json::json!({
+            "forge": "test-forge",
+            "owner": "org",
+            "repo": "repo",
+            "title": "Bug report",
+            "body": "Something is broken"
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+
+        let result = client
+            .call_tool(CallToolRequestParams::new("create_issue").with_arguments(args))
+            .await?;
+        let text = result
+            .content
+            .first()
+            .and_then(|c| c.raw.as_text())
+            .map(|t| t.text.clone())
+            .expect("text result");
+        assert!(text.contains("Bug report"));
 
         drop(client);
         server_handle.await??;

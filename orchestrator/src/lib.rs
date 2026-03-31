@@ -7,7 +7,7 @@ use audit::{AuditRecord, AuditSink};
 use domain::{
     AssignIssueRequest, ChangeRequest, ChangeRequestComment, ChangeRequestCommentDetail,
     ChangeRequestDiff, ChangeRequestReview, CloseChangeRequestRequest, CloseIssueRequest,
-    CommentOnChangeRequestRequest, CommentOnIssueRequest, ForgeCredential,
+    CommentOnChangeRequestRequest, CommentOnIssueRequest, CreateIssueRequest, ForgeCredential,
     GetChangeRequestCommentsRequest, GetChangeRequestDiffRequest, GetChangeRequestRequest,
     GetIssueCommentsRequest, GetIssueRequest, Issue, IssueComment, ListChangeRequestsRequest,
     ListIssuesRequest, ReadRepositoryFileRequest, ReadRepositoryFileResponse, RebaseBranchRequest,
@@ -671,6 +671,33 @@ where
         })
     }
 
+    async fn create_issue(
+        &self,
+        request: CreateIssueRequest,
+        _authorized: domain::policy::AuthorizedWrite,
+        credential: &ForgeCredential,
+    ) -> Result<Issue, ServiceError> {
+        self.audit_sink
+            .record(AuditRecord {
+                agent: request.agent,
+                action: "create_issue".to_string(),
+                repository: request.repository.clone(),
+                target: request.title.clone(),
+            })
+            .await
+            .map_err(|e| ServiceError::Audit(e.to_string()))?;
+
+        self.adapter
+            .create_issue(
+                &request.repository,
+                &request.title,
+                &request.body,
+                credential,
+            )
+            .await
+            .map_err(|e| ServiceError::Upstream(e.to_string()))
+    }
+
     async fn open_change_request(
         &self,
         request: domain::OpenChangeRequestRequest,
@@ -1147,6 +1174,15 @@ mod tests {
         ) -> Result<domain::IssueComment, ForgeError> {
             unimplemented!()
         }
+        async fn create_issue(
+            &self,
+            _: &RepositoryRef,
+            _: &str,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            unimplemented!()
+        }
         async fn get_allowed_merge_styles(
             &self,
             _: &RepositoryRef,
@@ -1329,6 +1365,15 @@ mod tests {
             _: &str,
             _: &ForgeCredential,
         ) -> Result<domain::IssueComment, ForgeError> {
+            unimplemented!()
+        }
+        async fn create_issue(
+            &self,
+            _: &RepositoryRef,
+            _: &str,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
             unimplemented!()
         }
         async fn get_allowed_merge_styles(
@@ -1595,6 +1640,26 @@ mod tests {
             _: &ForgeCredential,
         ) -> Result<domain::IssueComment, ForgeError> {
             unimplemented!()
+        }
+        async fn create_issue(
+            &self,
+            repository: &RepositoryRef,
+            title: &str,
+            body: &str,
+            _credential: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            Ok(domain::Issue {
+                assignees: vec![],
+                body: body.to_string(),
+                index: 1,
+                labels: vec![],
+                state: "open".to_string(),
+                title: title.to_string(),
+                url: format!(
+                    "https://forge.example/{}/{}/issues/1",
+                    repository.owner, repository.name
+                ),
+            })
         }
         async fn get_allowed_merge_styles(
             &self,
@@ -2053,6 +2118,45 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
         assert_eq!(audit.records().len(), 1);
     }
 
+    // --- create_issue tests ---
+
+    #[tokio::test]
+    async fn create_issue_records_audit_and_creates() {
+        let adapter = Arc::new(WriteTestForgeAdapter);
+        let audit = Arc::new(InMemoryAuditSink::new());
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
+
+        let result = orchestrator
+            .create_issue(
+                domain::CreateIssueRequest {
+                    agent: AgentIdentity {
+                        agent_id: "test-agent".to_string(),
+                        session_id: "test-session".to_string(),
+                    },
+                    body: "Something is broken".to_string(),
+                    repository: RepositoryRef {
+                        alias: "test".to_string(),
+                        forge: ForgeKind::Forgejo,
+                        host: "https://forge.example".to_string(),
+                        name: "repo".to_string(),
+                        owner: "org".to_string(),
+                    },
+                    title: "Bug report".to_string(),
+                },
+                default_authorized(),
+                &domain::ForgeCredential { token: None },
+            )
+            .await
+            .expect("should succeed");
+
+        assert_eq!(result.title, "Bug report");
+        assert_eq!(result.body, "Something is broken");
+        assert_eq!(result.state, "open");
+        assert_eq!(audit.records().len(), 1);
+        assert_eq!(audit.records()[0].action, "create_issue");
+        assert_eq!(audit.records()[0].target, "Bug report");
+    }
+
     // --- close_change_request tests ---
 
     /// Fake adapter where `get_change_request` returns a PR with a
@@ -2087,6 +2191,15 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             _: &str,
             _: &ForgeCredential,
         ) -> Result<domain::IssueComment, ForgeError> {
+            unimplemented!()
+        }
+        async fn create_issue(
+            &self,
+            _: &RepositoryRef,
+            _: &str,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
             unimplemented!()
         }
         async fn get_allowed_merge_styles(
@@ -2511,6 +2624,15 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
         ) -> Result<domain::IssueComment, ForgeError> {
             unimplemented!()
         }
+        async fn create_issue(
+            &self,
+            _: &RepositoryRef,
+            _: &str,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            unimplemented!()
+        }
         async fn get_allowed_merge_styles(
             &self,
             _: &RepositoryRef,
@@ -2748,6 +2870,15 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             _: &str,
             _: &ForgeCredential,
         ) -> Result<domain::IssueComment, ForgeError> {
+            unimplemented!()
+        }
+        async fn create_issue(
+            &self,
+            _: &RepositoryRef,
+            _: &str,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
             unimplemented!()
         }
         async fn get_allowed_merge_styles(

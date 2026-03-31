@@ -574,6 +574,14 @@ pub struct CommitPatchResponse {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CreateIssueRequest {
+    pub agent: AgentIdentity,
+    pub body: String,
+    pub repository: RepositoryRef,
+    pub title: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GetChangeRequestDiffRequest {
     pub agent: AgentIdentity,
     pub index: u64,
@@ -889,6 +897,19 @@ pub trait RepositoryWriteService: Send + Sync {
         authorized: policy::AuthorizedWrite,
         credential: &ForgeCredential,
     ) -> Result<CommitPatchResponse, ServiceError>;
+
+    /// Creates a new issue.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the upstream forge request fails or audit
+    /// recording fails.
+    async fn create_issue(
+        &self,
+        request: CreateIssueRequest,
+        authorized: policy::AuthorizedWrite,
+        credential: &ForgeCredential,
+    ) -> Result<Issue, ServiceError>;
 
     /// Opens a change request (pull request) on the forge.
     ///

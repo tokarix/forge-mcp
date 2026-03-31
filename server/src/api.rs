@@ -152,6 +152,13 @@ pub struct CommentOnIssueBody {
     pub body: String,
 }
 
+/// Request body for creating an issue.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CreateIssueBody {
+    pub body: String,
+    pub title: String,
+}
+
 /// Request body for updating an issue (close, assign).
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct UpdateIssueBody {

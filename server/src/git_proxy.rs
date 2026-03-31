@@ -449,6 +449,15 @@ mod tests {
         ) -> Result<domain::IssueComment, forge::ForgeError> {
             unimplemented!()
         }
+        async fn create_issue(
+            &self,
+            _: &domain::RepositoryRef,
+            _: &str,
+            _: &str,
+            _: &domain::ForgeCredential,
+        ) -> Result<domain::Issue, forge::ForgeError> {
+            unimplemented!()
+        }
         async fn get_issue(
             &self,
             _: &domain::RepositoryRef,
@@ -721,6 +730,15 @@ mod tests {
                 commit_sha: "abc123".to_string(),
                 repository: request.repository,
             })
+        }
+
+        async fn create_issue(
+            &self,
+            _: domain::CreateIssueRequest,
+            _: domain::policy::AuthorizedWrite,
+            _: &domain::ForgeCredential,
+        ) -> Result<domain::Issue, ServiceError> {
+            unimplemented!()
         }
 
         async fn open_change_request(

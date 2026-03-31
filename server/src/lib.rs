@@ -22,6 +22,7 @@ use utoipa_scalar::{Scalar, Servable};
         handlers::close_pull,
         handlers::comment_on_issue,
         handlers::comment_on_pull,
+        handlers::create_issue,
         handlers::get_contents,
         handlers::get_issue,
         handlers::get_issue_comments,
@@ -44,6 +45,7 @@ use utoipa_scalar::{Scalar, Servable};
         api::CommitPatchBody,
         api::CommitPatchResult,
         api::ContentsResult,
+        api::CreateIssueBody,
         api::ErrorBody,
         api::OpenPullBody,
         api::RebaseBranchBody,
@@ -98,7 +100,7 @@ pub fn build_router(state: AppState, enable_docs: bool) -> Router {
         )
         .route(
             "/api/v1/repos/{forge}/{owner}/{repo}/issues",
-            get(handlers::list_issues),
+            get(handlers::list_issues).post(handlers::create_issue),
         )
         .route(
             "/api/v1/repos/{forge}/{owner}/{repo}/issues/{index}",

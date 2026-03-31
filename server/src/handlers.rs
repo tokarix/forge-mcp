@@ -25,9 +25,10 @@ use domain::{
 use crate::api::AgentEventsQuery;
 use crate::api::{
     CommentBody, CommentOnIssueBody, CommitPatchBody, CommitPatchResult, ContentsPath,
-    ContentsQuery, ContentsResult, ErrorBody, IssuePath, ListIssuesQuery, ListPullsQuery,
-    OpenPullBody, PullPath, RebaseBranchBody, RebaseBranchResult, RebaseOperationBody, RepoPath,
-    ScheduleAutoMergeBody, SubmitReviewBody, UpdateChangeRequestBody, UpdateIssueBody,
+    ContentsQuery, ContentsResult, CreateIssueBody, ErrorBody, IssuePath, ListIssuesQuery,
+    ListPullsQuery, OpenPullBody, PullPath, RebaseBranchBody, RebaseBranchResult,
+    RebaseOperationBody, RepoPath, ScheduleAutoMergeBody, SubmitReviewBody,
+    UpdateChangeRequestBody, UpdateIssueBody,
 };
 use crate::auth::{AgentRegistry, extract_bearer_token};
 use tokio_stream::StreamExt;
@@ -1224,6 +1225,62 @@ pub async fn get_issue_comments(
 
 #[utoipa::path(
     post,
+    path = "/api/v1/repos/{forge}/{owner}/{repo}/issues",
+    params(
+        ("forge" = String, Path, description = "Forge alias"),
+        ("owner" = String, Path, description = "Repository owner"),
+        ("repo" = String, Path, description = "Repository name"),
+    ),
+    request_body = CreateIssueBody,
+    responses(
+        (status = 201, description = "Issue created"),
+        (status = 401, description = "Unauthorized", body = ErrorBody),
+    ),
+    security(("bearer" = []))
+)]
+/// POST /api/v1/repos/{forge}/{owner}/{repo}/issues
+pub async fn create_issue(
+    State(state): State<AppState>,
+    Path(path): Path<RepoPath>,
+    headers: HeaderMap,
+    Json(body): Json<CreateIssueBody>,
+) -> impl IntoResponse {
+    let forge = resolve_forge(&state.forge_registry, &path.forge)?;
+    let agent = resolve_agent(
+        &headers,
+        &state.agent_registry,
+        &path.forge,
+        &path.owner,
+        &path.repo,
+    )?;
+    let credential = resolve_credential(agent, &path.forge, forge);
+    let authorized = domain::policy::AuthorizedWrite {
+        policy: agent.policy.clone(),
+    };
+
+    let result = forge
+        .write_service
+        .create_issue(
+            domain::CreateIssueRequest {
+                agent: agent.identity.clone(),
+                body: body.body,
+                repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
+                title: body.title,
+            },
+            authorized,
+            &credential,
+        )
+        .await
+        .map_err(map_service_error)?;
+
+    Ok::<_, (StatusCode, Json<ErrorBody>)>((
+        StatusCode::CREATED,
+        Json(serde_json::to_value(&result).expect("serializable")),
+    ))
+}
+
+#[utoipa::path(
+    post,
     path = "/api/v1/repos/{forge}/{owner}/{repo}/issues/{index}/comments",
     params(
         ("forge" = String, Path, description = "Forge alias"),
@@ -1487,6 +1544,15 @@ mod tests {
             _: &str,
             _: &domain::ForgeCredential,
         ) -> Result<domain::IssueComment, forge::ForgeError> {
+            unimplemented!()
+        }
+        async fn create_issue(
+            &self,
+            _: &domain::RepositoryRef,
+            _: &str,
+            _: &str,
+            _: &domain::ForgeCredential,
+        ) -> Result<domain::Issue, forge::ForgeError> {
             unimplemented!()
         }
         async fn get_issue(
@@ -1796,6 +1862,23 @@ mod tests {
             })
         }
 
+        async fn create_issue(
+            &self,
+            request: domain::CreateIssueRequest,
+            _: domain::policy::AuthorizedWrite,
+            _: &domain::ForgeCredential,
+        ) -> Result<domain::Issue, ServiceError> {
+            Ok(domain::Issue {
+                assignees: vec![],
+                body: request.body,
+                index: 1,
+                labels: vec![],
+                state: "open".to_string(),
+                title: request.title,
+                url: "https://example.com/issues/1".to_string(),
+            })
+        }
+
         async fn open_change_request(
             &self,
             request: OpenChangeRequestRequest,
@@ -2044,6 +2127,35 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["content"], "file-content");
         assert_eq!(json["path"], "README.md");
+    }
+
+    #[tokio::test]
+    async fn create_issue_returns_201() {
+        let app = crate::build_router(test_state(), false);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos/test-forge/org/repo/issues")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"title": "Bug report", "body": "Something is broken"})
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["title"], "Bug report");
+        assert_eq!(json["body"], "Something is broken");
+        assert_eq!(json["state"], "open");
     }
 
     #[tokio::test]
