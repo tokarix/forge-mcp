@@ -85,6 +85,7 @@ pub struct ListPullsQuery {
 /// POST /api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}/automerge
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct ScheduleAutoMergeBody {
+    pub delete_branch_after_merge: Option<bool>,
     pub expected_head_sha: String,
     pub merge_style: String,
 }

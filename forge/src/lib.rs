@@ -7,7 +7,7 @@ use base64::Engine;
 use domain::{
     ChangeRequest, ChangeRequestComment, ChangeRequestCommentDetail, ChangeRequestEvent,
     ChangeRequestEventAction, ChangeRequestReview, ChangeRequestState, ForgeCredential, ForgeUser,
-    ReadRepositoryFileResponse, RepositoryRef,
+    ReadRepositoryFileResponse, RepositoryMergeSettings, RepositoryRef,
 };
 use hmac::{Hmac, Mac};
 use reqwest::StatusCode;
@@ -145,6 +145,13 @@ pub trait ForgeAdapter: Send + Sync {
         credential: &ForgeCredential,
     ) -> Result<Option<String>, ForgeError>;
 
+    /// Returns the repository's merge-related settings.
+    async fn get_repository_merge_settings(
+        &self,
+        repository: &RepositoryRef,
+        credential: &ForgeCredential,
+    ) -> Result<RepositoryMergeSettings, ForgeError>;
+
     /// Gets a single issue by index.
     async fn get_issue(
         &self,
@@ -184,6 +191,7 @@ pub trait ForgeAdapter: Send + Sync {
         index: u64,
         merge_style: &str,
         head_commit_id: &str,
+        delete_branch_after_merge: Option<bool>,
         credential: &ForgeCredential,
     ) -> Result<(), ForgeError>;
 
@@ -272,6 +280,37 @@ impl ForgejoAdapter {
             client: reqwest::Client::new(),
             config,
         }
+    }
+
+    async fn get_repository_merge_settings_response(
+        &self,
+        repository: &RepositoryRef,
+        credential: &ForgeCredential,
+    ) -> Result<ForgejoRepoResponse, ForgeError> {
+        let url = format!(
+            "{}/api/v1/repos/{}/{}",
+            self.config.base_url.trim_end_matches('/'),
+            repository.owner,
+            repository.name,
+        );
+
+        let effective_token = credential.token.as_deref().or(self.config.token.as_deref());
+        let mut request = self.client.get(&url);
+        if let Some(token) = effective_token {
+            request = request.bearer_auth(token);
+        }
+
+        let response = request.send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(ForgeError::UnexpectedStatus { status, body });
+        }
+
+        response
+            .json()
+            .await
+            .map_err(|e| ForgeError::InvalidPayload(e.to_string()))
     }
 }
 
@@ -435,7 +474,42 @@ struct ForgejoRepoResponse {
     allow_rebase: Option<bool>,
     allow_rebase_explicit: Option<bool>,
     allow_squash_merge: Option<bool>,
+    default_delete_branch_after_merge: Option<bool>,
     default_merge_style: Option<String>,
+}
+
+impl ForgejoRepoResponse {
+    fn allowed_merge_styles(&self) -> Vec<String> {
+        let mut styles = Vec::new();
+        if self.allow_merge_commits.unwrap_or(false) {
+            styles.push("merge".to_string());
+        }
+        if self.allow_rebase.unwrap_or(false) {
+            styles.push("rebase".to_string());
+        }
+        if self.allow_rebase_explicit.unwrap_or(false) {
+            styles.push("rebase-merge".to_string());
+        }
+        if self.allow_squash_merge.unwrap_or(false) {
+            styles.push("squash".to_string());
+        }
+        if self.allow_fast_forward_only_merge.unwrap_or(false) {
+            styles.push("fast-forward-only".to_string());
+        }
+        styles
+    }
+
+    fn normalized_default_merge_style(&self) -> Option<String> {
+        self.default_merge_style.clone().filter(|s| !s.is_empty())
+    }
+
+    fn into_repository_merge_settings(self) -> RepositoryMergeSettings {
+        RepositoryMergeSettings {
+            allowed_styles: self.allowed_merge_styles(),
+            default_delete_branch_after_merge: self.default_delete_branch_after_merge,
+            default_merge_style: self.normalized_default_merge_style(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -824,48 +898,10 @@ impl ForgeAdapter for ForgejoAdapter {
         repository: &RepositoryRef,
         credential: &ForgeCredential,
     ) -> Result<Vec<String>, ForgeError> {
-        let url = format!(
-            "{}/api/v1/repos/{}/{}",
-            self.config.base_url.trim_end_matches('/'),
-            repository.owner,
-            repository.name,
-        );
-
-        let effective_token = credential.token.as_deref().or(self.config.token.as_deref());
-        let mut request = self.client.get(&url);
-        if let Some(token) = effective_token {
-            request = request.bearer_auth(token);
-        }
-
-        let response = request.send().await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(ForgeError::UnexpectedStatus { status, body });
-        }
-
-        let repo: ForgejoRepoResponse = response
-            .json()
-            .await
-            .map_err(|e| ForgeError::InvalidPayload(e.to_string()))?;
-
-        let mut styles = Vec::new();
-        if repo.allow_merge_commits.unwrap_or(false) {
-            styles.push("merge".to_string());
-        }
-        if repo.allow_rebase.unwrap_or(false) {
-            styles.push("rebase".to_string());
-        }
-        if repo.allow_rebase_explicit.unwrap_or(false) {
-            styles.push("rebase-merge".to_string());
-        }
-        if repo.allow_squash_merge.unwrap_or(false) {
-            styles.push("squash".to_string());
-        }
-        if repo.allow_fast_forward_only_merge.unwrap_or(false) {
-            styles.push("fast-forward-only".to_string());
-        }
-        Ok(styles)
+        let repo = self
+            .get_repository_merge_settings_response(repository, credential)
+            .await?;
+        Ok(repo.allowed_merge_styles())
     }
 
     async fn get_change_request_comments(
@@ -1074,32 +1110,21 @@ impl ForgeAdapter for ForgejoAdapter {
         repository: &RepositoryRef,
         credential: &ForgeCredential,
     ) -> Result<Option<String>, ForgeError> {
-        let url = format!(
-            "{}/api/v1/repos/{}/{}",
-            self.config.base_url.trim_end_matches('/'),
-            repository.owner,
-            repository.name,
-        );
+        let repo = self
+            .get_repository_merge_settings_response(repository, credential)
+            .await?;
+        Ok(repo.normalized_default_merge_style())
+    }
 
-        let effective_token = credential.token.as_deref().or(self.config.token.as_deref());
-        let mut request = self.client.get(&url);
-        if let Some(token) = effective_token {
-            request = request.bearer_auth(token);
-        }
-
-        let response = request.send().await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(ForgeError::UnexpectedStatus { status, body });
-        }
-
-        let repo: ForgejoRepoResponse = response
-            .json()
-            .await
-            .map_err(|e| ForgeError::InvalidPayload(e.to_string()))?;
-
-        Ok(repo.default_merge_style.filter(|s| !s.is_empty()))
+    async fn get_repository_merge_settings(
+        &self,
+        repository: &RepositoryRef,
+        credential: &ForgeCredential,
+    ) -> Result<RepositoryMergeSettings, ForgeError> {
+        let repo = self
+            .get_repository_merge_settings_response(repository, credential)
+            .await?;
+        Ok(repo.into_repository_merge_settings())
     }
 
     async fn list_change_requests(
@@ -1183,6 +1208,7 @@ impl ForgeAdapter for ForgejoAdapter {
         index: u64,
         merge_style: &str,
         head_commit_id: &str,
+        delete_branch_after_merge: Option<bool>,
         credential: &ForgeCredential,
     ) -> Result<(), ForgeError> {
         let url = format!(
@@ -1193,11 +1219,23 @@ impl ForgeAdapter for ForgejoAdapter {
         );
 
         let effective_token = credential.token.as_deref().or(self.config.token.as_deref());
-        let mut request = self.client.post(&url).json(&serde_json::json!({
-            "do": merge_style,
-            "head_commit_id": head_commit_id,
-            "merge_when_checks_succeed": true,
-        }));
+        let mut body = serde_json::Map::new();
+        body.insert("do".to_string(), serde_json::json!(merge_style));
+        body.insert(
+            "head_commit_id".to_string(),
+            serde_json::json!(head_commit_id),
+        );
+        body.insert(
+            "merge_when_checks_succeed".to_string(),
+            serde_json::json!(true),
+        );
+        if let Some(delete_branch_after_merge) = delete_branch_after_merge {
+            body.insert(
+                "delete_branch_after_merge".to_string(),
+                serde_json::json!(delete_branch_after_merge),
+            );
+        }
+        let mut request = self.client.post(&url).json(&body);
         if let Some(token) = effective_token {
             request = request.bearer_auth(token);
         }
@@ -1634,7 +1672,7 @@ mod tests {
         let adapter = test_adapter(&mock.uri());
         let cred = ForgeCredential { token: None };
         adapter
-            .schedule_auto_merge(&test_repo(), 42, "rebase", "abc123sha", &cred)
+            .schedule_auto_merge(&test_repo(), 42, "rebase", "abc123sha", Some(true), &cred)
             .await
             .unwrap();
 
@@ -1645,6 +1683,34 @@ mod tests {
         assert_eq!(body["do"], "rebase");
         assert_eq!(body["merge_when_checks_succeed"], true);
         assert_eq!(body["head_commit_id"], "abc123sha");
+        assert_eq!(body["delete_branch_after_merge"], true);
+    }
+
+    #[tokio::test]
+    async fn schedule_auto_merge_omits_delete_branch_flag_when_unspecified() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path_regex(r"/api/v1/repos/.+/pulls/\d+/merge"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        adapter
+            .schedule_auto_merge(&test_repo(), 42, "rebase", "abc123sha", None, &cred)
+            .await
+            .unwrap();
+
+        let requests = mock.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        let body: serde_json::Value =
+            serde_json::from_slice(&requests[0].body).expect("valid JSON");
+        assert_eq!(body["do"], "rebase");
+        assert_eq!(body["merge_when_checks_succeed"], true);
+        assert_eq!(body["head_commit_id"], "abc123sha");
+        assert!(body.get("delete_branch_after_merge").is_none());
     }
 
     #[tokio::test]
@@ -1799,6 +1865,38 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result, None);
+    }
+
+    #[tokio::test]
+    async fn get_repository_merge_settings_returns_delete_branch_default() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/.+/.+"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "allow_merge_commits": true,
+                "allow_rebase": true,
+                "allow_rebase_explicit": false,
+                "allow_squash_merge": false,
+                "default_delete_branch_after_merge": true,
+                "default_merge_style": "rebase",
+                "id": 1,
+                "name": "repo",
+                "full_name": "org/repo"
+            })))
+            .mount(&mock)
+            .await;
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let result = adapter
+            .get_repository_merge_settings(&test_repo(), &cred)
+            .await
+            .unwrap();
+        assert_eq!(
+            result.allowed_styles,
+            vec!["merge".to_string(), "rebase".to_string()]
+        );
+        assert_eq!(result.default_delete_branch_after_merge, Some(true));
+        assert_eq!(result.default_merge_style, Some("rebase".to_string()));
     }
 
     #[tokio::test]

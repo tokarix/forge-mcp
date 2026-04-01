@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use domain::{
     AgentIdentity, AutoMergeFailedEvent, ForgeCredential, PullRequestReviewEvent,
-    ScheduleAutoMergeRequest, ServiceError,
+    RepositoryMergeSettings, ScheduleAutoMergeRequest, ServiceError,
 };
 use forge::ForgeError;
 
@@ -44,23 +44,43 @@ impl AutoMergeService {
             token: forge.token.clone(),
         };
 
-        let merge_style =
-            match Self::choose_merge_style(&*forge.adapter, &event.repository, &credential).await {
-                Ok(s) => s,
-                Err(e) => {
-                    let msg = e.to_string();
-                    tracing::error!(
-                        forge = %event.repository.alias,
-                        owner = %event.repository.owner,
-                        repo = %event.repository.name,
-                        pr = event.index,
-                        error = %msg,
-                        "auto-merge: failed to choose merge style",
-                    );
-                    self.publish_failure(&event, &msg);
-                    return;
-                }
-            };
+        let merge_settings = match forge
+            .adapter
+            .get_repository_merge_settings(&event.repository, &credential)
+            .await
+        {
+            Ok(settings) => settings,
+            Err(e) => {
+                let msg = e.to_string();
+                tracing::error!(
+                    forge = %event.repository.alias,
+                    owner = %event.repository.owner,
+                    repo = %event.repository.name,
+                    pr = event.index,
+                    error = %msg,
+                    "auto-merge: failed to load merge settings",
+                );
+                self.publish_failure(&event, &msg);
+                return;
+            }
+        };
+
+        let merge_style = match Self::choose_merge_style(&merge_settings) {
+            Ok(s) => s,
+            Err(e) => {
+                let msg = e.to_string();
+                tracing::error!(
+                    forge = %event.repository.alias,
+                    owner = %event.repository.owner,
+                    repo = %event.repository.name,
+                    pr = event.index,
+                    error = %msg,
+                    "auto-merge: failed to choose merge style",
+                );
+                self.publish_failure(&event, &msg);
+                return;
+            }
+        };
 
         let agent = AgentIdentity {
             agent_id: "system".to_string(),
@@ -69,6 +89,7 @@ impl AutoMergeService {
 
         let request = ScheduleAutoMergeRequest {
             agent,
+            delete_branch_after_merge: merge_settings.default_delete_branch_after_merge,
             expected_head_sha: event.head_sha.clone(),
             index: event.index,
             merge_style,
@@ -107,27 +128,15 @@ impl AutoMergeService {
     ///
     /// Returns an error if the forge request fails or no merge styles are
     /// allowed.
-    async fn choose_merge_style(
-        adapter: &dyn forge::ForgeAdapter,
-        repository: &domain::RepositoryRef,
-        credential: &ForgeCredential,
-    ) -> Result<String, ForgeError> {
-        let allowed = adapter
-            .get_allowed_merge_styles(repository, credential)
-            .await?;
-
-        if allowed.is_empty() {
+    fn choose_merge_style(settings: &RepositoryMergeSettings) -> Result<String, ForgeError> {
+        if settings.allowed_styles.is_empty() {
             return Err(ForgeError::InvalidPayload(
                 "repository has no allowed merge styles".to_string(),
             ));
         }
 
-        let default = adapter
-            .get_default_merge_style(repository, credential)
-            .await?;
-
-        if let Some(ref d) = default
-            && allowed.contains(d)
+        if let Some(ref d) = settings.default_merge_style
+            && settings.allowed_styles.contains(d)
         {
             return Ok(d.clone());
         }
@@ -135,13 +144,13 @@ impl AutoMergeService {
         // Fallback preference order.
         for preferred in &["rebase", "squash", "merge"] {
             let s = (*preferred).to_string();
-            if allowed.contains(&s) {
+            if settings.allowed_styles.contains(&s) {
                 return Ok(s);
             }
         }
 
         // Last resort: first allowed style.
-        Ok(allowed.into_iter().next().unwrap())
+        Ok(settings.allowed_styles.first().cloned().unwrap())
     }
 
     fn handle_error(&self, event: &PullRequestReviewEvent, error: &ServiceError) {
@@ -190,346 +199,70 @@ impl AutoMergeService {
 
 #[cfg(test)]
 mod tests {
-    use async_trait::async_trait;
-    use domain::{
-        ChangeRequest, ChangeRequestComment, ChangeRequestCommentDetail, ChangeRequestReview,
-        ChangeRequestState, ForgeCredential, ForgeKind, ForgeUser, Issue, IssueComment,
-        ReadRepositoryFileResponse, RepositoryRef,
-    };
-    use forge::{ForgeError, ForgeWebhookAdapter, ForgeWebhookError};
+    use domain::RepositoryMergeSettings;
 
     use super::AutoMergeService;
 
-    // --- Test adapter for merge style selection ---
-
-    struct MergeStyleTestAdapter {
-        allowed: Vec<String>,
-        default: Option<String>,
-    }
-
-    #[async_trait]
-    impl forge::ForgeAdapter for MergeStyleTestAdapter {
-        async fn get_authenticated_user(
-            &self,
-            _credential: &ForgeCredential,
-        ) -> Result<ForgeUser, ForgeError> {
-            unimplemented!()
-        }
-
-        async fn assign_issue(
-            &self,
-            _repository: &RepositoryRef,
-            _index: u64,
-            _assignee: &str,
-            _credential: &ForgeCredential,
-        ) -> Result<Issue, ForgeError> {
-            unimplemented!()
-        }
-
-        async fn close_change_request(
-            &self,
-            _repository: &RepositoryRef,
-            _index: u64,
-            _credential: &ForgeCredential,
-        ) -> Result<ChangeRequest, ForgeError> {
-            unimplemented!()
-        }
-
-        async fn close_issue(
-            &self,
-            _repository: &RepositoryRef,
-            _index: u64,
-            _credential: &ForgeCredential,
-        ) -> Result<Issue, ForgeError> {
-            unimplemented!()
-        }
-
-        async fn comment_on_issue(
-            &self,
-            _repository: &RepositoryRef,
-            _index: u64,
-            _body: &str,
-            _credential: &ForgeCredential,
-        ) -> Result<IssueComment, ForgeError> {
-            unimplemented!()
-        }
-
-        async fn comment_on_change_request(
-            &self,
-            _repository: &RepositoryRef,
-            _index: u64,
-            _body: &str,
-            _credential: &ForgeCredential,
-        ) -> Result<ChangeRequestComment, ForgeError> {
-            unimplemented!()
-        }
-
-        async fn create_change_request(
-            &self,
-            _repository: &RepositoryRef,
-            _title: &str,
-            _body: &str,
-            _head_branch: &str,
-            _base_branch: &str,
-            _credential: &ForgeCredential,
-        ) -> Result<ChangeRequest, ForgeError> {
-            unimplemented!()
-        }
-
-        async fn create_issue(
-            &self,
-            _repository: &RepositoryRef,
-            _title: &str,
-            _body: &str,
-            _credential: &ForgeCredential,
-        ) -> Result<Issue, ForgeError> {
-            unimplemented!()
-        }
-
-        async fn get_allowed_merge_styles(
-            &self,
-            _repository: &RepositoryRef,
-            _credential: &ForgeCredential,
-        ) -> Result<Vec<String>, ForgeError> {
-            Ok(self.allowed.clone())
-        }
-
-        async fn get_change_request_comments(
-            &self,
-            _repository: &RepositoryRef,
-            _index: u64,
-            _credential: &ForgeCredential,
-        ) -> Result<Vec<ChangeRequestCommentDetail>, ForgeError> {
-            unimplemented!()
-        }
-
-        async fn get_change_request(
-            &self,
-            _repository: &RepositoryRef,
-            _index: u64,
-            _credential: &ForgeCredential,
-        ) -> Result<ChangeRequest, ForgeError> {
-            unimplemented!()
-        }
-
-        async fn get_change_request_diff(
-            &self,
-            _repository: &RepositoryRef,
-            _index: u64,
-        ) -> Result<String, ForgeError> {
-            unimplemented!()
-        }
-
-        async fn get_default_merge_style(
-            &self,
-            _repository: &RepositoryRef,
-            _credential: &ForgeCredential,
-        ) -> Result<Option<String>, ForgeError> {
-            Ok(self.default.clone())
-        }
-
-        async fn get_issue(
-            &self,
-            _repository: &RepositoryRef,
-            _index: u64,
-            _credential: &ForgeCredential,
-        ) -> Result<Issue, ForgeError> {
-            unimplemented!()
-        }
-
-        async fn get_issue_comments(
-            &self,
-            _repository: &RepositoryRef,
-            _index: u64,
-            _credential: &ForgeCredential,
-        ) -> Result<Vec<IssueComment>, ForgeError> {
-            unimplemented!()
-        }
-
-        async fn list_change_requests(
-            &self,
-            _repository: &RepositoryRef,
-            _state: Option<&ChangeRequestState>,
-        ) -> Result<Vec<ChangeRequest>, ForgeError> {
-            unimplemented!()
-        }
-
-        async fn list_issues(
-            &self,
-            _repository: &RepositoryRef,
-            _state: Option<&str>,
-            _credential: &ForgeCredential,
-        ) -> Result<Vec<Issue>, ForgeError> {
-            unimplemented!()
-        }
-
-        async fn schedule_auto_merge(
-            &self,
-            _repository: &RepositoryRef,
-            _index: u64,
-            _merge_style: &str,
-            _head_commit_id: &str,
-            _credential: &ForgeCredential,
-        ) -> Result<(), ForgeError> {
-            unimplemented!()
-        }
-
-        async fn read_repository_file(
-            &self,
-            _repository: &RepositoryRef,
-            _path: &str,
-            _git_ref: Option<&str>,
-        ) -> Result<ReadRepositoryFileResponse, ForgeError> {
-            unimplemented!()
-        }
-
-        async fn submit_change_request_review(
-            &self,
-            _repository: &RepositoryRef,
-            _index: u64,
-            _body: &str,
-            _event: &str,
-            _credential: &ForgeCredential,
-        ) -> Result<ChangeRequestReview, ForgeError> {
-            unimplemented!()
-        }
-
-        async fn update_change_request(
-            &self,
-            _repository: &RepositoryRef,
-            _index: u64,
-            _title: Option<&str>,
-            _body: Option<&str>,
-            _credential: &ForgeCredential,
-        ) -> Result<ChangeRequest, ForgeError> {
-            unimplemented!()
-        }
-    }
-
-    impl ForgeWebhookAdapter for MergeStyleTestAdapter {
-        fn verify_and_parse_webhook_event(
-            &self,
-            _headers: &[(String, String)],
-            _body: &[u8],
-            _forge_alias: &str,
-            _forge_kind: ForgeKind,
-            _host: &str,
-            _secret: &str,
-        ) -> Result<Option<domain::WebhookEvent>, ForgeWebhookError> {
-            unimplemented!()
-        }
-    }
-
-    fn test_repo() -> RepositoryRef {
-        RepositoryRef {
-            alias: "test".to_string(),
-            forge: ForgeKind::Forgejo,
-            host: "example.com".to_string(),
-            name: "repo".to_string(),
-            owner: "owner".to_string(),
-        }
-    }
-
-    fn test_credential() -> ForgeCredential {
-        ForgeCredential {
-            token: Some("tok".to_string()),
+    fn test_merge_settings(
+        allowed_styles: Vec<&str>,
+        default_merge_style: Option<&str>,
+    ) -> RepositoryMergeSettings {
+        RepositoryMergeSettings {
+            allowed_styles: allowed_styles.into_iter().map(str::to_string).collect(),
+            default_delete_branch_after_merge: None,
+            default_merge_style: default_merge_style.map(str::to_string),
         }
     }
 
     #[tokio::test]
     async fn choose_merge_style_prefers_default_when_allowed() {
-        let adapter = MergeStyleTestAdapter {
-            allowed: vec![
-                "merge".to_string(),
-                "rebase".to_string(),
-                "squash".to_string(),
-            ],
-            default: Some("squash".to_string()),
-        };
-        let result =
-            AutoMergeService::choose_merge_style(&adapter, &test_repo(), &test_credential())
-                .await
-                .unwrap();
+        let settings = test_merge_settings(vec!["merge", "rebase", "squash"], Some("squash"));
+        let result = AutoMergeService::choose_merge_style(&settings).unwrap();
         assert_eq!(result, "squash");
     }
 
     #[tokio::test]
     async fn choose_merge_style_falls_back_when_default_not_allowed() {
-        let adapter = MergeStyleTestAdapter {
-            allowed: vec!["merge".to_string(), "squash".to_string()],
-            default: Some("rebase".to_string()),
-        };
-        let result =
-            AutoMergeService::choose_merge_style(&adapter, &test_repo(), &test_credential())
-                .await
-                .unwrap();
+        let settings = test_merge_settings(vec!["merge", "squash"], Some("rebase"));
+        let result = AutoMergeService::choose_merge_style(&settings).unwrap();
         assert_eq!(result, "squash");
     }
 
     #[tokio::test]
     async fn choose_merge_style_falls_back_to_merge_last() {
-        let adapter = MergeStyleTestAdapter {
-            allowed: vec!["merge".to_string()],
-            default: Some("rebase".to_string()),
-        };
-        let result =
-            AutoMergeService::choose_merge_style(&adapter, &test_repo(), &test_credential())
-                .await
-                .unwrap();
+        let settings = test_merge_settings(vec!["merge"], Some("rebase"));
+        let result = AutoMergeService::choose_merge_style(&settings).unwrap();
         assert_eq!(result, "merge");
     }
 
     #[tokio::test]
     async fn choose_merge_style_errors_when_no_styles_allowed() {
-        let adapter = MergeStyleTestAdapter {
-            allowed: vec![],
-            default: None,
-        };
-        let result =
-            AutoMergeService::choose_merge_style(&adapter, &test_repo(), &test_credential()).await;
+        let settings = test_merge_settings(vec![], None);
+        let result = AutoMergeService::choose_merge_style(&settings);
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn choose_merge_style_prefers_rebase_without_default() {
-        let adapter = MergeStyleTestAdapter {
-            allowed: vec![
-                "merge".to_string(),
-                "rebase".to_string(),
-                "squash".to_string(),
-            ],
-            default: None,
-        };
-        let result =
-            AutoMergeService::choose_merge_style(&adapter, &test_repo(), &test_credential())
-                .await
-                .unwrap();
+        let settings = test_merge_settings(vec!["merge", "rebase", "squash"], None);
+        let result = AutoMergeService::choose_merge_style(&settings).unwrap();
         assert_eq!(result, "rebase");
     }
 
     #[tokio::test]
     async fn choose_merge_style_prefers_fast_forward_only_default() {
-        let adapter = MergeStyleTestAdapter {
-            allowed: vec!["rebase".to_string(), "fast-forward-only".to_string()],
-            default: Some("fast-forward-only".to_string()),
-        };
-        let result =
-            AutoMergeService::choose_merge_style(&adapter, &test_repo(), &test_credential())
-                .await
-                .unwrap();
+        let settings = test_merge_settings(
+            vec!["rebase", "fast-forward-only"],
+            Some("fast-forward-only"),
+        );
+        let result = AutoMergeService::choose_merge_style(&settings).unwrap();
         assert_eq!(result, "fast-forward-only");
     }
 
     #[tokio::test]
     async fn choose_merge_style_falls_back_to_rebase_merge_when_needed() {
-        let adapter = MergeStyleTestAdapter {
-            allowed: vec!["rebase-merge".to_string()],
-            default: None,
-        };
-        let result =
-            AutoMergeService::choose_merge_style(&adapter, &test_repo(), &test_credential())
-                .await
-                .unwrap();
+        let settings = test_merge_settings(vec!["rebase-merge"], None);
+        let result = AutoMergeService::choose_merge_style(&settings).unwrap();
         assert_eq!(result, "rebase-merge");
     }
 }

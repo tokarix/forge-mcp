@@ -98,6 +98,13 @@ pub struct ChangeRequest {
     pub url: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepositoryMergeSettings {
+    pub allowed_styles: Vec<String>,
+    pub default_delete_branch_after_merge: Option<bool>,
+    pub default_merge_style: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ChannelEvent {
     pub content: String,
@@ -713,6 +720,7 @@ pub struct RebaseBranchResponse {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ScheduleAutoMergeRequest {
     pub agent: AgentIdentity,
+    pub delete_branch_after_merge: Option<bool>,
     pub expected_head_sha: String,
     pub index: u64,
     pub merge_style: String,

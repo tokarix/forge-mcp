@@ -1026,6 +1026,7 @@ pub async fn schedule_auto_merge(
         .schedule_auto_merge(
             ScheduleAutoMergeRequest {
                 agent: agent.identity.clone(),
+                delete_branch_after_merge: body.delete_branch_after_merge,
                 expected_head_sha: body.expected_head_sha,
                 index: path.index,
                 merge_style: body.merge_style,
@@ -1665,6 +1666,13 @@ mod tests {
         ) -> Result<Option<String>, forge::ForgeError> {
             unimplemented!()
         }
+        async fn get_repository_merge_settings(
+            &self,
+            _: &domain::RepositoryRef,
+            _: &domain::ForgeCredential,
+        ) -> Result<domain::RepositoryMergeSettings, forge::ForgeError> {
+            unimplemented!()
+        }
         async fn list_change_requests(
             &self,
             _: &domain::RepositoryRef,
@@ -1686,6 +1694,7 @@ mod tests {
             _: u64,
             _: &str,
             _: &str,
+            _: Option<bool>,
             _: &domain::ForgeCredential,
         ) -> Result<(), forge::ForgeError> {
             unimplemented!()

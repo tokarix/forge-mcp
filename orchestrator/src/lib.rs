@@ -962,20 +962,28 @@ where
             )));
         }
 
-        // 5. Validate merge style is allowed by the repository.
-        let allowed = self
+        // 5. Load merge settings for validation and default behavior.
+        let merge_settings = self
             .adapter
-            .get_allowed_merge_styles(&request.repository, credential)
+            .get_repository_merge_settings(&request.repository, credential)
             .await
             .map_err(|e| ServiceError::Upstream(e.to_string()))?;
 
-        if !allowed.iter().any(|s| s == &request.merge_style) {
+        if !merge_settings
+            .allowed_styles
+            .iter()
+            .any(|s| s == &request.merge_style)
+        {
             return Err(ServiceError::Validation(format!(
                 "merge style '{}' is not allowed by this repository (allowed: {})",
                 request.merge_style,
-                allowed.join(", "),
+                merge_settings.allowed_styles.join(", "),
             )));
         }
+
+        let delete_branch_after_merge = request
+            .delete_branch_after_merge
+            .or(merge_settings.default_delete_branch_after_merge);
 
         // 6. Audit before action
         self.audit_sink
@@ -998,6 +1006,7 @@ where
                 request.index,
                 &request.merge_style,
                 &current_sha,
+                delete_branch_after_merge,
                 credential,
             )
             .await
@@ -1110,7 +1119,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use audit::{AuditError, AuditRecord, AuditSink, InMemoryAuditSink};
     use domain::{
@@ -1289,6 +1298,14 @@ mod tests {
             unimplemented!()
         }
 
+        async fn get_repository_merge_settings(
+            &self,
+            _repository: &RepositoryRef,
+            _credential: &ForgeCredential,
+        ) -> Result<domain::RepositoryMergeSettings, ForgeError> {
+            unimplemented!()
+        }
+
         async fn list_change_requests(
             &self,
             _repository: &RepositoryRef,
@@ -1317,6 +1334,7 @@ mod tests {
             _index: u64,
             _merge_style: &str,
             _head_commit_id: &str,
+            _delete_branch_after_merge: Option<bool>,
             _credential: &domain::ForgeCredential,
         ) -> Result<(), ForgeError> {
             unimplemented!()
@@ -1490,6 +1508,14 @@ mod tests {
             unimplemented!()
         }
 
+        async fn get_repository_merge_settings(
+            &self,
+            _repository: &RepositoryRef,
+            _credential: &ForgeCredential,
+        ) -> Result<domain::RepositoryMergeSettings, ForgeError> {
+            unimplemented!()
+        }
+
         async fn list_change_requests(
             &self,
             _repository: &RepositoryRef,
@@ -1513,6 +1539,7 @@ mod tests {
             _index: u64,
             _merge_style: &str,
             _head_commit_id: &str,
+            _delete_branch_after_merge: Option<bool>,
             _credential: &domain::ForgeCredential,
         ) -> Result<(), ForgeError> {
             unimplemented!()
@@ -1829,6 +1856,14 @@ mod tests {
             unimplemented!()
         }
 
+        async fn get_repository_merge_settings(
+            &self,
+            _repository: &RepositoryRef,
+            _credential: &ForgeCredential,
+        ) -> Result<domain::RepositoryMergeSettings, ForgeError> {
+            unimplemented!()
+        }
+
         async fn list_change_requests(
             &self,
             _repository: &RepositoryRef,
@@ -1852,6 +1887,7 @@ mod tests {
             _index: u64,
             _merge_style: &str,
             _head_commit_id: &str,
+            _delete_branch_after_merge: Option<bool>,
             _credential: &domain::ForgeCredential,
         ) -> Result<(), ForgeError> {
             unimplemented!()
@@ -2359,6 +2395,14 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             unimplemented!()
         }
 
+        async fn get_repository_merge_settings(
+            &self,
+            _repository: &RepositoryRef,
+            _credential: &ForgeCredential,
+        ) -> Result<domain::RepositoryMergeSettings, ForgeError> {
+            unimplemented!()
+        }
+
         async fn list_change_requests(
             &self,
             _repository: &RepositoryRef,
@@ -2382,6 +2426,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             _index: u64,
             _merge_style: &str,
             _head_commit_id: &str,
+            _delete_branch_after_merge: Option<bool>,
             _credential: &domain::ForgeCredential,
         ) -> Result<(), ForgeError> {
             unimplemented!()
@@ -2776,6 +2821,14 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             unimplemented!()
         }
 
+        async fn get_repository_merge_settings(
+            &self,
+            _repository: &RepositoryRef,
+            _credential: &ForgeCredential,
+        ) -> Result<domain::RepositoryMergeSettings, ForgeError> {
+            unimplemented!()
+        }
+
         async fn list_change_requests(
             &self,
             _: &RepositoryRef,
@@ -2799,6 +2852,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             _: u64,
             _: &str,
             _: &str,
+            _: Option<bool>,
             _: &domain::ForgeCredential,
         ) -> Result<(), ForgeError> {
             unimplemented!()
@@ -2872,15 +2926,26 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
 
     struct AutoMergeTestForgeAdapter {
         allowed_merge_styles: Vec<String>,
+        default_delete_branch_after_merge: Option<bool>,
         head_sha: Option<String>,
+        recorded_delete_branch_after_merge: Mutex<Vec<Option<bool>>>,
     }
 
     impl AutoMergeTestForgeAdapter {
         fn new(head_sha: &str) -> Self {
             Self {
                 allowed_merge_styles: vec!["rebase".to_string(), "squash".to_string()],
+                default_delete_branch_after_merge: Some(true),
                 head_sha: Some(head_sha.to_string()),
+                recorded_delete_branch_after_merge: Mutex::new(Vec::new()),
             }
+        }
+
+        fn recorded_delete_branch_after_merge(&self) -> Vec<Option<bool>> {
+            self.recorded_delete_branch_after_merge
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
         }
     }
 
@@ -3039,6 +3104,18 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             Ok(Some("rebase".to_string()))
         }
 
+        async fn get_repository_merge_settings(
+            &self,
+            _repository: &RepositoryRef,
+            _credential: &ForgeCredential,
+        ) -> Result<domain::RepositoryMergeSettings, ForgeError> {
+            Ok(domain::RepositoryMergeSettings {
+                allowed_styles: self.allowed_merge_styles.clone(),
+                default_delete_branch_after_merge: self.default_delete_branch_after_merge,
+                default_merge_style: Some("rebase".to_string()),
+            })
+        }
+
         async fn list_change_requests(
             &self,
             _: &RepositoryRef,
@@ -3062,8 +3139,13 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             _index: u64,
             _merge_style: &str,
             _head_commit_id: &str,
+            delete_branch_after_merge: Option<bool>,
             _credential: &domain::ForgeCredential,
         ) -> Result<(), ForgeError> {
+            self.recorded_delete_branch_after_merge
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(delete_branch_after_merge);
             Ok(())
         }
 
@@ -3099,6 +3181,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
                 agent_id: "test-agent".to_string(),
                 session_id: "test-session".to_string(),
             },
+            delete_branch_after_merge: None,
             expected_head_sha: expected_head_sha.to_string(),
             index: 42,
             merge_style: merge_style.to_string(),
@@ -3170,7 +3253,9 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
     async fn schedule_auto_merge_missing_head_sha() {
         let adapter = Arc::new(AutoMergeTestForgeAdapter {
             allowed_merge_styles: vec!["rebase".to_string(), "squash".to_string()],
+            default_delete_branch_after_merge: Some(true),
             head_sha: None,
+            recorded_delete_branch_after_merge: Mutex::new(Vec::new()),
         });
         let audit = Arc::new(InMemoryAuditSink::new());
         let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
@@ -3241,6 +3326,51 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             other => panic!("expected Validation error, got: {other:?}"),
         }
         assert_eq!(audit.records().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn schedule_auto_merge_uses_repo_default_delete_branch_setting() {
+        let adapter = Arc::new(AutoMergeTestForgeAdapter::new("abc123"));
+        let audit = Arc::new(InMemoryAuditSink::new());
+        let orchestrator = WriteOrchestrator::new(Arc::clone(&adapter), Arc::clone(&audit));
+
+        orchestrator
+            .schedule_auto_merge(
+                auto_merge_test_request("rebase", "abc123"),
+                default_authorized(),
+                &domain::ForgeCredential { token: None },
+            )
+            .await
+            .expect("should succeed");
+
+        assert_eq!(
+            adapter.recorded_delete_branch_after_merge(),
+            vec![Some(true)]
+        );
+    }
+
+    #[tokio::test]
+    async fn schedule_auto_merge_prefers_explicit_delete_branch_override() {
+        let adapter = Arc::new(AutoMergeTestForgeAdapter::new("abc123"));
+        let audit = Arc::new(InMemoryAuditSink::new());
+        let orchestrator = WriteOrchestrator::new(Arc::clone(&adapter), Arc::clone(&audit));
+
+        let mut request = auto_merge_test_request("rebase", "abc123");
+        request.delete_branch_after_merge = Some(false);
+
+        orchestrator
+            .schedule_auto_merge(
+                request,
+                default_authorized(),
+                &domain::ForgeCredential { token: None },
+            )
+            .await
+            .expect("should succeed");
+
+        assert_eq!(
+            adapter.recorded_delete_branch_after_merge(),
+            vec![Some(false)]
+        );
     }
 
     // --- update_change_request tests ---

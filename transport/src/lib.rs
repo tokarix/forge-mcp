@@ -379,6 +379,9 @@ pub struct ReadRepositoryFileTool {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ScheduleAutoMergeTool {
+    /// Optional override for whether to delete the source branch after merge.
+    /// If omitted, the repository's default behavior is used.
+    pub delete_branch_after_merge: Option<bool>,
     /// Expected head commit SHA -- prevents scheduling on a stale PR.
     pub expected_head_sha: String,
     /// Forge alias -- use `forge_info` to discover available aliases.
@@ -391,6 +394,14 @@ pub struct ScheduleAutoMergeTool {
     pub owner: String,
     /// Repository name.
     pub repo: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ScheduleAutoMergeBody {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    delete_branch_after_merge: Option<bool>,
+    expected_head_sha: String,
+    merge_style: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1412,10 +1423,11 @@ impl McpShim {
             &request.index.to_string(),
             "automerge",
         ])?;
-        let body = serde_json::json!({
-            "expected_head_sha": request.expected_head_sha,
-            "merge_style": request.merge_style,
-        });
+        let body = ScheduleAutoMergeBody {
+            delete_branch_after_merge: request.delete_branch_after_merge,
+            expected_head_sha: request.expected_head_sha,
+            merge_style: request.merge_style,
+        };
         self.gateway_post(url, &body).await
     }
 
@@ -1974,6 +1986,7 @@ mod tests {
             "owner": "org",
             "repo": "repo",
             "index": 42,
+            "delete_branch_after_merge": true,
             "expected_head_sha": "abc123",
             "merge_style": "rebase"
         })
@@ -1998,6 +2011,59 @@ mod tests {
         assert_eq!(requests.len(), 1);
         let body: serde_json::Value =
             serde_json::from_slice(&requests[0].body).expect("valid JSON");
+        assert_eq!(body["delete_branch_after_merge"], true);
+        assert_eq!(body["expected_head_sha"], "abc123");
+        assert_eq!(body["merge_style"], "rebase");
+
+        drop(client);
+        server_handle.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn schedule_auto_merge_omits_delete_branch_when_unspecified()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mock_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path(
+                "/api/v1/repos/test-forge/org/repo/pulls/42/automerge",
+            ))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&mock_server)
+            .await;
+
+        let (client, server_handle) =
+            spawn_shim_and_client(test_config(&mock_server.uri())).await?;
+
+        let args = serde_json::json!({
+            "forge": "test-forge",
+            "owner": "org",
+            "repo": "repo",
+            "index": 42,
+            "expected_head_sha": "abc123",
+            "merge_style": "rebase"
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+
+        let result = client
+            .call_tool(CallToolRequestParams::new("schedule_auto_merge").with_arguments(args))
+            .await?;
+
+        let text = result
+            .content
+            .first()
+            .and_then(|c| c.raw.as_text())
+            .map(|t| t.text.clone())
+            .expect("text result");
+        assert!(text.contains('{'));
+
+        let requests = mock_server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        let body: serde_json::Value =
+            serde_json::from_slice(&requests[0].body).expect("valid JSON");
+        assert!(body.get("delete_branch_after_merge").is_none());
         assert_eq!(body["expected_head_sha"], "abc123");
         assert_eq!(body["merge_style"], "rebase");
 
