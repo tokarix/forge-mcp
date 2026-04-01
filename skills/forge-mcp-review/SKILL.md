@@ -23,6 +23,7 @@ Use this skill for PR review work done through forge-mcp.
 7. Inspect the PR branch through the git proxy and run `git log --oneline <merge_base>..HEAD` to inspect the commit series. Prefer fetching the PR branch into an existing local repo and creating a detached `git worktree` for review so objects are reused without touching the active worktree. Fall back to a fresh clone only when no suitable local repo is available. This is required for evaluating commit hygiene regardless of diff size.
 8. Optionally, if the runtime supports subagents, delegate the review pass to a subagent using the prompt template below. Otherwise, perform the review directly in the main agent context.
 9. Validate the highest-signal findings locally, run verification if needed, and then post the review back to the PR.
+10. **Clean up temporary directories.** After posting the review, remove any worktrees and clones created during the review. If you created a detached worktree with `git worktree add`, remove it with `git worktree remove`. If you cloned into `/tmp`, remove the clone directory with `rm -rf`. This prevents `/tmp` from filling up across multiple reviews.
 
 ## Required forge-mcp Tools
 
@@ -106,4 +107,8 @@ PR branch. The final diff alone cannot reveal commit-structure problems.
 
 Read the current PR metadata, diff, and existing comments/reviews before concluding.
 Call out commit-structure violations as findings, not optional notes.
+
+After posting the review, clean up: remove any git worktrees you created
+with `git worktree remove` and delete any /tmp clone directories with
+`rm -rf`. Do not leave temporary directories behind.
 ```
