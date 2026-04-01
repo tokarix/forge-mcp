@@ -508,6 +508,62 @@ impl PullRequestReviewEventAction {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AutoMergeFailedEvent {
+    pub error: String,
+    pub head_sha: String,
+    pub index: u64,
+    pub repository: RepositoryRef,
+}
+
+impl PublishableEvent for AutoMergeFailedEvent {
+    fn dedupe_key(&self) -> String {
+        format!(
+            "{}:{}/{}:{}:{}:auto_merge_failed",
+            self.repository.alias,
+            self.repository.owner,
+            self.repository.name,
+            self.index,
+            self.head_sha,
+        )
+    }
+
+    fn event_name(&self) -> &str {
+        "auto_merge_failed"
+    }
+
+    fn repository_ref(&self) -> &RepositoryRef {
+        &self.repository
+    }
+
+    fn to_channel_event(&self) -> ChannelEvent {
+        ChannelEvent {
+            content: format!(
+                "auto_merge_failed on {}/{}/{}#{} at {}: {}",
+                self.repository.alias,
+                self.repository.owner,
+                self.repository.name,
+                self.index,
+                self.head_sha,
+                self.error,
+            ),
+            meta: ChannelEventMeta {
+                action: "failed".to_string(),
+                change_request: Some(self.index),
+                delivery_id: String::new(),
+                event_kind: "auto_merge_failed".to_string(),
+                forge_alias: self.repository.alias.clone(),
+                head_sha: Some(self.head_sha.clone()),
+                issue: None,
+                issue_comment: None,
+                owner: self.repository.owner.clone(),
+                repo: self.repository.name.clone(),
+                review_state: None,
+            },
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum WebhookEvent {
     ChangeRequest(ChangeRequestEvent),
@@ -1141,6 +1197,37 @@ mod tests {
         assert_eq!(channel.meta.issue_comment, None);
         assert_eq!(event.event_name(), "pull_request_review");
         assert_eq!(event.dedupe_key(), "test:delivery-3");
+    }
+
+    #[test]
+    fn auto_merge_failed_event_channel_event() {
+        use super::{AutoMergeFailedEvent, ForgeKind, PublishableEvent, RepositoryRef};
+        let event = AutoMergeFailedEvent {
+            error: "upstream timeout".to_string(),
+            head_sha: "abc123".to_string(),
+            index: 42,
+            repository: RepositoryRef {
+                alias: "forge1".to_string(),
+                forge: ForgeKind::Forgejo,
+                host: "example.com".to_string(),
+                name: "repo".to_string(),
+                owner: "org".to_string(),
+            },
+        };
+
+        assert_eq!(event.event_name(), "auto_merge_failed");
+        assert_eq!(
+            event.dedupe_key(),
+            "forge1:org/repo:42:abc123:auto_merge_failed"
+        );
+
+        let channel = event.to_channel_event();
+        assert_eq!(channel.meta.event_kind, "auto_merge_failed");
+        assert_eq!(channel.meta.change_request, Some(42));
+        assert_eq!(channel.meta.head_sha, Some("abc123".to_string()));
+        assert_eq!(channel.meta.forge_alias, "forge1");
+        assert_eq!(channel.meta.owner, "org");
+        assert_eq!(channel.meta.repo, "repo");
     }
 
     #[test]
