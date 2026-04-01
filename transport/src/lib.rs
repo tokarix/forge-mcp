@@ -224,7 +224,7 @@ pub struct CreateIssueTool {
     pub owner: String,
     /// Repository name.
     pub repo: String,
-    /// Issue title.
+    /// Issue title. Check for an existing open issue first to avoid duplicates.
     pub title: String,
 }
 
@@ -1069,8 +1069,11 @@ impl McpShim {
         self.gateway_post(url, &body).await
     }
 
-    /// Create a new issue.
-    #[tool(name = "create_issue", description = "Create a new issue.")]
+    /// Create a new issue after checking for an existing open issue.
+    #[tool(
+        name = "create_issue",
+        description = "Create a new issue. Check for an existing open issue first to avoid duplicates."
+    )]
     async fn create_issue(
         &self,
         Parameters(request): Parameters<CreateIssueTool>,

@@ -74,9 +74,14 @@ Most tools require a `forge` parameter — the alias of the target forge instanc
 | `submit_change_request_review` | Submit a formal review (APPROVED, REQUEST_CHANGES, COMMENT) |
 | `rebase_branch` | Squash (fixup) commits on a branch |
 | `schedule_auto_merge` | Schedule a PR for auto-merge when checks pass |
+| `create_issue` | Create a new issue |
 | `assign_issue` | Assign an issue to a user |
 | `close_issue` | Close an issue |
 | `comment_on_issue` | Post a comment on an issue |
+
+Before calling `create_issue`, check existing open issues with `list_issues`
+and inspect the closest match with `get_issue` / `get_issue_comments` so you
+do not file a duplicate.
 
 ### Write Workflow
 
