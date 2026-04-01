@@ -549,6 +549,13 @@ mod tests {
         ) -> Result<String, forge::ForgeError> {
             unimplemented!()
         }
+        async fn get_default_merge_style(
+            &self,
+            _: &domain::RepositoryRef,
+            _: &domain::ForgeCredential,
+        ) -> Result<Option<String>, forge::ForgeError> {
+            unimplemented!()
+        }
         async fn list_change_requests(
             &self,
             _: &domain::RepositoryRef,

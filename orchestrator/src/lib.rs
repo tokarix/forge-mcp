@@ -1281,6 +1281,14 @@ mod tests {
             unimplemented!()
         }
 
+        async fn get_default_merge_style(
+            &self,
+            _repository: &RepositoryRef,
+            _credential: &ForgeCredential,
+        ) -> Result<Option<String>, ForgeError> {
+            unimplemented!()
+        }
+
         async fn list_change_requests(
             &self,
             _repository: &RepositoryRef,
@@ -1471,6 +1479,14 @@ mod tests {
             _: &RepositoryRef,
             _: u64,
         ) -> Result<String, ForgeError> {
+            unimplemented!()
+        }
+
+        async fn get_default_merge_style(
+            &self,
+            _repository: &RepositoryRef,
+            _credential: &ForgeCredential,
+        ) -> Result<Option<String>, ForgeError> {
             unimplemented!()
         }
 
@@ -1802,6 +1818,14 @@ mod tests {
             _: &RepositoryRef,
             _: u64,
         ) -> Result<String, ForgeError> {
+            unimplemented!()
+        }
+
+        async fn get_default_merge_style(
+            &self,
+            _repository: &RepositoryRef,
+            _credential: &ForgeCredential,
+        ) -> Result<Option<String>, ForgeError> {
             unimplemented!()
         }
 
@@ -2327,6 +2351,14 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             unimplemented!()
         }
 
+        async fn get_default_merge_style(
+            &self,
+            _repository: &RepositoryRef,
+            _credential: &ForgeCredential,
+        ) -> Result<Option<String>, ForgeError> {
+            unimplemented!()
+        }
+
         async fn list_change_requests(
             &self,
             _repository: &RepositoryRef,
@@ -2736,6 +2768,14 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             unimplemented!()
         }
 
+        async fn get_default_merge_style(
+            &self,
+            _repository: &RepositoryRef,
+            _credential: &ForgeCredential,
+        ) -> Result<Option<String>, ForgeError> {
+            unimplemented!()
+        }
+
         async fn list_change_requests(
             &self,
             _: &RepositoryRef,
@@ -2989,6 +3029,14 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             _: u64,
         ) -> Result<String, ForgeError> {
             unimplemented!()
+        }
+
+        async fn get_default_merge_style(
+            &self,
+            _repository: &RepositoryRef,
+            _credential: &ForgeCredential,
+        ) -> Result<Option<String>, ForgeError> {
+            Ok(Some("rebase".to_string()))
         }
 
         async fn list_change_requests(

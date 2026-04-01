@@ -138,6 +138,13 @@ pub trait ForgeAdapter: Send + Sync {
         index: u64,
     ) -> Result<String, ForgeError>;
 
+    /// Returns the repository's default merge style, if configured.
+    async fn get_default_merge_style(
+        &self,
+        repository: &RepositoryRef,
+        credential: &ForgeCredential,
+    ) -> Result<Option<String>, ForgeError>;
+
     /// Gets a single issue by index.
     async fn get_issue(
         &self,
@@ -426,6 +433,7 @@ struct ForgejoRepoResponse {
     allow_merge_commits: Option<bool>,
     allow_rebase_explicit: Option<bool>,
     allow_squash_merge: Option<bool>,
+    default_merge_style: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1050,6 +1058,39 @@ impl ForgeAdapter for ForgejoAdapter {
             .map_err(|e| ForgeError::InvalidPayload(format!("failed to read diff body: {e}")))
     }
 
+    async fn get_default_merge_style(
+        &self,
+        repository: &RepositoryRef,
+        credential: &ForgeCredential,
+    ) -> Result<Option<String>, ForgeError> {
+        let url = format!(
+            "{}/api/v1/repos/{}/{}",
+            self.config.base_url.trim_end_matches('/'),
+            repository.owner,
+            repository.name,
+        );
+
+        let effective_token = credential.token.as_deref().or(self.config.token.as_deref());
+        let mut request = self.client.get(&url);
+        if let Some(token) = effective_token {
+            request = request.bearer_auth(token);
+        }
+
+        let response = request.send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(ForgeError::UnexpectedStatus { status, body });
+        }
+
+        let repo: ForgejoRepoResponse = response
+            .json()
+            .await
+            .map_err(|e| ForgeError::InvalidPayload(e.to_string()))?;
+
+        Ok(repo.default_merge_style.filter(|s| !s.is_empty()))
+    }
+
     async fn list_change_requests(
         &self,
         repository: &RepositoryRef,
@@ -1654,6 +1695,66 @@ mod tests {
             .unwrap();
 
         assert!(styles.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_default_merge_style_returns_style() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/.+/.+"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "allow_merge_commits": true, "allow_rebase_explicit": true, "allow_squash_merge": true,
+                "default_merge_style": "squash", "id": 1, "name": "repo", "full_name": "org/repo"
+            })))
+            .mount(&mock)
+            .await;
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let result = adapter
+            .get_default_merge_style(&test_repo(), &cred)
+            .await
+            .unwrap();
+        assert_eq!(result, Some("squash".to_string()));
+    }
+
+    #[tokio::test]
+    async fn get_default_merge_style_returns_none_when_missing() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/.+/.+"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "allow_merge_commits": true, "allow_rebase_explicit": true, "allow_squash_merge": true,
+                "id": 1, "name": "repo", "full_name": "org/repo"
+            })))
+            .mount(&mock)
+            .await;
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let result = adapter
+            .get_default_merge_style(&test_repo(), &cred)
+            .await
+            .unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[tokio::test]
+    async fn get_default_merge_style_returns_none_when_empty() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/.+/.+"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "allow_merge_commits": true, "allow_rebase_explicit": true, "allow_squash_merge": true,
+                "default_merge_style": "", "id": 1, "name": "repo", "full_name": "org/repo"
+            })))
+            .mount(&mock)
+            .await;
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let result = adapter
+            .get_default_merge_style(&test_repo(), &cred)
+            .await
+            .unwrap();
+        assert_eq!(result, None);
     }
 
     #[tokio::test]
