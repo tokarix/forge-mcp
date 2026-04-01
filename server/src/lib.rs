@@ -4,6 +4,7 @@
 
 pub mod api;
 pub mod auth;
+pub mod auto_merge;
 pub mod config;
 pub mod events;
 pub mod git_proxy;
