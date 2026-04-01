@@ -1537,7 +1537,7 @@ impl ForgeWebhookAdapter for ForgejoAdapter {
                 )))
             }
             WebhookEventType::Unknown(name) => {
-                eprintln!("ignoring unhandled webhook event type: {name}");
+                tracing::debug!(event_type = %name, "ignoring unhandled webhook event type");
                 Ok(None)
             }
         }

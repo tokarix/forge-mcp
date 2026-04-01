@@ -35,7 +35,7 @@ impl AutoMergeService {
         let forge = match self.forge_registry.get(alias) {
             Some(f) => f,
             None => {
-                eprintln!("auto-merge: unknown forge alias {alias}");
+                tracing::warn!(alias, "auto-merge: unknown forge");
                 return;
             }
         };
@@ -49,12 +49,13 @@ impl AutoMergeService {
                 Ok(s) => s,
                 Err(e) => {
                     let msg = e.to_string();
-                    eprintln!(
-                        "auto-merge: failed for {}/{}/{}#{}: {msg}",
-                        event.repository.alias,
-                        event.repository.owner,
-                        event.repository.name,
-                        event.index,
+                    tracing::error!(
+                        forge = %event.repository.alias,
+                        owner = %event.repository.owner,
+                        repo = %event.repository.name,
+                        pr = event.index,
+                        error = %msg,
+                        "auto-merge: failed to choose merge style",
                     );
                     self.publish_failure(&event, &msg);
                     return;
@@ -78,12 +79,22 @@ impl AutoMergeService {
             policy: domain::policy::PolicyConfig::default(),
         };
 
-        if let Err(e) = forge
+        match forge
             .write_service
             .schedule_auto_merge(request, authorized, &credential)
             .await
         {
-            self.handle_error(&event, &e);
+            Ok(()) => {
+                tracing::info!(
+                    forge = %event.repository.alias,
+                    owner = %event.repository.owner,
+                    repo = %event.repository.name,
+                    pr = event.index,
+                    head = %event.head_sha,
+                    "auto-merge: scheduled",
+                );
+            }
+            Err(e) => self.handle_error(&event, &e),
         }
     }
 
@@ -136,11 +147,23 @@ impl AutoMergeService {
     fn handle_error(&self, event: &PullRequestReviewEvent, error: &ServiceError) {
         let msg = error.to_string();
         if msg.contains("does not match current") || msg.contains("head SHA") {
+            tracing::debug!(
+                forge = %event.repository.alias,
+                owner = %event.repository.owner,
+                repo = %event.repository.name,
+                pr = event.index,
+                error = %msg,
+                "auto-merge: stale head, skipping",
+            );
             return;
         }
-        eprintln!(
-            "auto-merge: failed for {}/{}/{}#{}: {msg}",
-            event.repository.alias, event.repository.owner, event.repository.name, event.index,
+        tracing::error!(
+            forge = %event.repository.alias,
+            owner = %event.repository.owner,
+            repo = %event.repository.name,
+            pr = event.index,
+            error = %msg,
+            "auto-merge: failed to schedule",
         );
         self.publish_failure(event, &msg);
     }
@@ -153,7 +176,14 @@ impl AutoMergeService {
             repository: event.repository.clone(),
         };
         if let Err(e) = self.event_bus.publish(&fail) {
-            eprintln!("auto-merge: failed to publish failure event: {e}");
+            tracing::warn!(
+                forge = %event.repository.alias,
+                owner = %event.repository.owner,
+                repo = %event.repository.name,
+                pr = event.index,
+                error = %e,
+                "auto-merge: failed to publish failure event",
+            );
         }
     }
 }

@@ -23,6 +23,13 @@ fn server_version() -> String {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
+
     let config_path = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "forge-mcp.toml".to_string());
@@ -35,11 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     validate_config(&config).unwrap_or_else(|e| panic!("invalid configuration: {e}"));
 
-    eprintln!(
-        "forge-mcp {} — listening on {}",
-        server_version(),
-        config.server.listen
-    );
+    tracing::info!(version = %server_version(), listen = %config.server.listen, "forge-mcp starting");
 
     let audit_sink = Arc::new(InMemoryAuditSink::new());
     let client = reqwest::Client::new();
@@ -89,10 +92,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ),
         }
 
-        eprintln!(
-            "  forge '{}' → {}",
-            forge_config.alias, forge_config.base_url
-        );
+        tracing::info!(alias = %forge_config.alias, url = %forge_config.base_url, "registered forge");
     }
 
     let agent_registry = AgentRegistry::from_configs(&config.agents);
@@ -113,7 +113,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = build_router(state, config.server.enable_docs);
 
     let listener = tokio::net::TcpListener::bind(&config.server.listen).await?;
-    eprintln!("forge-mcp ready");
+    tracing::info!("forge-mcp ready");
     axum::serve(listener, app).await?;
 
     Ok(())

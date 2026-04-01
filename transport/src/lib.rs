@@ -797,7 +797,7 @@ impl McpShim {
                 },
             };
             if let Err(error) = Self::send_channel_notification(&peer, &startup_event).await {
-                eprintln!("failed to send startup channel spike: {error}");
+                tracing::warn!(error = %error, "failed to send startup channel spike");
             }
         }
 
@@ -815,7 +815,7 @@ impl McpShim {
             {
                 Ok(response) => response,
                 Err(error) => {
-                    eprintln!("event stream connection failed: {error}");
+                    tracing::warn!(error = %error, "event stream connection failed");
                     sleep_with_peer_check(&peer, backoff).await;
                     backoff = (backoff * 2).min(Duration::from_secs(10));
                     continue;
@@ -823,7 +823,7 @@ impl McpShim {
             };
 
             if !response.status().is_success() {
-                eprintln!("event stream returned HTTP {}", response.status());
+                tracing::warn!(status = %response.status(), "event stream returned error");
                 sleep_with_peer_check(&peer, backoff).await;
                 backoff = (backoff * 2).min(Duration::from_secs(10));
                 continue;
@@ -910,7 +910,7 @@ async fn buffer_sse_event(
     let envelope = match serde_json::from_str::<AgentEventEnvelope>(&event.data) {
         Ok(envelope) => envelope,
         Err(error) => {
-            eprintln!("dropping invalid SSE event payload: {error}");
+            tracing::warn!(error = %error, "dropping invalid SSE event payload");
             return;
         }
     };
@@ -927,7 +927,7 @@ async fn buffer_sse_event(
     // but will start working once anthropics/claude-code#36411 is fixed).
     {
         if let Err(error) = McpShim::send_channel_notification(peer, &envelope).await {
-            eprintln!("channel notification failed (expected): {error}");
+            tracing::debug!(error = %error, "channel notification failed (expected)");
         }
     }
 }
@@ -965,7 +965,7 @@ async fn read_event_stream(
                 return true;
             }
             Err(error) => {
-                eprintln!("event stream read failed: {error}");
+                tracing::warn!(error = %error, "event stream read failed");
                 return true;
             }
         }
