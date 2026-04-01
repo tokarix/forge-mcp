@@ -430,6 +430,7 @@ struct ForgejoLabelResponse {
 
 #[derive(Debug, Deserialize)]
 struct ForgejoRepoResponse {
+    allow_fast_forward_only_merge: Option<bool>,
     allow_merge_commits: Option<bool>,
     allow_rebase: Option<bool>,
     allow_rebase_explicit: Option<bool>,
@@ -849,13 +850,16 @@ impl ForgeAdapter for ForgejoAdapter {
             styles.push("merge".to_string());
         }
         if repo.allow_rebase.unwrap_or(false) {
-            styles.push("rebase-merge".to_string());
+            styles.push("rebase".to_string());
         }
         if repo.allow_rebase_explicit.unwrap_or(false) {
-            styles.push("rebase".to_string());
+            styles.push("rebase-merge".to_string());
         }
         if repo.allow_squash_merge.unwrap_or(false) {
             styles.push("squash".to_string());
+        }
+        if repo.allow_fast_forward_only_merge.unwrap_or(false) {
+            styles.push("fast-forward-only".to_string());
         }
         Ok(styles)
     }
@@ -1646,9 +1650,10 @@ mod tests {
         Mock::given(method("GET"))
             .and(path_regex(r"/api/v1/repos/.+/.+"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "allow_fast_forward_only_merge": false,
                 "allow_merge_commits": false,
-                "allow_rebase": false,
-                "allow_rebase_explicit": true,
+                "allow_rebase": true,
+                "allow_rebase_explicit": false,
                 "allow_squash_merge": true,
                 "default_merge_style": "rebase",
                 "id": 1,
@@ -1669,6 +1674,7 @@ mod tests {
         assert!(styles.contains(&"squash".to_string()));
         assert!(!styles.contains(&"merge".to_string()));
         assert!(!styles.contains(&"rebase-merge".to_string()));
+        assert!(!styles.contains(&"fast-forward-only".to_string()));
     }
 
     #[tokio::test]
@@ -1678,9 +1684,10 @@ mod tests {
         Mock::given(method("GET"))
             .and(path_regex(r"/api/v1/repos/.+/.+"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "allow_fast_forward_only_merge": false,
                 "allow_merge_commits": false,
-                "allow_rebase": true,
-                "allow_rebase_explicit": false,
+                "allow_rebase": false,
+                "allow_rebase_explicit": true,
                 "allow_squash_merge": false,
                 "default_merge_style": "rebase-merge",
                 "id": 1,
@@ -1698,6 +1705,36 @@ mod tests {
             .unwrap();
 
         assert_eq!(styles, vec!["rebase-merge"]);
+    }
+
+    #[tokio::test]
+    async fn get_allowed_merge_styles_includes_fast_forward_only() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/.+/.+"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "allow_fast_forward_only_merge": true,
+                "allow_merge_commits": false,
+                "allow_rebase": true,
+                "allow_rebase_explicit": false,
+                "allow_squash_merge": false,
+                "default_merge_style": "rebase",
+                "id": 1,
+                "name": "repo",
+                "full_name": "org/repo"
+            })))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let styles = adapter
+            .get_allowed_merge_styles(&test_repo(), &cred)
+            .await
+            .unwrap();
+
+        assert_eq!(styles, vec!["rebase", "fast-forward-only"]);
     }
 
     #[tokio::test]

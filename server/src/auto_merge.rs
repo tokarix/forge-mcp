@@ -476,4 +476,30 @@ mod tests {
                 .unwrap();
         assert_eq!(result, "rebase");
     }
+
+    #[tokio::test]
+    async fn choose_merge_style_prefers_fast_forward_only_default() {
+        let adapter = MergeStyleTestAdapter {
+            allowed: vec!["rebase".to_string(), "fast-forward-only".to_string()],
+            default: Some("fast-forward-only".to_string()),
+        };
+        let result =
+            AutoMergeService::choose_merge_style(&adapter, &test_repo(), &test_credential())
+                .await
+                .unwrap();
+        assert_eq!(result, "fast-forward-only");
+    }
+
+    #[tokio::test]
+    async fn choose_merge_style_falls_back_to_rebase_merge_when_needed() {
+        let adapter = MergeStyleTestAdapter {
+            allowed: vec!["rebase-merge".to_string()],
+            default: None,
+        };
+        let result =
+            AutoMergeService::choose_merge_style(&adapter, &test_repo(), &test_credential())
+                .await
+                .unwrap();
+        assert_eq!(result, "rebase-merge");
+    }
 }
