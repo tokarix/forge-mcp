@@ -453,7 +453,10 @@ impl WebhookEventType {
             "issue_comment" => Self::IssueComment,
             "issues" => Self::Issues,
             "pull_request" => Self::PullRequest,
-            "pull_request_review" => Self::PullRequestReview,
+            "pull_request_approved"
+            | "pull_request_comment"
+            | "pull_request_rejected"
+            | "pull_request_review" => Self::PullRequestReview,
             other => Self::Unknown(other.to_string()),
         }
     }
@@ -2155,6 +2158,62 @@ mod tests {
             )
             .expect("payload should parse");
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn forgejo_webhook_parses_pull_request_approved_event_type() {
+        let adapter = test_adapter("https://forge.example");
+        let body = serde_json::json!({
+            "action": "submitted",
+            "pull_request": {
+                "head": {
+                    "ref": "agent/claude/fix",
+                    "sha": "abc123def456"
+                },
+                "html_url": "https://forge.example/org/repo/pulls/7",
+                "number": 7,
+                "title": "Fix typo"
+            },
+            "repository": {
+                "name": "repo",
+                "owner": {
+                    "login": "org"
+                }
+            },
+            "review": {
+                "body": "Looks good!",
+                "id": 42,
+                "type": "pull_request_review_approved"
+            }
+        });
+        let body = serde_json::to_vec(&body).expect("valid JSON");
+        let signature = sign_payload("super-secret", &body);
+        let headers = vec![
+            (
+                "x-forgejo-event".to_string(),
+                "pull_request_approved".to_string(),
+            ),
+            ("x-forgejo-delivery".to_string(), "delivery-791".to_string()),
+            ("x-forgejo-signature".to_string(), signature),
+        ];
+
+        let event = adapter
+            .verify_and_parse_webhook_event(
+                &headers,
+                &body,
+                "internal",
+                domain::ForgeKind::Forgejo,
+                "https://forge.example",
+                "super-secret",
+            )
+            .expect("webhook should parse")
+            .expect("event should be supported");
+
+        let event = match event {
+            domain::WebhookEvent::PullRequestReview(e) => e,
+            other => panic!("expected PullRequestReview, got {other:?}"),
+        };
+        assert_eq!(event.review_state, "approved");
     }
 
     #[test]
