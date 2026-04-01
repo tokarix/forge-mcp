@@ -385,7 +385,7 @@ pub struct ScheduleAutoMergeTool {
     pub forge: String,
     /// Change request index number.
     pub index: u64,
-    /// Merge style: rebase, merge, squash, or fast-forward-only.
+    /// Merge style: rebase, rebase-merge, merge, squash, or fast-forward-only.
     pub merge_style: String,
     /// Repository owner or organization.
     pub owner: String,

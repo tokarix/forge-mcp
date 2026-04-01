@@ -932,10 +932,10 @@ where
     ) -> Result<(), ServiceError> {
         // 1. Validate merge_style
         match request.merge_style.as_str() {
-            "fast-forward-only" | "merge" | "rebase" | "squash" => {}
+            "fast-forward-only" | "merge" | "rebase" | "rebase-merge" | "squash" => {}
             other => {
                 return Err(ServiceError::Validation(format!(
-                    "invalid merge style '{other}': must be rebase, merge, squash, or fast-forward-only"
+                    "invalid merge style '{other}': must be rebase, rebase-merge, merge, squash, or fast-forward-only"
                 )));
             }
         }

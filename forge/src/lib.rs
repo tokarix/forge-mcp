@@ -431,6 +431,7 @@ struct ForgejoLabelResponse {
 #[derive(Debug, Deserialize)]
 struct ForgejoRepoResponse {
     allow_merge_commits: Option<bool>,
+    allow_rebase: Option<bool>,
     allow_rebase_explicit: Option<bool>,
     allow_squash_merge: Option<bool>,
     default_merge_style: Option<String>,
@@ -847,10 +848,12 @@ impl ForgeAdapter for ForgejoAdapter {
         if repo.allow_merge_commits.unwrap_or(false) {
             styles.push("merge".to_string());
         }
+        if repo.allow_rebase.unwrap_or(false) {
+            styles.push("rebase-merge".to_string());
+        }
         if repo.allow_rebase_explicit.unwrap_or(false) {
             styles.push("rebase".to_string());
         }
-
         if repo.allow_squash_merge.unwrap_or(false) {
             styles.push("squash".to_string());
         }
@@ -1669,7 +1672,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_allowed_merge_styles_ignores_rebase_merge() {
+    async fn get_allowed_merge_styles_includes_rebase_merge() {
         let mock = MockServer::start().await;
 
         Mock::given(method("GET"))
@@ -1694,7 +1697,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(styles.is_empty());
+        assert_eq!(styles, vec!["rebase-merge"]);
     }
 
     #[tokio::test]
