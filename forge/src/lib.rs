@@ -537,8 +537,9 @@ struct ForgejoWebhookPullRequestReviewEventPayload {
 
 #[derive(Debug, Deserialize)]
 struct ForgejoWebhookReview {
-    body: String,
-    id: u64,
+    #[serde(alias = "content")]
+    body: Option<String>,
+    id: Option<u64>,
     #[serde(rename = "type")]
     review_type: String,
 }
@@ -1497,7 +1498,7 @@ impl ForgeWebhookAdapter for ForgejoAdapter {
                         .map_err(|e| ForgeWebhookError::InvalidPayload(e.to_string()))?;
 
                 let action = match payload.action.as_str() {
-                    "submitted" => domain::PullRequestReviewEventAction::Submitted,
+                    "reviewed" | "submitted" => domain::PullRequestReviewEventAction::Submitted,
                     _ => return Ok(None),
                 };
 
@@ -1527,8 +1528,8 @@ impl ForgeWebhookAdapter for ForgejoAdapter {
                             name: payload.repository.name,
                             owner,
                         },
-                        review_body: payload.review.body,
-                        review_id: payload.review.id,
+                        review_body: payload.review.body.unwrap_or_default(),
+                        review_id: payload.review.id.unwrap_or(0),
                         review_state: review_state.to_string(),
                         title: payload.pull_request.title,
                         url: payload.pull_request.html_url,
@@ -2109,6 +2110,65 @@ mod tests {
             other => panic!("expected PullRequestReview, got {other:?}"),
         };
         assert_eq!(event.review_state, "request_changes");
+    }
+
+    #[test]
+    fn forgejo_webhook_parses_per_action_review_payload() {
+        let adapter = test_adapter("https://forge.example");
+        let body = serde_json::json!({
+            "action": "reviewed",
+            "number": 8,
+            "pull_request": {
+                "head": {
+                    "ref": "agent/claude/cargo-fmt",
+                    "sha": "ec64af23c42c"
+                },
+                "html_url": "https://forge.example/org/repo/pulls/8",
+                "number": 8,
+                "title": "ci: fix lint failures"
+            },
+            "repository": {
+                "name": "repo",
+                "owner": {
+                    "login": "org"
+                }
+            },
+            "review": {
+                "type": "pull_request_review_approved",
+                "content": ""
+            }
+        });
+        let body = serde_json::to_vec(&body).expect("valid JSON");
+        let signature = sign_payload("super-secret", &body);
+        let headers = vec![
+            (
+                "x-forgejo-event".to_string(),
+                "pull_request_approved".to_string(),
+            ),
+            ("x-forgejo-delivery".to_string(), "delivery-792".to_string()),
+            ("x-forgejo-signature".to_string(), signature),
+        ];
+
+        let event = adapter
+            .verify_and_parse_webhook_event(
+                &headers,
+                &body,
+                "internal",
+                domain::ForgeKind::Forgejo,
+                "https://forge.example",
+                "super-secret",
+            )
+            .expect("webhook should parse")
+            .expect("event should be supported");
+
+        let event = match event {
+            domain::WebhookEvent::PullRequestReview(e) => e,
+            other => panic!("expected PullRequestReview, got {other:?}"),
+        };
+        assert_eq!(event.review_state, "approved");
+        assert_eq!(event.review_body, "");
+        assert_eq!(event.review_id, 0);
+        assert_eq!(event.index, 8);
     }
 
     #[test]
