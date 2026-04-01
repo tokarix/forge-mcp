@@ -96,11 +96,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let agent_registry = AgentRegistry::from_configs(&config.agents);
+    let event_bus = EventBus::new();
+    let forge_registry = Arc::new(ForgeRegistry::new(forges));
+    let auto_merge_service = Arc::new(server::auto_merge::AutoMergeService::new(
+        event_bus.clone(),
+        forge_registry.clone(),
+    ));
     let state = AppState {
         agent_registry,
         audit_sink,
-        event_bus: EventBus::new(),
-        forge_registry: Arc::new(ForgeRegistry::new(forges)),
+        auto_merge_service,
+        event_bus,
+        forge_registry,
     };
 
     let app = build_router(state, config.server.enable_docs);

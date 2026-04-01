@@ -26,8 +26,7 @@ impl AutoMergeService {
         }
     }
 
-    #[allow(dead_code)]
-    pub async fn handle_review(&self, event: &PullRequestReviewEvent) {
+    pub async fn handle_review(&self, event: PullRequestReviewEvent) {
         if event.review_state != "approved" {
             return;
         }
@@ -57,7 +56,7 @@ impl AutoMergeService {
                         event.repository.name,
                         event.index,
                     );
-                    self.publish_failure(event, &msg);
+                    self.publish_failure(&event, &msg);
                     return;
                 }
             };
@@ -84,7 +83,7 @@ impl AutoMergeService {
             .schedule_auto_merge(request, authorized, &credential)
             .await
         {
-            self.handle_error(event, &e);
+            self.handle_error(&event, &e);
         }
     }
 
@@ -97,7 +96,7 @@ impl AutoMergeService {
     ///
     /// Returns an error if the forge request fails or no merge styles are
     /// allowed.
-    pub async fn choose_merge_style(
+    async fn choose_merge_style(
         adapter: &dyn forge::ForgeAdapter,
         repository: &domain::RepositoryRef,
         credential: &ForgeCredential,

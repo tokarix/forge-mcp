@@ -39,6 +39,7 @@ use tokio_stream::wrappers::ReceiverStream;
 pub struct AppState {
     pub agent_registry: AgentRegistry,
     pub audit_sink: Arc<dyn audit::AuditSink>,
+    pub auto_merge_service: Arc<crate::auto_merge::AutoMergeService>,
     pub event_bus: crate::events::EventBus,
     pub forge_registry: Arc<crate::registry::ForgeRegistry>,
 }
@@ -302,8 +303,19 @@ pub async fn post_webhook(
             domain::WebhookEvent::IssueComment(e) => state.event_bus.publish(e),
             domain::WebhookEvent::PullRequestReview(e) => state.event_bus.publish(e),
         };
-        publish_result
+        let status = publish_result
             .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorBody { error })))?;
+
+        if let domain::WebhookEvent::PullRequestReview(ref review) = event
+            && matches!(status, crate::events::PublishStatus::Enqueued { .. })
+            && review.review_state == "approved"
+        {
+            let service = state.auto_merge_service.clone();
+            let review = review.clone();
+            tokio::spawn(async move {
+                service.handle_review(review).await;
+            });
+        }
     }
 
     Ok::<_, (StatusCode, Json<ErrorBody>)>(StatusCode::ACCEPTED)
@@ -2000,6 +2012,15 @@ mod tests {
         }
     }
 
+    fn test_auto_merge_service() -> Arc<crate::auto_merge::AutoMergeService> {
+        Arc::new(crate::auto_merge::AutoMergeService::new(
+            crate::events::EventBus::new(),
+            Arc::new(crate::registry::ForgeRegistry::new(
+                std::collections::HashMap::new(),
+            )),
+        ))
+    }
+
     fn test_state() -> AppState {
         let configs = vec![crate::config::AgentConfig {
             agent_id: "codex".to_string(),
@@ -2022,6 +2043,7 @@ mod tests {
         AppState {
             agent_registry: AgentRegistry::from_configs(&configs),
             audit_sink: Arc::new(audit::InMemoryAuditSink::new()),
+            auto_merge_service: test_auto_merge_service(),
             event_bus: crate::events::EventBus::new(),
             forge_registry: Arc::new(crate::registry::ForgeRegistry::new(forges)),
         }
@@ -2204,6 +2226,7 @@ mod tests {
         let state = AppState {
             agent_registry: AgentRegistry::from_configs(&configs),
             audit_sink: Arc::new(audit::InMemoryAuditSink::new()),
+            auto_merge_service: test_auto_merge_service(),
             event_bus: crate::events::EventBus::new(),
             forge_registry: Arc::new(crate::registry::ForgeRegistry::new(forges)),
         };
@@ -2368,6 +2391,7 @@ mod tests {
         let state = AppState {
             agent_registry: AgentRegistry::from_configs(&configs),
             audit_sink: Arc::new(audit::InMemoryAuditSink::new()),
+            auto_merge_service: test_auto_merge_service(),
             event_bus: crate::events::EventBus::new(),
             forge_registry: Arc::new(crate::registry::ForgeRegistry::new(forges)),
         };
@@ -2489,6 +2513,7 @@ mod tests {
         let state = AppState {
             agent_registry: AgentRegistry::from_configs(&configs),
             audit_sink: Arc::new(audit::InMemoryAuditSink::new()),
+            auto_merge_service: test_auto_merge_service(),
             event_bus: crate::events::EventBus::new(),
             forge_registry: Arc::new(crate::registry::ForgeRegistry::new(forges)),
         };
@@ -2533,6 +2558,7 @@ mod tests {
         let state = AppState {
             agent_registry: AgentRegistry::from_configs(&configs),
             audit_sink: Arc::clone(&audit_sink) as Arc<dyn audit::AuditSink>,
+            auto_merge_service: test_auto_merge_service(),
             event_bus: crate::events::EventBus::new(),
             forge_registry: Arc::new(crate::registry::ForgeRegistry::new(
                 std::collections::HashMap::new(),

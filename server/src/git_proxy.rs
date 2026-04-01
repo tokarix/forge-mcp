@@ -847,6 +847,12 @@ mod tests {
         let state = AppState {
             agent_registry: AgentRegistry::from_configs(&configs),
             audit_sink: Arc::clone(&audit_sink) as Arc<dyn audit::AuditSink>,
+            auto_merge_service: Arc::new(crate::auto_merge::AutoMergeService::new(
+                crate::events::EventBus::new(),
+                Arc::new(crate::registry::ForgeRegistry::new(
+                    std::collections::HashMap::new(),
+                )),
+            )),
             event_bus: crate::events::EventBus::new(),
             forge_registry: Arc::new(crate::registry::ForgeRegistry::new(forges)),
         };
@@ -1030,6 +1036,12 @@ mod tests {
         let state = AppState {
             agent_registry: AgentRegistry::from_configs(&configs),
             audit_sink: Arc::clone(&audit_sink) as Arc<dyn audit::AuditSink>,
+            auto_merge_service: Arc::new(crate::auto_merge::AutoMergeService::new(
+                crate::events::EventBus::new(),
+                Arc::new(crate::registry::ForgeRegistry::new(
+                    std::collections::HashMap::new(),
+                )),
+            )),
             event_bus: crate::events::EventBus::new(),
             forge_registry: Arc::new(crate::registry::ForgeRegistry::new(forges)),
         };
