@@ -17,8 +17,8 @@ use axum::{
 use domain::{
     CloseChangeRequestRequest, CommentOnChangeRequestRequest, CommitPatchRequest, ForgeKind,
     GetChangeRequestCommentsRequest, GetChangeRequestRequest, ListChangeRequestsRequest,
-    OpenChangeRequestRequest, ReadRepositoryFileRequest, RebaseBranchRequest, RepositoryRef,
-    ScheduleAutoMergeRequest, ServiceError, SubmitChangeRequestReviewRequest,
+    OpenChangeRequestRequest, PublishableEvent, ReadRepositoryFileRequest, RebaseBranchRequest,
+    RepositoryRef, ScheduleAutoMergeRequest, ServiceError, SubmitChangeRequestReviewRequest,
     UpdateChangeRequestRequest,
 };
 
@@ -297,6 +297,13 @@ pub async fn post_webhook(
         .map_err(|error| map_webhook_error(&error))?;
 
     if let Some(event) = event {
+        let channel_event = match &event {
+            domain::WebhookEvent::ChangeRequest(e) => e.to_channel_event(),
+            domain::WebhookEvent::Issue(e) => e.to_channel_event(),
+            domain::WebhookEvent::IssueComment(e) => e.to_channel_event(),
+            domain::WebhookEvent::PullRequestReview(e) => e.to_channel_event(),
+        };
+
         let publish_result = match &event {
             domain::WebhookEvent::ChangeRequest(e) => state.event_bus.publish(e),
             domain::WebhookEvent::Issue(e) => state.event_bus.publish(e),
@@ -305,6 +312,17 @@ pub async fn post_webhook(
         };
         let status = publish_result
             .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorBody { error })))?;
+
+        tracing::info!(
+            forge = %path.forge,
+            event_kind = %channel_event.meta.event_kind,
+            action = %channel_event.meta.action,
+            owner = %channel_event.meta.owner,
+            repo = %channel_event.meta.repo,
+            delivery_id = %channel_event.meta.delivery_id,
+            status = ?status,
+            "webhook accepted",
+        );
 
         if let domain::WebhookEvent::PullRequestReview(ref review) = event
             && matches!(status, crate::events::PublishStatus::Enqueued { .. })
