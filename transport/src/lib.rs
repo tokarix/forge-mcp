@@ -17,8 +17,41 @@ use rmcp::{
     transport::stdio,
 };
 use schemars::JsonSchema;
+use serde::de;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+/// Deserializes a `u64` from either a JSON number or a string containing a
+/// number. LLMs frequently send `"5"` instead of `5` for integer tool
+/// parameters.
+fn deserialize_u64_lenient<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: de::Deserializer<'de>,
+{
+    struct U64LenientVisitor;
+
+    impl<'de> de::Visitor<'de> for U64LenientVisitor {
+        type Value = u64;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("a u64 or a string containing a u64")
+        }
+
+        fn visit_u64<E: de::Error>(self, v: u64) -> Result<u64, E> {
+            Ok(v)
+        }
+
+        fn visit_i64<E: de::Error>(self, v: i64) -> Result<u64, E> {
+            u64::try_from(v).map_err(|_| E::custom(format!("negative value: {v}")))
+        }
+
+        fn visit_str<E: de::Error>(self, v: &str) -> Result<u64, E> {
+            v.parse().map_err(E::custom)
+        }
+    }
+
+    deserializer.deserialize_any(U64LenientVisitor)
+}
 
 /// Configuration for the MCP shim.
 #[derive(Clone)]
@@ -59,6 +92,7 @@ pub struct AssignIssueTool {
     /// Forge alias -- use `forge_info` to discover available aliases.
     pub forge: String,
     /// Issue index number.
+    #[serde(deserialize_with = "deserialize_u64_lenient")]
     pub index: u64,
     /// Repository owner or organization.
     pub owner: String,
@@ -71,6 +105,7 @@ pub struct CloseChangeRequestTool {
     /// Forge alias -- use `forge_info` to discover available aliases.
     pub forge: String,
     /// Change request index number.
+    #[serde(deserialize_with = "deserialize_u64_lenient")]
     pub index: u64,
     /// Repository owner or organization.
     pub owner: String,
@@ -83,6 +118,7 @@ pub struct CloseIssueTool {
     /// Forge alias -- use `forge_info` to discover available aliases.
     pub forge: String,
     /// Issue index number.
+    #[serde(deserialize_with = "deserialize_u64_lenient")]
     pub index: u64,
     /// Repository owner or organization.
     pub owner: String,
@@ -97,6 +133,7 @@ pub struct CommentOnChangeRequestTool {
     /// Forge alias -- use `forge_info` to discover available aliases.
     pub forge: String,
     /// Change request index number.
+    #[serde(deserialize_with = "deserialize_u64_lenient")]
     pub index: u64,
     /// Repository owner or organization.
     pub owner: String,
@@ -111,6 +148,7 @@ pub struct CommentOnIssueTool {
     /// Forge alias -- use `forge_info` to discover available aliases.
     pub forge: String,
     /// Issue index number.
+    #[serde(deserialize_with = "deserialize_u64_lenient")]
     pub index: u64,
     /// Repository owner or organization.
     pub owner: String,
@@ -233,6 +271,7 @@ pub struct GetChangeRequestDiffTool {
     /// Forge alias -- use `forge_info` to discover available aliases.
     pub forge: String,
     /// Change request index number.
+    #[serde(deserialize_with = "deserialize_u64_lenient")]
     pub index: u64,
     /// Repository owner or organization.
     pub owner: String,
@@ -245,6 +284,7 @@ pub struct GetChangeRequestCommentsTool {
     /// Forge alias -- use `forge_info` to discover available aliases.
     pub forge: String,
     /// Change request index number.
+    #[serde(deserialize_with = "deserialize_u64_lenient")]
     pub index: u64,
     /// Repository owner or organization.
     pub owner: String,
@@ -257,6 +297,7 @@ pub struct GetChangeRequestTool {
     /// Forge alias -- use `forge_info` to discover available aliases.
     pub forge: String,
     /// Change request index number.
+    #[serde(deserialize_with = "deserialize_u64_lenient")]
     pub index: u64,
     /// Repository owner or organization.
     pub owner: String,
@@ -269,6 +310,7 @@ pub struct GetIssueTool {
     /// Forge alias -- use `forge_info` to discover available aliases.
     pub forge: String,
     /// Issue index number.
+    #[serde(deserialize_with = "deserialize_u64_lenient")]
     pub index: u64,
     /// Repository owner or organization.
     pub owner: String,
@@ -281,6 +323,7 @@ pub struct GetIssueCommentsTool {
     /// Forge alias -- use `forge_info` to discover available aliases.
     pub forge: String,
     /// Issue index number.
+    #[serde(deserialize_with = "deserialize_u64_lenient")]
     pub index: u64,
     /// Repository owner or organization.
     pub owner: String,
@@ -387,6 +430,7 @@ pub struct ScheduleAutoMergeTool {
     /// Forge alias -- use `forge_info` to discover available aliases.
     pub forge: String,
     /// Change request index number.
+    #[serde(deserialize_with = "deserialize_u64_lenient")]
     pub index: u64,
     /// Merge style: rebase, rebase-merge, merge, squash, or fast-forward-only.
     pub merge_style: String,
@@ -411,6 +455,7 @@ pub struct UpdateChangeRequestTool {
     /// Forge alias -- use `forge_info` to discover available aliases.
     pub forge: String,
     /// Change request index number.
+    #[serde(deserialize_with = "deserialize_u64_lenient")]
     pub index: u64,
     /// Repository owner or organization.
     pub owner: String,
@@ -429,6 +474,7 @@ pub struct SubmitChangeRequestReviewTool {
     /// Forge alias -- use `forge_info` to discover available aliases.
     pub forge: String,
     /// Change request index number.
+    #[serde(deserialize_with = "deserialize_u64_lenient")]
     pub index: u64,
     /// Repository owner or organization.
     pub owner: String,
@@ -1637,6 +1683,20 @@ mod tests {
     use tokio::sync::{Mutex, Notify};
 
     use super::*;
+
+    #[test]
+    fn deserialize_index_from_number() {
+        let json = r#"{"forge":"f","index":5,"owner":"o","repo":"r"}"#;
+        let tool: CloseChangeRequestTool = serde_json::from_str(json).unwrap();
+        assert_eq!(tool.index, 5);
+    }
+
+    #[test]
+    fn deserialize_index_from_string() {
+        let json = r#"{"forge":"f","index":"5","owner":"o","repo":"r"}"#;
+        let tool: CloseChangeRequestTool = serde_json::from_str(json).unwrap();
+        assert_eq!(tool.index, 5);
+    }
 
     #[derive(Debug, Clone, Default)]
     struct DummyClientHandler;
