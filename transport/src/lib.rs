@@ -1632,10 +1632,8 @@ impl ServerHandler for McpShim {
     }
 
     async fn on_initialized(&self, context: NotificationContext<RoleServer>) {
-        if !self.config.enable_channels {
-            return;
-        }
-
+        // Always start the event forwarder so poll_events works regardless of
+        // whether Claude channel notifications are enabled.
         if self
             .event_forwarder_started
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -1649,6 +1647,10 @@ impl ServerHandler for McpShim {
         let config = self.config.clone();
         let event_buffer = self.event_buffer.clone();
         let subscriber_id = self.subscriber_id.clone();
+        tracing::info!(
+            channels = self.config.enable_channels,
+            "event forwarder started",
+        );
         tokio::spawn(async move {
             Self::run_event_forwarder(client, config, event_buffer, subscriber_id, peer).await;
         });
@@ -2066,8 +2068,14 @@ mod tests {
             .expect("text result");
         assert!(text.contains('{'));
 
-        // Verify the request body sent to the gateway
-        let requests = mock_server.received_requests().await.unwrap();
+        // Verify the request body sent to the gateway (filter out SSE requests)
+        let requests: Vec<_> = mock_server
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.url.path().contains("automerge"))
+            .collect();
         assert_eq!(requests.len(), 1);
         let body: serde_json::Value =
             serde_json::from_slice(&requests[0].body).expect("valid JSON");
@@ -2119,7 +2127,13 @@ mod tests {
             .expect("text result");
         assert!(text.contains('{'));
 
-        let requests = mock_server.received_requests().await.unwrap();
+        let requests: Vec<_> = mock_server
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.url.path().contains("automerge"))
+            .collect();
         assert_eq!(requests.len(), 1);
         let body: serde_json::Value =
             serde_json::from_slice(&requests[0].body).expect("valid JSON");
@@ -2534,6 +2548,62 @@ mod tests {
             .map(|t| t.text.clone())
             .expect("text content");
         assert_eq!(text, "[]");
+
+        drop(client);
+        server_handle.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn poll_events_works_without_channels() -> Result<(), Box<dyn std::error::Error>> {
+        let mock_server = wiremock::MockServer::start().await;
+        let event_body = serde_json::json!({
+            "kind": "change_request",
+            "content": "change_request opened on internal/org/repo#24 at abc123",
+            "meta": {
+                "forge_alias": "internal",
+                "owner": "org",
+                "repo": "repo",
+                "event_kind": "change_request",
+                "action": "opened",
+                "change_request": 24,
+                "head_sha": "abc123",
+                "delivery_id": "delivery-no-channels"
+            }
+        });
+        let sse = format!(
+            "event: change_request\nid: internal:delivery-no-channels\ndata: {}\n\n",
+            event_body
+        );
+
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/api/v1/agent/events"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(sse),
+            )
+            .mount(&mock_server)
+            .await;
+
+        // Use test_config (channels disabled), not test_channel_config.
+        let (client, server_handle) =
+            spawn_shim_and_client(test_config(&mock_server.uri())).await?;
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let result = client
+            .call_tool(CallToolRequestParams::new("poll_events"))
+            .await?;
+        let text = result
+            .content
+            .first()
+            .and_then(|c| c.raw.as_text())
+            .map(|t| t.text.clone())
+            .expect("text content");
+        let events: Vec<serde_json::Value> = serde_json::from_str(&text)?;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["meta"]["delivery_id"], "delivery-no-channels");
 
         drop(client);
         server_handle.await??;
