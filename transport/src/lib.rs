@@ -466,6 +466,23 @@ pub struct UpdateChangeRequestTool {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct UpdateIssueTool {
+    /// New issue body/description. Omit to leave unchanged.
+    pub body: Option<String>,
+    /// Forge alias -- use `forge_info` to discover available aliases.
+    pub forge: String,
+    /// Issue index number.
+    #[serde(deserialize_with = "deserialize_u64_lenient")]
+    pub index: u64,
+    /// Repository owner or organization.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+    /// New issue title. Omit to leave unchanged.
+    pub title: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct SubmitChangeRequestReviewTool {
     /// Review body text.
     pub body: String,
@@ -1577,6 +1594,39 @@ impl McpShim {
             &request.owner,
             &request.repo,
             "pulls",
+            &request.index.to_string(),
+        ])?;
+        let mut json_body = serde_json::Map::new();
+        if let Some(title) = &request.title {
+            json_body.insert(
+                "title".to_string(),
+                serde_json::Value::String(title.clone()),
+            );
+        }
+        if let Some(body) = &request.body {
+            json_body.insert("body".to_string(), serde_json::Value::String(body.clone()));
+        }
+        self.gateway_patch(url, &serde_json::Value::Object(json_body))
+            .await
+    }
+
+    /// Update an issue's title and/or body.
+    #[tool(
+        name = "update_issue",
+        description = "Update an issue's title and/or body. Provide at least one of title or body."
+    )]
+    async fn update_issue(
+        &self,
+        Parameters(request): Parameters<UpdateIssueTool>,
+    ) -> Result<String, McpError> {
+        let url = self.build_url(&[
+            "api",
+            "v1",
+            "repos",
+            &request.forge,
+            &request.owner,
+            &request.repo,
+            "issues",
             &request.index.to_string(),
         ])?;
         let mut json_body = serde_json::Map::new();
@@ -2786,6 +2836,58 @@ mod tests {
         assert_eq!(events[0]["meta"]["change_request"], 7);
         assert_eq!(events[0]["meta"]["review_state"], "approved");
         assert!(events[0]["meta"]["issue"].is_null());
+
+        drop(client);
+        server_handle.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn update_issue_calls_gateway() -> Result<(), Box<dyn std::error::Error>> {
+        let mock_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("PATCH"))
+            .and(wiremock::matchers::path(
+                "/api/v1/repos/test-forge/org/repo/issues/7",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "number": 7,
+                    "title": "Updated title",
+                    "body": "Updated body",
+                    "state": "open",
+                    "html_url": "https://forge.example/org/repo/issues/7",
+                    "labels": [],
+                    "assignees": []
+                })),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let (client, server_handle) =
+            spawn_shim_and_client(test_config(&mock_server.uri())).await?;
+
+        let args = serde_json::json!({
+            "forge": "test-forge",
+            "owner": "org",
+            "repo": "repo",
+            "index": 7,
+            "title": "Updated title",
+            "body": "Updated body"
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+
+        let result = client
+            .call_tool(CallToolRequestParams::new("update_issue").with_arguments(args))
+            .await?;
+        let text = result
+            .content
+            .first()
+            .and_then(|c| c.raw.as_text())
+            .map(|t| t.text.clone())
+            .expect("text result");
+        assert!(text.contains("Updated title"));
 
         drop(client);
         server_handle.await??;

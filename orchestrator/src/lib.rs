@@ -12,7 +12,8 @@ use domain::{
     GetIssueCommentsRequest, GetIssueRequest, Issue, IssueComment, ListChangeRequestsRequest,
     ListIssuesRequest, ReadRepositoryFileRequest, ReadRepositoryFileResponse, RebaseBranchRequest,
     RebaseBranchResponse, RepositoryReadService, ScheduleAutoMergeRequest, ServiceError,
-    SubmitChangeRequestReviewRequest, UpdateChangeRequestRequest, validate_repository_path,
+    SubmitChangeRequestReviewRequest, UpdateChangeRequestRequest, UpdateIssueRequest,
+    validate_repository_path,
 };
 use forge::ForgeAdapter;
 
@@ -1115,6 +1116,40 @@ where
             .await
             .map_err(|e| ServiceError::Upstream(e.to_string()))
     }
+
+    async fn update_issue(
+        &self,
+        request: UpdateIssueRequest,
+        _authorized: domain::policy::AuthorizedWrite,
+        credential: &ForgeCredential,
+    ) -> Result<Issue, ServiceError> {
+        if request.title.is_none() && request.body.is_none() {
+            return Err(ServiceError::Validation(
+                "at least one of title or body must be provided".to_string(),
+            ));
+        }
+
+        self.audit_sink
+            .record(AuditRecord {
+                agent: request.agent,
+                action: "update_issue".to_string(),
+                repository: request.repository.clone(),
+                target: format!("#{}", request.index),
+            })
+            .await
+            .map_err(|e| ServiceError::Audit(e.to_string()))?;
+
+        self.adapter
+            .update_issue(
+                &request.repository,
+                request.index,
+                request.title.as_deref(),
+                request.body.as_deref(),
+                credential,
+            )
+            .await
+            .map_err(|e| ServiceError::Upstream(e.to_string()))
+    }
 }
 
 #[cfg(test)]
@@ -1361,6 +1396,17 @@ mod tests {
         ) -> Result<ChangeRequest, ForgeError> {
             unimplemented!()
         }
+
+        async fn update_issue(
+            &self,
+            _repository: &RepositoryRef,
+            _index: u64,
+            _title: Option<&str>,
+            _body: Option<&str>,
+            _credential: &domain::ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            unimplemented!()
+        }
     }
 
     struct FailingForgeAdapter;
@@ -1564,6 +1610,17 @@ mod tests {
             _body: Option<&str>,
             _credential: &domain::ForgeCredential,
         ) -> Result<ChangeRequest, ForgeError> {
+            unimplemented!()
+        }
+
+        async fn update_issue(
+            &self,
+            _repository: &RepositoryRef,
+            _index: u64,
+            _title: Option<&str>,
+            _body: Option<&str>,
+            _credential: &domain::ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
             unimplemented!()
         }
     }
@@ -1930,6 +1987,28 @@ mod tests {
                 title: title.unwrap_or("Fix").to_string(),
                 url: format!(
                     "https://forge.example/{}/{}/pulls/{index}",
+                    repository.owner, repository.name
+                ),
+            })
+        }
+
+        async fn update_issue(
+            &self,
+            repository: &RepositoryRef,
+            index: u64,
+            title: Option<&str>,
+            body: Option<&str>,
+            _credential: &domain::ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            Ok(domain::Issue {
+                assignees: vec![],
+                body: body.unwrap_or_default().to_string(),
+                index,
+                labels: vec![],
+                state: "open".to_string(),
+                title: title.unwrap_or("Issue").to_string(),
+                url: format!(
+                    "https://forge.example/{}/{}/issues/{index}",
                     repository.owner, repository.name
                 ),
             })
@@ -2453,6 +2532,17 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
         ) -> Result<ChangeRequest, ForgeError> {
             unimplemented!()
         }
+
+        async fn update_issue(
+            &self,
+            _repository: &RepositoryRef,
+            _index: u64,
+            _title: Option<&str>,
+            _body: Option<&str>,
+            _credential: &domain::ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            unimplemented!()
+        }
     }
 
     fn close_test_request(index: u64) -> CloseChangeRequestRequest {
@@ -2879,6 +2969,17 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
         ) -> Result<ChangeRequest, ForgeError> {
             unimplemented!()
         }
+
+        async fn update_issue(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: &domain::ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            unimplemented!()
+        }
     }
 
     #[tokio::test]
@@ -3168,6 +3269,17 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             _: Option<&str>,
             _: &domain::ForgeCredential,
         ) -> Result<ChangeRequest, ForgeError> {
+            unimplemented!()
+        }
+
+        async fn update_issue(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: &domain::ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
             unimplemented!()
         }
     }
@@ -3480,6 +3592,90 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
         assert_eq!(audit.records().len(), 1);
         assert_eq!(audit.records()[0].action, "update_change_request");
         assert_eq!(audit.records()[0].target, "#42");
+    }
+
+    // --- update_issue tests ---
+
+    fn update_issue_test_request(
+        title: Option<&str>,
+        body: Option<&str>,
+    ) -> domain::UpdateIssueRequest {
+        domain::UpdateIssueRequest {
+            agent: AgentIdentity {
+                agent_id: "test-agent".to_string(),
+                session_id: "test-session".to_string(),
+            },
+            body: body.map(ToString::to_string),
+            index: 7,
+            repository: RepositoryRef {
+                alias: "test".to_string(),
+                forge: ForgeKind::Forgejo,
+                host: "https://forge.example".to_string(),
+                name: "repo".to_string(),
+                owner: "org".to_string(),
+            },
+            title: title.map(ToString::to_string),
+        }
+    }
+
+    #[tokio::test]
+    async fn update_issue_rejects_when_both_none() {
+        let adapter = Arc::new(WriteTestForgeAdapter);
+        let audit = Arc::new(InMemoryAuditSink::new());
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
+
+        let err = orchestrator
+            .update_issue(
+                update_issue_test_request(None, None),
+                default_authorized(),
+                &domain::ForgeCredential { token: None },
+            )
+            .await
+            .expect_err("both None should be rejected");
+
+        assert!(matches!(err, ServiceError::Validation(_)));
+        assert_eq!(audit.records().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn update_issue_records_audit() {
+        let adapter = Arc::new(WriteTestForgeAdapter);
+        let audit = Arc::new(InMemoryAuditSink::new());
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
+
+        let result = orchestrator
+            .update_issue(
+                update_issue_test_request(Some("New title"), None),
+                default_authorized(),
+                &domain::ForgeCredential { token: None },
+            )
+            .await
+            .expect("should succeed");
+
+        assert_eq!(result.index, 7);
+        assert_eq!(result.title, "New title");
+        assert_eq!(audit.records().len(), 1);
+        assert_eq!(audit.records()[0].action, "update_issue");
+        assert_eq!(audit.records()[0].target, "#7");
+    }
+
+    #[tokio::test]
+    async fn update_issue_updates_body_only() {
+        let adapter = Arc::new(WriteTestForgeAdapter);
+        let audit = Arc::new(InMemoryAuditSink::new());
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
+
+        let result = orchestrator
+            .update_issue(
+                update_issue_test_request(None, Some("Updated body")),
+                default_authorized(),
+                &domain::ForgeCredential { token: None },
+            )
+            .await
+            .expect("should succeed");
+
+        assert_eq!(result.body, "Updated body");
+        assert_eq!(audit.records().len(), 1);
     }
 
     // --- rebase_branch integration tests ---

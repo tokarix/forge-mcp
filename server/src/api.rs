@@ -160,11 +160,13 @@ pub struct CreateIssueBody {
     pub title: String,
 }
 
-/// Request body for updating an issue (close, assign).
+/// Request body for updating an issue (close, assign, edit title/body).
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct UpdateIssueBody {
     pub assignees: Option<Vec<String>>,
+    pub body: Option<String>,
     pub state: Option<String>,
+    pub title: Option<String>,
 }
 
 /// Response for GET /api/v1/agent/info

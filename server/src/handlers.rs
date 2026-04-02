@@ -1445,10 +1445,31 @@ pub async fn update_issue(
         return Ok(Json(serde_json::to_value(&result).expect("serializable")));
     }
 
+    // Handle title/body update
+    if body.title.is_some() || body.body.is_some() {
+        let result = forge
+            .write_service
+            .update_issue(
+                domain::UpdateIssueRequest {
+                    agent: agent.identity.clone(),
+                    body: body.body,
+                    index: path.index,
+                    repository: repo,
+                    title: body.title,
+                },
+                authorized,
+                &credential,
+            )
+            .await
+            .map_err(map_service_error)?;
+
+        return Ok(Json(serde_json::to_value(&result).expect("serializable")));
+    }
+
     Err((
         StatusCode::BAD_REQUEST,
         Json(ErrorBody {
-            error: "update_issue requires either state or assignees".to_string(),
+            error: "update_issue requires state, assignees, or title/body".to_string(),
         }),
     ))
 }
@@ -1737,6 +1758,17 @@ mod tests {
         ) -> Result<domain::ChangeRequest, forge::ForgeError> {
             unimplemented!()
         }
+
+        async fn update_issue(
+            &self,
+            _: &domain::RepositoryRef,
+            _: u64,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: &domain::ForgeCredential,
+        ) -> Result<domain::Issue, forge::ForgeError> {
+            unimplemented!()
+        }
     }
 
     struct FakeReadService;
@@ -1999,6 +2031,23 @@ mod tests {
                 state: ChangeRequestState::Open,
                 title: request.title.unwrap_or_else(|| "Fix".to_string()),
                 url: "https://example.com/pulls/1".to_string(),
+            })
+        }
+
+        async fn update_issue(
+            &self,
+            request: domain::UpdateIssueRequest,
+            _authorized: domain::policy::AuthorizedWrite,
+            _credential: &domain::ForgeCredential,
+        ) -> Result<domain::Issue, ServiceError> {
+            Ok(domain::Issue {
+                assignees: vec![],
+                body: request.body.unwrap_or_default(),
+                index: request.index,
+                labels: vec![],
+                state: "open".to_string(),
+                title: request.title.unwrap_or_else(|| "Issue".to_string()),
+                url: "https://example.com/issues/1".to_string(),
             })
         }
     }
@@ -2667,5 +2716,53 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["index"], 1);
         assert_eq!(json["title"], "Updated title");
+    }
+
+    #[tokio::test]
+    async fn patch_issue_returns_updated_issue() {
+        let app = crate::build_router(test_state(), false);
+        let body = serde_json::json!({
+            "title": "Updated issue title"
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/v1/repos/test-forge/org/repo/issues/1")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["index"], 1);
+        assert_eq!(json["title"], "Updated issue title");
+    }
+
+    #[tokio::test]
+    async fn patch_issue_rejects_empty_body() {
+        let app = crate::build_router(test_state(), false);
+        let body = serde_json::json!({});
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/v1/repos/test-forge/org/repo/issues/1")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 }

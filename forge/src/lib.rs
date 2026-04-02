@@ -227,6 +227,16 @@ pub trait ForgeAdapter: Send + Sync {
         body: Option<&str>,
         credential: &ForgeCredential,
     ) -> Result<ChangeRequest, ForgeError>;
+
+    /// Updates an issue's title and/or body.
+    async fn update_issue(
+        &self,
+        repository: &RepositoryRef,
+        index: u64,
+        title: Option<&str>,
+        body: Option<&str>,
+        credential: &ForgeCredential,
+    ) -> Result<domain::Issue, ForgeError>;
 }
 
 pub trait ForgeWebhookAdapter: Send + Sync {
@@ -1415,6 +1425,58 @@ impl ForgeAdapter for ForgejoAdapter {
 
         let pr: ForgejoPullRequest = response.json().await?;
         Ok(pr.into_change_request())
+    }
+
+    async fn update_issue(
+        &self,
+        repository: &RepositoryRef,
+        index: u64,
+        title: Option<&str>,
+        body: Option<&str>,
+        credential: &ForgeCredential,
+    ) -> Result<domain::Issue, ForgeError> {
+        let url = format!(
+            "{}/api/v1/repos/{}/{}/issues/{index}",
+            self.config.base_url.trim_end_matches('/'),
+            repository.owner,
+            repository.name,
+        );
+
+        let mut json_body = serde_json::Map::new();
+        if let Some(title) = title {
+            json_body.insert(
+                "title".to_string(),
+                serde_json::Value::String(title.to_string()),
+            );
+        }
+        if let Some(body) = body {
+            json_body.insert(
+                "body".to_string(),
+                serde_json::Value::String(body.to_string()),
+            );
+        }
+
+        let effective_token = credential.token.as_deref().or(self.config.token.as_deref());
+        let mut request = self
+            .client
+            .patch(&url)
+            .json(&serde_json::Value::Object(json_body));
+        if let Some(token) = effective_token {
+            request = request.bearer_auth(token);
+        }
+
+        let response = request.send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let resp_body = response.text().await.unwrap_or_default();
+            return Err(ForgeError::UnexpectedStatus {
+                status,
+                body: resp_body,
+            });
+        }
+
+        let issue: ForgejoIssueResponse = response.json().await?;
+        Ok(issue.into_issue())
     }
 }
 
