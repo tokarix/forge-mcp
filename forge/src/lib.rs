@@ -1244,6 +1244,13 @@ impl ForgeAdapter for ForgejoAdapter {
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
+            // Forgejo returns 409 when auto-merge is already scheduled.
+            // Treat this specific case as success; surface other 409s as errors.
+            if status == reqwest::StatusCode::CONFLICT
+                && body.contains("already scheduled to auto merge")
+            {
+                return Ok(());
+            }
             return Err(ForgeError::UnexpectedStatus { status, body });
         }
 
@@ -1711,6 +1718,54 @@ mod tests {
         assert_eq!(body["merge_when_checks_succeed"], true);
         assert_eq!(body["head_commit_id"], "abc123sha");
         assert!(body.get("delete_branch_after_merge").is_none());
+    }
+
+    #[tokio::test]
+    async fn schedule_auto_merge_succeeds_on_already_scheduled_409() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path_regex(r"/api/v1/repos/.+/pulls/\d+/merge"))
+            .respond_with(ResponseTemplate::new(409).set_body_json(serde_json::json!({
+                "message": "pull request is already scheduled to auto merge when checks succeed [pull_id: 78]"
+            })))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let result = adapter
+            .schedule_auto_merge(&test_repo(), 42, "rebase", "abc123sha", None, &cred)
+            .await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn schedule_auto_merge_errors_on_unrelated_409() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path_regex(r"/api/v1/repos/.+/pulls/\d+/merge"))
+            .respond_with(ResponseTemplate::new(409).set_body_json(serde_json::json!({
+                "message": "some other conflict"
+            })))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let result = adapter
+            .schedule_auto_merge(&test_repo(), 42, "rebase", "abc123sha", None, &cred)
+            .await;
+
+        let err = result.unwrap_err();
+        match err {
+            ForgeError::UnexpectedStatus { status, .. } => {
+                assert_eq!(status, reqwest::StatusCode::CONFLICT);
+            }
+            other => panic!("expected UnexpectedStatus, got {other:?}"),
+        }
     }
 
     #[tokio::test]
