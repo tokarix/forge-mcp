@@ -308,7 +308,7 @@ pub async fn post_webhook(
 
         if let domain::WebhookEvent::PullRequestReview(ref review) = event
             && matches!(status, crate::events::PublishStatus::Enqueued { .. })
-            && review.review_state == "approved"
+            && review.review_state == domain::ReviewState::Approved
         {
             let service = state.auto_merge_service.clone();
             let review = review.clone();

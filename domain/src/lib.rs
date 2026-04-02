@@ -443,7 +443,7 @@ pub struct PullRequestReviewEvent {
     pub repository: RepositoryRef,
     pub review_body: String,
     pub review_id: u64,
-    pub review_state: String,
+    pub review_state: ReviewState,
     pub title: String,
     pub url: String,
 }
@@ -476,7 +476,7 @@ impl PublishableEvent for PullRequestReviewEvent {
             content: format!(
                 "pull_request_review {} ({}) on {}/{}/{}#{} at {}",
                 self.action.as_str(),
-                self.review_state,
+                self.review_state.as_str(),
                 self.repository.alias,
                 self.repository.owner,
                 self.repository.name,
@@ -494,7 +494,7 @@ impl PublishableEvent for PullRequestReviewEvent {
                 issue_comment: None,
                 owner: self.repository.owner.clone(),
                 repo: self.repository.name.clone(),
-                review_state: Some(self.review_state.clone()),
+                review_state: Some(self.review_state.as_str().to_string()),
             },
         }
     }
@@ -511,6 +511,25 @@ impl PullRequestReviewEventAction {
     pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Submitted => "submitted",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewState {
+    Approved,
+    Comment,
+    RequestChanges,
+}
+
+impl ReviewState {
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Approved => "approved",
+            Self::Comment => "comment",
+            Self::RequestChanges => "request_changes",
         }
     }
 }
@@ -1176,7 +1195,7 @@ mod tests {
     fn pull_request_review_event_to_channel_event_sets_meta_fields() {
         use super::{
             ForgeKind, PublishableEvent, PullRequestReviewEvent, PullRequestReviewEventAction,
-            RepositoryRef,
+            RepositoryRef, ReviewState,
         };
         let event = PullRequestReviewEvent {
             action: PullRequestReviewEventAction::Submitted,
@@ -1192,7 +1211,7 @@ mod tests {
             },
             review_body: "Approved!".to_string(),
             review_id: 55,
-            review_state: "approved".to_string(),
+            review_state: ReviewState::Approved,
             title: "Fix typo".to_string(),
             url: "https://forge.example/org/repo/pulls/7".to_string(),
         };

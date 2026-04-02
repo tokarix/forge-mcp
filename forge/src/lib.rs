@@ -1549,9 +1549,9 @@ impl ForgeWebhookAdapter for ForgejoAdapter {
 
                 // Skip pending reviews — they are incomplete drafts.
                 let review_state = match payload.review.review_type.as_str() {
-                    "pull_request_review_approved" => "approved",
-                    "pull_request_review_rejected" => "request_changes",
-                    "pull_request_review_comment" => "comment",
+                    "pull_request_review_approved" => domain::ReviewState::Approved,
+                    "pull_request_review_rejected" => domain::ReviewState::RequestChanges,
+                    "pull_request_review_comment" => domain::ReviewState::Comment,
                     _ => return Ok(None),
                 };
 
@@ -1575,7 +1575,7 @@ impl ForgeWebhookAdapter for ForgejoAdapter {
                         },
                         review_body: payload.review.body.unwrap_or_default(),
                         review_id: payload.review.id.unwrap_or(0),
-                        review_state: review_state.to_string(),
+                        review_state,
                         title: payload.pull_request.title,
                         url: payload.pull_request.html_url,
                     },
@@ -2205,7 +2205,7 @@ mod tests {
         assert_eq!(event.repository.name, "repo");
         assert_eq!(event.review_body, "Looks good!");
         assert_eq!(event.review_id, 42);
-        assert_eq!(event.review_state, "approved");
+        assert_eq!(event.review_state, domain::ReviewState::Approved);
         assert_eq!(event.title, "Fix typo");
     }
 
@@ -2262,7 +2262,7 @@ mod tests {
             domain::WebhookEvent::PullRequestReview(e) => e,
             other => panic!("expected PullRequestReview, got {other:?}"),
         };
-        assert_eq!(event.review_state, "request_changes");
+        assert_eq!(event.review_state, domain::ReviewState::RequestChanges);
     }
 
     #[test]
@@ -2318,7 +2318,7 @@ mod tests {
             domain::WebhookEvent::PullRequestReview(e) => e,
             other => panic!("expected PullRequestReview, got {other:?}"),
         };
-        assert_eq!(event.review_state, "approved");
+        assert_eq!(event.review_state, domain::ReviewState::Approved);
         assert_eq!(event.review_body, "");
         assert_eq!(event.review_id, 0);
         assert_eq!(event.index, 8);
@@ -2426,7 +2426,7 @@ mod tests {
             domain::WebhookEvent::PullRequestReview(e) => e,
             other => panic!("expected PullRequestReview, got {other:?}"),
         };
-        assert_eq!(event.review_state, "approved");
+        assert_eq!(event.review_state, domain::ReviewState::Approved);
     }
 
     #[test]
