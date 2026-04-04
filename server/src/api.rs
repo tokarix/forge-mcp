@@ -173,6 +173,8 @@ pub struct UpdateIssueBody {
 #[derive(Debug, Serialize)]
 pub struct AgentInfoResult {
     pub agent_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch_prefix: Option<String>,
     pub forges: Vec<AgentForgeInfo>,
 }
 

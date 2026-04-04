@@ -1530,6 +1530,7 @@ pub async fn agent_info(State(state): State<AppState>, headers: HeaderMap) -> im
 
     Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(crate::api::AgentInfoResult {
         agent_id: agent.identity.agent_id.clone(),
+        branch_prefix: agent.policy.branch_prefix.clone(),
         forges,
     }))
 }
@@ -2540,6 +2541,7 @@ mod tests {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["agent_id"], "codex");
+        assert_eq!(json["branch_prefix"], "agent/");
         let forges = json["forges"].as_array().unwrap();
         assert_eq!(forges.len(), 1);
         assert_eq!(forges[0]["alias"], "test-forge");
@@ -2658,6 +2660,50 @@ mod tests {
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].action, "agent_info");
         assert_eq!(records[0].target, "self");
+    }
+
+    #[tokio::test]
+    async fn agent_info_omits_branch_prefix_when_none() {
+        let configs = vec![crate::config::AgentConfig {
+            agent_id: "noprefix".to_string(),
+            forge_identity: std::collections::HashMap::new(),
+            policy: AgentPolicyConfig {
+                allowed_repos: vec!["*".to_string()],
+                branch_prefix: None,
+                protected_paths: vec![],
+            },
+            session_id: "default".to_string(),
+            token: "noprefix-token".to_string(),
+        }];
+
+        let state = AppState {
+            agent_registry: AgentRegistry::from_configs(&configs),
+            audit_sink: Arc::new(audit::InMemoryAuditSink::new()),
+            auto_merge_service: test_auto_merge_service(),
+            event_bus: crate::events::EventBus::new(),
+            forge_registry: Arc::new(crate::registry::ForgeRegistry::new(
+                std::collections::HashMap::new(),
+            )),
+        };
+
+        let app = crate::build_router(state, false);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/agent/info")
+                    .header("authorization", "Bearer noprefix-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["agent_id"], "noprefix");
+        assert!(json.get("branch_prefix").is_none());
     }
 
     #[tokio::test]
