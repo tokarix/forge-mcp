@@ -85,11 +85,22 @@ do not file a duplicate.
 
 ### Write Workflow
 
-1. Clone the repo via git proxy
-2. Make changes locally
-3. Generate a git-format patch with git itself, for example `git diff --no-ext-diff --binary`, `git diff --cached --no-ext-diff --binary`, or `git show`
-4. Validate the patch locally with `git apply --check` (or `git apply --check --index`) and then submit via `commit_patch` with the diff, target branch name, and commit message
-5. Open a pull request via `open_change_request`
+Always work in a **detached git worktree** — never edit files in the main checkout. This keeps the main working tree clean and prevents patches from picking up unrelated changes, especially when multiple agents share the same repository.
+
+1. Clone the repo via git proxy (skip if already cloned)
+2. Fetch the latest base branch: `git fetch origin master`
+3. Create a worktree for the feature branch:
+   ```bash
+   git worktree add /tmp/<repo>-<feature> origin/master
+   ```
+4. Make changes in the worktree
+5. Generate a git-format patch from the worktree with git itself, for example `git diff --no-ext-diff --binary`, `git diff --cached --no-ext-diff --binary`, or `git show`
+6. Validate the patch locally with `git apply --check` (or `git apply --check --index`) and then submit via `commit_patch` with the diff, target branch name, and commit message
+7. Open a pull request via `open_change_request`
+8. Remove the worktree when done (it will have dirty files after patch generation):
+   ```bash
+   git worktree remove --force /tmp/<repo>-<feature>
+   ```
 
 **Patch format:**
 - `commit_patch` only accepts git diff format starting with `diff --git`
@@ -106,10 +117,16 @@ do not file a duplicate.
 When a reviewer requests changes on a PR:
 
 1. Read the review with `get_change_request_comments`
-2. Make fixes locally, generate patches with `git diff --no-ext-diff --binary`
-3. Push fixes with `commit_patch` using `existing_branch: true`
-4. Squash fixup commits into the right logical commits with `rebase_branch` — never leave fixup-style follow-up commits in the final series
-5. Each commit in the result must be self-contained and independently buildable
+2. If the worktree from the original work no longer exists, create one from the PR branch:
+   ```bash
+   git fetch origin <pr-branch>
+   git worktree add /tmp/<repo>-<feature> FETCH_HEAD
+   ```
+3. Make fixes in the worktree, generate patches with `git diff --no-ext-diff --binary`
+4. Push fixes with `commit_patch` using `existing_branch: true`
+5. Squash fixup commits into the right logical commits with `rebase_branch` — never leave fixup-style follow-up commits in the final series
+6. Each commit in the result must be self-contained and independently buildable
+7. Remove the worktree when done: `git worktree remove --force /tmp/<repo>-<feature>`
 
 **Never ask the user to run git commands manually.** The tools above cover the full workflow: committing, rebasing, and force-pushing are all handled server-side.
 
@@ -123,3 +140,4 @@ When a reviewer requests changes on a PR:
 | Touching CI/workflow files | These are protected paths -- the gateway will reject |
 | Using Bearer auth with git | Git sends Basic auth -- use password field for token |
 | Hand-written or traditional unified diff patch | Generate the patch with `git diff --no-ext-diff --binary` or `git show`, then verify with `git apply --check` |
+| Editing files in the main checkout | Always use a detached `git worktree` — the main checkout accumulates drift and picks up unrelated changes |
