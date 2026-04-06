@@ -458,6 +458,17 @@ mod tests {
         ) -> Result<domain::IssueComment, forge::ForgeError> {
             unimplemented!()
         }
+        async fn create_commit_status(
+            &self,
+            _: &domain::RepositoryRef,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &domain::ForgeCredential,
+        ) -> Result<(), forge::ForgeError> {
+            unimplemented!()
+        }
         async fn create_issue(
             &self,
             _: &domain::RepositoryRef,

@@ -1282,6 +1282,17 @@ mod tests {
         ) -> Result<domain::IssueComment, ForgeError> {
             unimplemented!()
         }
+        async fn create_commit_status(
+            &self,
+            _: &RepositoryRef,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<(), ForgeError> {
+            unimplemented!()
+        }
         async fn create_issue(
             &self,
             _: &RepositoryRef,
@@ -1519,6 +1530,17 @@ mod tests {
             _: &str,
             _: &ForgeCredential,
         ) -> Result<domain::IssueComment, ForgeError> {
+            unimplemented!()
+        }
+        async fn create_commit_status(
+            &self,
+            _: &RepositoryRef,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<(), ForgeError> {
             unimplemented!()
         }
         async fn create_issue(
@@ -1850,6 +1872,17 @@ mod tests {
             _: &str,
             _: &ForgeCredential,
         ) -> Result<domain::IssueComment, ForgeError> {
+            unimplemented!()
+        }
+        async fn create_commit_status(
+            &self,
+            _: &RepositoryRef,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<(), ForgeError> {
             unimplemented!()
         }
         async fn create_issue(
@@ -2544,6 +2577,17 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
         ) -> Result<domain::IssueComment, ForgeError> {
             unimplemented!()
         }
+        async fn create_commit_status(
+            &self,
+            _: &RepositoryRef,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<(), ForgeError> {
+            unimplemented!()
+        }
         async fn create_issue(
             &self,
             _: &RepositoryRef,
@@ -3021,6 +3065,17 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
         ) -> Result<domain::IssueComment, ForgeError> {
             unimplemented!()
         }
+        async fn create_commit_status(
+            &self,
+            _: &RepositoryRef,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<(), ForgeError> {
+            unimplemented!()
+        }
         async fn create_issue(
             &self,
             _: &RepositoryRef,
@@ -3325,6 +3380,17 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             _: &ForgeCredential,
         ) -> Result<domain::IssueComment, ForgeError> {
             unimplemented!()
+        }
+        async fn create_commit_status(
+            &self,
+            _: &RepositoryRef,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<(), ForgeError> {
+            Ok(())
         }
         async fn create_issue(
             &self,

@@ -109,6 +109,17 @@ pub trait ForgeAdapter: Send + Sync {
         credential: &ForgeCredential,
     ) -> Result<ChangeRequest, ForgeError>;
 
+    /// Creates a commit status on the given SHA.
+    async fn create_commit_status(
+        &self,
+        repository: &RepositoryRef,
+        sha: &str,
+        context: &str,
+        description: &str,
+        state: &str,
+        credential: &ForgeCredential,
+    ) -> Result<(), ForgeError>;
+
     /// Creates a new issue.
     async fn create_issue(
         &self,
@@ -993,6 +1004,43 @@ impl ForgeAdapter for ForgejoAdapter {
 
         let pr: ForgejoPullRequest = response.json().await?;
         Ok(pr.into_change_request())
+    }
+
+    async fn create_commit_status(
+        &self,
+        repository: &RepositoryRef,
+        sha: &str,
+        context: &str,
+        description: &str,
+        state: &str,
+        credential: &ForgeCredential,
+    ) -> Result<(), ForgeError> {
+        let url = format!(
+            "{}/api/v1/repos/{}/{}/statuses/{}",
+            self.config.base_url.trim_end_matches('/'),
+            repository.owner,
+            repository.name,
+            sha,
+        );
+
+        let effective_token = credential.token.as_deref().or(self.config.token.as_deref());
+        let mut request = self.client.post(&url).json(&serde_json::json!({
+            "context": context,
+            "description": description,
+            "state": state,
+        }));
+        if let Some(token) = effective_token {
+            request = request.bearer_auth(token);
+        }
+
+        let response = request.send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(ForgeError::UnexpectedStatus { status, body });
+        }
+
+        Ok(())
     }
 
     async fn create_issue(
@@ -1892,6 +1940,93 @@ mod tests {
             name: "repo".to_string(),
             owner: "org".to_string(),
         }
+    }
+
+    #[tokio::test]
+    async fn create_commit_status_sends_correct_body() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path_regex(r"/api/v1/repos/.+/statuses/.+"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({})))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        adapter
+            .create_commit_status(
+                &test_repo(),
+                "abc123sha",
+                "forge-mcp/auto-merge",
+                "auto-merge scheduled",
+                "success",
+                &cred,
+            )
+            .await
+            .unwrap();
+
+        let requests = mock.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        let body: serde_json::Value =
+            serde_json::from_slice(&requests[0].body).expect("valid JSON");
+        assert_eq!(body["context"], "forge-mcp/auto-merge");
+        assert_eq!(body["description"], "auto-merge scheduled");
+        assert_eq!(body["state"], "success");
+    }
+
+    #[tokio::test]
+    async fn create_commit_status_uses_correct_url() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path_regex(r"/api/v1/repos/org/repo/statuses/abc123sha"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({})))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        adapter
+            .create_commit_status(
+                &test_repo(),
+                "abc123sha",
+                "ci/test",
+                "all good",
+                "success",
+                &cred,
+            )
+            .await
+            .unwrap();
+
+        let requests = mock.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn create_commit_status_propagates_error_on_failure() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path_regex(r"/api/v1/repos/.+/statuses/.+"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let result = adapter
+            .create_commit_status(
+                &test_repo(),
+                "abc123sha",
+                "ci/test",
+                "test",
+                "success",
+                &cred,
+            )
+            .await;
+
+        assert!(result.is_err());
     }
 
     #[tokio::test]
