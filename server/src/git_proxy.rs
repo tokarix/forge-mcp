@@ -423,6 +423,15 @@ mod tests {
 
     #[async_trait::async_trait]
     impl forge::ForgeAdapter for FakeForgeAdapter {
+        async fn add_issue_label(
+            &self,
+            _: &domain::RepositoryRef,
+            _: u64,
+            _: &str,
+            _: &domain::ForgeCredential,
+        ) -> Result<domain::Issue, forge::ForgeError> {
+            unimplemented!()
+        }
         async fn assign_issue(
             &self,
             _: &domain::RepositoryRef,
@@ -480,6 +489,15 @@ mod tests {
             _: Option<&str>,
             _: &domain::ForgeCredential,
         ) -> Result<Vec<domain::Issue>, forge::ForgeError> {
+            unimplemented!()
+        }
+        async fn remove_issue_label(
+            &self,
+            _: &domain::RepositoryRef,
+            _: u64,
+            _: &str,
+            _: &domain::ForgeCredential,
+        ) -> Result<domain::Issue, forge::ForgeError> {
             unimplemented!()
         }
         async fn get_authenticated_user(
@@ -702,6 +720,14 @@ mod tests {
 
     #[async_trait::async_trait]
     impl domain::RepositoryWriteService for FakeWriteService {
+        async fn add_issue_label(
+            &self,
+            _: domain::AddIssueLabelRequest,
+            _: domain::policy::AuthorizedWrite,
+            _: &domain::ForgeCredential,
+        ) -> Result<domain::Issue, domain::ServiceError> {
+            unimplemented!()
+        }
         async fn assign_issue(
             &self,
             _: domain::AssignIssueRequest,
@@ -797,6 +823,15 @@ mod tests {
             _authorized: domain::policy::AuthorizedWrite,
             _credential: &domain::ForgeCredential,
         ) -> Result<domain::RebaseBranchResponse, ServiceError> {
+            unimplemented!()
+        }
+
+        async fn remove_issue_label(
+            &self,
+            _: domain::RemoveIssueLabelRequest,
+            _: domain::policy::AuthorizedWrite,
+            _: &domain::ForgeCredential,
+        ) -> Result<domain::Issue, domain::ServiceError> {
             unimplemented!()
         }
 

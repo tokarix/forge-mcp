@@ -39,6 +39,16 @@ pub enum ForgeWebhookError {
 
 #[async_trait]
 pub trait ForgeAdapter: Send + Sync {
+    /// Adds a label to an issue, creating the label on the repo if it does
+    /// not already exist.
+    async fn add_issue_label(
+        &self,
+        repository: &RepositoryRef,
+        index: u64,
+        label: &str,
+        credential: &ForgeCredential,
+    ) -> Result<domain::Issue, ForgeError>;
+
     /// Retrieves the authenticated user's identity from the forge.
     async fn get_authenticated_user(
         &self,
@@ -195,6 +205,15 @@ pub trait ForgeAdapter: Send + Sync {
         credential: &ForgeCredential,
     ) -> Result<(), ForgeError>;
 
+    /// Removes a label from an issue.
+    async fn remove_issue_label(
+        &self,
+        repository: &RepositoryRef,
+        index: u64,
+        label: &str,
+        credential: &ForgeCredential,
+    ) -> Result<domain::Issue, ForgeError>;
+
     /// Reads a single file from the backing forge.
     ///
     /// # Errors
@@ -321,6 +340,76 @@ impl ForgejoAdapter {
             .json()
             .await
             .map_err(|e| ForgeError::InvalidPayload(e.to_string()))
+    }
+
+    /// Lists repo labels and returns the ID for a label matching `name`, or
+    /// `None` if no such label exists.
+    async fn find_label_id(
+        &self,
+        repository: &RepositoryRef,
+        name: &str,
+        token: Option<&str>,
+    ) -> Result<Option<u64>, ForgeError> {
+        let url = format!(
+            "{}/api/v1/repos/{}/{}/labels",
+            self.config.base_url.trim_end_matches('/'),
+            repository.owner,
+            repository.name,
+        );
+
+        let mut request = self.client.get(&url);
+        if let Some(token) = token {
+            request = request.bearer_auth(token);
+        }
+
+        let response = request.send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(ForgeError::UnexpectedStatus { status, body });
+        }
+
+        let labels: Vec<ForgejoLabelResponse> = response.json().await?;
+        Ok(labels.into_iter().find(|l| l.name == name).map(|l| l.id))
+    }
+
+    /// Finds a repo label by name, creating it if it does not exist. Returns
+    /// the label's numeric ID.
+    async fn find_or_create_label(
+        &self,
+        repository: &RepositoryRef,
+        name: &str,
+        token: Option<&str>,
+    ) -> Result<u64, ForgeError> {
+        if let Some(id) = self.find_label_id(repository, name, token).await? {
+            return Ok(id);
+        }
+
+        // Create the label with a default colour.
+        let url = format!(
+            "{}/api/v1/repos/{}/{}/labels",
+            self.config.base_url.trim_end_matches('/'),
+            repository.owner,
+            repository.name,
+        );
+
+        let mut request = self.client.post(&url).json(&serde_json::json!({
+            "color": "#0075ca",
+            "name": name,
+        }));
+        if let Some(token) = token {
+            request = request.bearer_auth(token);
+        }
+
+        let response = request.send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(ForgeError::UnexpectedStatus { status, body });
+        }
+
+        let label: ForgejoLabelResponse = response.json().await?;
+        Ok(label.id)
     }
 }
 
@@ -474,6 +563,7 @@ impl ForgejoIssueCommentResponse {
 
 #[derive(Debug, Deserialize)]
 struct ForgejoLabelResponse {
+    id: u64,
     name: String,
 }
 
@@ -630,6 +720,45 @@ struct ForgejoWebhookReview {
 
 #[async_trait]
 impl ForgeAdapter for ForgejoAdapter {
+    async fn add_issue_label(
+        &self,
+        repository: &RepositoryRef,
+        index: u64,
+        label: &str,
+        credential: &ForgeCredential,
+    ) -> Result<domain::Issue, ForgeError> {
+        let base = self.config.base_url.trim_end_matches('/');
+        let effective_token = credential.token.as_deref().or(self.config.token.as_deref());
+
+        // 1. Find or create the label to get its numeric ID.
+        let label_id = self
+            .find_or_create_label(repository, label, effective_token)
+            .await?;
+
+        // 2. Add the label to the issue.
+        let url = format!(
+            "{base}/api/v1/repos/{}/{}/issues/{index}/labels",
+            repository.owner, repository.name,
+        );
+        let mut request = self
+            .client
+            .post(&url)
+            .json(&serde_json::json!({"labels": [label_id]}));
+        if let Some(token) = effective_token {
+            request = request.bearer_auth(token);
+        }
+
+        let response = request.send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(ForgeError::UnexpectedStatus { status, body });
+        }
+
+        // 3. Return the full updated issue.
+        self.get_issue(repository, index, credential).await
+    }
+
     async fn get_authenticated_user(
         &self,
         credential: &ForgeCredential,
@@ -1210,6 +1339,43 @@ impl ForgeAdapter for ForgejoAdapter {
             .into_iter()
             .map(ForgejoIssueResponse::into_issue)
             .collect())
+    }
+
+    async fn remove_issue_label(
+        &self,
+        repository: &RepositoryRef,
+        index: u64,
+        label: &str,
+        credential: &ForgeCredential,
+    ) -> Result<domain::Issue, ForgeError> {
+        let base = self.config.base_url.trim_end_matches('/');
+        let effective_token = credential.token.as_deref().or(self.config.token.as_deref());
+
+        // 1. Find the label ID by name.
+        let label_id = self
+            .find_label_id(repository, label, effective_token)
+            .await?
+            .ok_or_else(|| ForgeError::InvalidPayload(format!("label '{label}' not found")))?;
+
+        // 2. Remove the label from the issue.
+        let url = format!(
+            "{base}/api/v1/repos/{}/{}/issues/{index}/labels/{label_id}",
+            repository.owner, repository.name,
+        );
+        let mut request = self.client.delete(&url);
+        if let Some(token) = effective_token {
+            request = request.bearer_auth(token);
+        }
+
+        let response = request.send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(ForgeError::UnexpectedStatus { status, body });
+        }
+
+        // 3. Return the full updated issue.
+        self.get_issue(repository, index, credential).await
     }
 
     async fn schedule_auto_merge(
@@ -2587,7 +2753,7 @@ mod tests {
                 "body": "Something is broken",
                 "state": "open",
                 "html_url": "https://forge.example/org/repo/issues/42",
-                "labels": [{"name": "bug"}],
+                "labels": [{"id": 1, "name": "bug"}],
                 "assignees": []
             })))
             .mount(&mock)
@@ -2612,5 +2778,200 @@ mod tests {
             serde_json::from_slice(&requests[0].body).expect("valid JSON");
         assert_eq!(req_body["title"], "Bug report");
         assert_eq!(req_body["body"], "Something is broken");
+    }
+
+    #[tokio::test]
+    async fn add_issue_label_creates_label_when_missing() {
+        let mock = MockServer::start().await;
+
+        // 1. GET labels returns empty (label doesn't exist).
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/.+/.+/labels$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .mount(&mock)
+            .await;
+
+        // 2. POST to create the label.
+        Mock::given(method("POST"))
+            .and(path_regex(r"/api/v1/repos/.+/.+/labels$"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": 7,
+                "name": "needs-input",
+            })))
+            .mount(&mock)
+            .await;
+
+        // 3. POST to add label to issue.
+        Mock::given(method("POST"))
+            .and(path_regex(r"/api/v1/repos/.+/.+/issues/\d+/labels$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"id": 7, "name": "needs-input"}
+            ])))
+            .mount(&mock)
+            .await;
+
+        // 4. GET issue to return full state.
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/.+/.+/issues/\d+$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "number": 1,
+                "title": "Test issue",
+                "body": "",
+                "state": "open",
+                "html_url": "https://forge.example/org/repo/issues/1",
+                "labels": [{"id": 7, "name": "needs-input"}],
+                "assignees": []
+            })))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let issue = adapter
+            .add_issue_label(&test_repo(), 1, "needs-input", &cred)
+            .await
+            .unwrap();
+
+        assert_eq!(issue.labels, vec!["needs-input"]);
+
+        let requests = mock.received_requests().await.unwrap();
+        // GET labels, POST create label, POST add label, GET issue
+        assert_eq!(requests.len(), 4);
+        assert_eq!(requests[0].method.as_str(), "GET");
+        assert_eq!(requests[1].method.as_str(), "POST");
+        let create_body: serde_json::Value =
+            serde_json::from_slice(&requests[1].body).expect("valid JSON");
+        assert_eq!(create_body["name"], "needs-input");
+    }
+
+    #[tokio::test]
+    async fn add_issue_label_reuses_existing_label() {
+        let mock = MockServer::start().await;
+
+        // 1. GET labels returns the label (already exists).
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/.+/.+/labels$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"id": 3, "name": "bug"},
+                {"id": 5, "name": "needs-input"}
+            ])))
+            .mount(&mock)
+            .await;
+
+        // 2. POST to add label to issue.
+        Mock::given(method("POST"))
+            .and(path_regex(r"/api/v1/repos/.+/.+/issues/\d+/labels$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"id": 5, "name": "needs-input"}
+            ])))
+            .mount(&mock)
+            .await;
+
+        // 3. GET issue.
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/.+/.+/issues/\d+$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "number": 2,
+                "title": "Test",
+                "body": "",
+                "state": "open",
+                "html_url": "https://forge.example/org/repo/issues/2",
+                "labels": [{"id": 5, "name": "needs-input"}],
+                "assignees": []
+            })))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let issue = adapter
+            .add_issue_label(&test_repo(), 2, "needs-input", &cred)
+            .await
+            .unwrap();
+
+        assert_eq!(issue.labels, vec!["needs-input"]);
+
+        let requests = mock.received_requests().await.unwrap();
+        // GET labels, POST add label, GET issue (no create — label existed)
+        assert_eq!(requests.len(), 3);
+        let add_body: serde_json::Value =
+            serde_json::from_slice(&requests[1].body).expect("valid JSON");
+        assert_eq!(add_body["labels"], serde_json::json!([5]));
+    }
+
+    #[tokio::test]
+    async fn remove_issue_label_deletes_by_id() {
+        let mock = MockServer::start().await;
+
+        // 1. GET labels to find the label ID.
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/.+/.+/labels$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"id": 3, "name": "bug"},
+                {"id": 5, "name": "needs-input"}
+            ])))
+            .mount(&mock)
+            .await;
+
+        // 2. DELETE label from issue.
+        Mock::given(method("DELETE"))
+            .and(path_regex(r"/api/v1/repos/.+/.+/issues/\d+/labels/\d+$"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&mock)
+            .await;
+
+        // 3. GET issue.
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/.+/.+/issues/\d+$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "number": 1,
+                "title": "Test",
+                "body": "",
+                "state": "open",
+                "html_url": "https://forge.example/org/repo/issues/1",
+                "labels": [{"id": 3, "name": "bug"}],
+                "assignees": []
+            })))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let issue = adapter
+            .remove_issue_label(&test_repo(), 1, "needs-input", &cred)
+            .await
+            .unwrap();
+
+        assert_eq!(issue.labels, vec!["bug"]);
+
+        let requests = mock.received_requests().await.unwrap();
+        // GET labels, DELETE label, GET issue
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[1].method.as_str(), "DELETE");
+        assert!(requests[1].url.path().ends_with("/labels/5"));
+    }
+
+    #[tokio::test]
+    async fn remove_issue_label_errors_when_label_not_found() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/.+/.+/labels$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let result = adapter
+            .remove_issue_label(&test_repo(), 1, "nonexistent", &cred)
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("not found"),
+            "expected 'not found' in error: {err}"
+        );
     }
 }

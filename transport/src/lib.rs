@@ -86,6 +86,22 @@ pub enum TransportError {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct AddIssueLabelTool {
+    /// Forge alias -- use `forge_info` to discover available aliases.
+    pub forge: String,
+    /// Issue index number.
+    #[serde(deserialize_with = "deserialize_u64_lenient")]
+    pub index: u64,
+    /// Label name to add. The label will be created on the repository if it
+    /// does not already exist.
+    pub label: String,
+    /// Repository owner or organization.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct AssignIssueTool {
     /// User to assign the issue to.
     pub assignee: String,
@@ -416,6 +432,21 @@ pub struct ReadRepositoryFileTool {
     pub owner: String,
     /// Repository-relative file path.
     pub path: String,
+    /// Repository name.
+    pub repo: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RemoveIssueLabelTool {
+    /// Forge alias -- use `forge_info` to discover available aliases.
+    pub forge: String,
+    /// Issue index number.
+    #[serde(deserialize_with = "deserialize_u64_lenient")]
+    pub index: u64,
+    /// Label name to remove.
+    pub label: String,
+    /// Repository owner or organization.
+    pub owner: String,
     /// Repository name.
     pub repo: String,
 }
@@ -1060,6 +1091,30 @@ async fn sleep_with_peer_check(peer: &rmcp::service::Peer<RoleServer>, duration:
 
 #[tool_router]
 impl McpShim {
+    /// Add a label to an issue, creating the label if it does not exist.
+    #[tool(
+        name = "add_issue_label",
+        description = "Add a label to an issue. Creates the label on the repository if it does not already exist."
+    )]
+    async fn add_issue_label(
+        &self,
+        Parameters(request): Parameters<AddIssueLabelTool>,
+    ) -> Result<String, McpError> {
+        let url = self.build_url(&[
+            "api",
+            "v1",
+            "repos",
+            &request.forge,
+            &request.owner,
+            &request.repo,
+            "issues",
+            &request.index.to_string(),
+            "labels",
+        ])?;
+        let body = serde_json::json!({"label": request.label});
+        self.gateway_post(url, &body).await
+    }
+
     /// Assign an issue to a user.
     #[tool(name = "assign_issue", description = "Assign an issue to a user.")]
     async fn assign_issue(
@@ -1550,6 +1605,30 @@ impl McpShim {
             .ok_or_else(|| McpError::internal_error("missing content field".to_string(), None))
     }
 
+    /// Remove a label from an issue.
+    #[tool(
+        name = "remove_issue_label",
+        description = "Remove a label from an issue."
+    )]
+    async fn remove_issue_label(
+        &self,
+        Parameters(request): Parameters<RemoveIssueLabelTool>,
+    ) -> Result<String, McpError> {
+        let url = self.build_url(&[
+            "api",
+            "v1",
+            "repos",
+            &request.forge,
+            &request.owner,
+            &request.repo,
+            "issues",
+            &request.index.to_string(),
+            "labels",
+            &request.label,
+        ])?;
+        self.gateway_delete(url).await
+    }
+
     /// Submit a formal review on a change request (pull request).
     #[tool(
         name = "submit_change_request_review",
@@ -1735,6 +1814,35 @@ mod tests {
     use tokio::sync::{Mutex, Notify};
 
     use super::*;
+
+    #[test]
+    fn deserialize_add_issue_label_tool() {
+        let json = r#"{"forge":"f","index":5,"label":"needs-input","owner":"o","repo":"r"}"#;
+        let tool: AddIssueLabelTool = serde_json::from_str(json).unwrap();
+        assert_eq!(tool.forge, "f");
+        assert_eq!(tool.index, 5);
+        assert_eq!(tool.label, "needs-input");
+        assert_eq!(tool.owner, "o");
+        assert_eq!(tool.repo, "r");
+    }
+
+    #[test]
+    fn deserialize_add_issue_label_tool_string_index() {
+        let json = r#"{"forge":"f","index":"5","label":"needs-input","owner":"o","repo":"r"}"#;
+        let tool: AddIssueLabelTool = serde_json::from_str(json).unwrap();
+        assert_eq!(tool.index, 5);
+    }
+
+    #[test]
+    fn deserialize_remove_issue_label_tool() {
+        let json = r#"{"forge":"f","index":3,"label":"needs-input","owner":"o","repo":"r"}"#;
+        let tool: RemoveIssueLabelTool = serde_json::from_str(json).unwrap();
+        assert_eq!(tool.forge, "f");
+        assert_eq!(tool.index, 3);
+        assert_eq!(tool.label, "needs-input");
+        assert_eq!(tool.owner, "o");
+        assert_eq!(tool.repo, "r");
+    }
 
     #[test]
     fn deserialize_index_from_number() {

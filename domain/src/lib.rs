@@ -599,6 +599,14 @@ pub enum WebhookEvent {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AddIssueLabelRequest {
+    pub agent: AgentIdentity,
+    pub index: u64,
+    pub label: String,
+    pub repository: RepositoryRef,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AssignIssueRequest {
     pub agent: AgentIdentity,
     pub assignee: String,
@@ -734,6 +742,14 @@ pub struct RebaseBranchRequest {
 pub struct RebaseBranchResponse {
     pub branch: String,
     pub commit_sha: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemoveIssueLabelRequest {
+    pub agent: AgentIdentity,
+    pub index: u64,
+    pub label: String,
+    pub repository: RepositoryRef,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -913,6 +929,20 @@ pub trait RepositoryReadService: Send + Sync {
 
 #[async_trait]
 pub trait RepositoryWriteService: Send + Sync {
+    /// Adds a label to an issue, creating the label on the repo if it does
+    /// not already exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the upstream forge request fails or audit
+    /// recording fails.
+    async fn add_issue_label(
+        &self,
+        request: AddIssueLabelRequest,
+        authorized: policy::AuthorizedWrite,
+        credential: &ForgeCredential,
+    ) -> Result<Issue, ServiceError>;
+
     /// Assigns an issue to a user.
     ///
     /// # Errors
@@ -1056,6 +1086,19 @@ pub trait RepositoryWriteService: Send + Sync {
         authorized: policy::AuthorizedWrite,
         credential: &ForgeCredential,
     ) -> Result<ChangeRequestReview, ServiceError>;
+
+    /// Removes a label from an issue.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the upstream forge request fails or audit
+    /// recording fails.
+    async fn remove_issue_label(
+        &self,
+        request: RemoveIssueLabelRequest,
+        authorized: policy::AuthorizedWrite,
+        credential: &ForgeCredential,
+    ) -> Result<Issue, ServiceError>;
 
     /// Updates a change request's title and/or body.
     ///

@@ -24,10 +24,10 @@ use domain::{
 
 use crate::api::AgentEventsQuery;
 use crate::api::{
-    CommentBody, CommentOnIssueBody, CommitPatchBody, CommitPatchResult, ContentsPath,
-    ContentsQuery, ContentsResult, CreateIssueBody, ErrorBody, IssuePath, ListIssuesQuery,
-    ListPullsQuery, OpenPullBody, PullPath, RebaseBranchBody, RebaseBranchResult,
-    RebaseOperationBody, RepoPath, ScheduleAutoMergeBody, SubmitReviewBody,
+    AddIssueLabelBody, CommentBody, CommentOnIssueBody, CommitPatchBody, CommitPatchResult,
+    ContentsPath, ContentsQuery, ContentsResult, CreateIssueBody, ErrorBody, IssueLabelPath,
+    IssuePath, ListIssuesQuery, ListPullsQuery, OpenPullBody, PullPath, RebaseBranchBody,
+    RebaseBranchResult, RebaseOperationBody, RepoPath, ScheduleAutoMergeBody, SubmitReviewBody,
     UpdateChangeRequestBody, UpdateIssueBody,
 };
 use crate::auth::{AgentRegistry, extract_bearer_token};
@@ -1474,6 +1474,117 @@ pub async fn update_issue(
     ))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/repos/{forge}/{owner}/{repo}/issues/{index}/labels",
+    params(
+        ("forge" = String, Path, description = "Forge alias"),
+        ("owner" = String, Path, description = "Repository owner"),
+        ("repo" = String, Path, description = "Repository name"),
+        ("index" = u64, Path, description = "Issue index"),
+    ),
+    request_body = AddIssueLabelBody,
+    responses(
+        (status = 200, description = "Label added"),
+        (status = 401, description = "Unauthorized", body = ErrorBody),
+    ),
+    security(("bearer" = []))
+)]
+/// POST /api/v1/repos/{forge}/{owner}/{repo}/issues/{index}/labels
+pub async fn add_issue_label(
+    State(state): State<AppState>,
+    Path(path): Path<IssuePath>,
+    headers: HeaderMap,
+    Json(body): Json<AddIssueLabelBody>,
+) -> impl IntoResponse {
+    let forge = resolve_forge(&state.forge_registry, &path.forge)?;
+    let agent = resolve_agent(
+        &headers,
+        &state.agent_registry,
+        &path.forge,
+        &path.owner,
+        &path.repo,
+    )?;
+    let credential = resolve_credential(agent, &path.forge, forge);
+    let authorized = domain::policy::AuthorizedWrite {
+        policy: agent.policy.clone(),
+    };
+
+    let result = forge
+        .write_service
+        .add_issue_label(
+            domain::AddIssueLabelRequest {
+                agent: agent.identity.clone(),
+                index: path.index,
+                label: body.label,
+                repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
+            },
+            authorized,
+            &credential,
+        )
+        .await
+        .map_err(map_service_error)?;
+
+    Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(
+        serde_json::to_value(&result).expect("serializable"),
+    ))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/v1/repos/{forge}/{owner}/{repo}/issues/{index}/labels/{label}",
+    params(
+        ("forge" = String, Path, description = "Forge alias"),
+        ("owner" = String, Path, description = "Repository owner"),
+        ("repo" = String, Path, description = "Repository name"),
+        ("index" = u64, Path, description = "Issue index"),
+        ("label" = String, Path, description = "Label name"),
+    ),
+    responses(
+        (status = 200, description = "Label removed"),
+        (status = 401, description = "Unauthorized", body = ErrorBody),
+    ),
+    security(("bearer" = []))
+)]
+/// DELETE /api/v1/repos/{forge}/{owner}/{repo}/issues/{index}/labels/{label}
+pub async fn remove_issue_label(
+    State(state): State<AppState>,
+    Path(path): Path<IssueLabelPath>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let forge = resolve_forge(&state.forge_registry, &path.forge)?;
+    let agent = resolve_agent(
+        &headers,
+        &state.agent_registry,
+        &path.forge,
+        &path.owner,
+        &path.repo,
+    )?;
+    let credential = resolve_credential(agent, &path.forge, forge);
+    let authorized = domain::policy::AuthorizedWrite {
+        policy: agent.policy.clone(),
+    };
+
+    let result = forge
+        .write_service
+        .remove_issue_label(
+            domain::RemoveIssueLabelRequest {
+                agent: agent.identity.clone(),
+                index: path.index,
+                label: path.label,
+                repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
+            },
+            authorized,
+            &credential,
+        )
+        .await
+        .map_err(map_service_error)?;
+
+    Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(
+        serde_json::to_value(&result).expect("serializable"),
+    ))
+}
+
 /// GET /api/v1/agent/info
 pub async fn agent_info(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
     let token = extract_bearer_token(&headers).ok_or_else(|| {
@@ -1573,6 +1684,15 @@ mod tests {
 
     #[async_trait::async_trait]
     impl forge::ForgeAdapter for FakeForgeAdapter {
+        async fn add_issue_label(
+            &self,
+            _: &domain::RepositoryRef,
+            _: u64,
+            _: &str,
+            _: &domain::ForgeCredential,
+        ) -> Result<domain::Issue, forge::ForgeError> {
+            unimplemented!()
+        }
         async fn assign_issue(
             &self,
             _: &domain::RepositoryRef,
@@ -1630,6 +1750,15 @@ mod tests {
             _: Option<&str>,
             _: &domain::ForgeCredential,
         ) -> Result<Vec<domain::Issue>, forge::ForgeError> {
+            unimplemented!()
+        }
+        async fn remove_issue_label(
+            &self,
+            _: &domain::RepositoryRef,
+            _: u64,
+            _: &str,
+            _: &domain::ForgeCredential,
+        ) -> Result<domain::Issue, forge::ForgeError> {
             unimplemented!()
         }
         async fn get_authenticated_user(
@@ -1869,6 +1998,22 @@ mod tests {
 
     #[async_trait::async_trait]
     impl domain::RepositoryWriteService for FakeWriteService {
+        async fn add_issue_label(
+            &self,
+            request: domain::AddIssueLabelRequest,
+            _: domain::policy::AuthorizedWrite,
+            _: &domain::ForgeCredential,
+        ) -> Result<domain::Issue, ServiceError> {
+            Ok(domain::Issue {
+                assignees: vec![],
+                body: String::new(),
+                index: request.index,
+                labels: vec![request.label],
+                state: "open".to_string(),
+                title: "Issue".to_string(),
+                url: "https://example.com/issues/1".to_string(),
+            })
+        }
         async fn assign_issue(
             &self,
             _: domain::AssignIssueRequest,
@@ -1989,6 +2134,23 @@ mod tests {
             _credential: &domain::ForgeCredential,
         ) -> Result<domain::RebaseBranchResponse, ServiceError> {
             unimplemented!()
+        }
+
+        async fn remove_issue_label(
+            &self,
+            request: domain::RemoveIssueLabelRequest,
+            _: domain::policy::AuthorizedWrite,
+            _: &domain::ForgeCredential,
+        ) -> Result<domain::Issue, ServiceError> {
+            Ok(domain::Issue {
+                assignees: vec![],
+                body: String::new(),
+                index: request.index,
+                labels: vec![],
+                state: "open".to_string(),
+                title: "Issue".to_string(),
+                url: "https://example.com/issues/1".to_string(),
+            })
         }
 
         async fn schedule_auto_merge(

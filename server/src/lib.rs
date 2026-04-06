@@ -19,6 +19,7 @@ use utoipa_scalar::{Scalar, Servable};
 #[derive(OpenApi)]
 #[openapi(
     paths(
+        handlers::add_issue_label,
         handlers::agent_events,
         handlers::close_pull,
         handlers::comment_on_issue,
@@ -35,12 +36,14 @@ use utoipa_scalar::{Scalar, Servable};
         handlers::post_patches,
         handlers::post_pulls,
         handlers::post_rebase,
+        handlers::remove_issue_label,
         handlers::schedule_auto_merge,
         handlers::submit_pull_review,
         handlers::update_issue,
         handlers::update_pull,
     ),
     components(schemas(
+        api::AddIssueLabelBody,
         api::CommentBody,
         api::CommentOnIssueBody,
         api::CommitPatchBody,
@@ -110,6 +113,14 @@ pub fn build_router(state: AppState, enable_docs: bool) -> Router {
         .route(
             "/api/v1/repos/{forge}/{owner}/{repo}/issues/{index}/comments",
             get(handlers::get_issue_comments).post(handlers::comment_on_issue),
+        )
+        .route(
+            "/api/v1/repos/{forge}/{owner}/{repo}/issues/{index}/labels",
+            post(handlers::add_issue_label),
+        )
+        .route(
+            "/api/v1/repos/{forge}/{owner}/{repo}/issues/{index}/labels/{label}",
+            delete(handlers::remove_issue_label),
         )
         .route(
             "/api/v1/repos/{forge}/{owner}/{repo}/pulls",

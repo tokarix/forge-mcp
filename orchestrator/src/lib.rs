@@ -5,13 +5,14 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use audit::{AuditRecord, AuditSink};
 use domain::{
-    AssignIssueRequest, ChangeRequest, ChangeRequestComment, ChangeRequestCommentDetail,
-    ChangeRequestDiff, ChangeRequestReview, CloseChangeRequestRequest, CloseIssueRequest,
-    CommentOnChangeRequestRequest, CommentOnIssueRequest, CreateIssueRequest, ForgeCredential,
-    GetChangeRequestCommentsRequest, GetChangeRequestDiffRequest, GetChangeRequestRequest,
-    GetIssueCommentsRequest, GetIssueRequest, Issue, IssueComment, ListChangeRequestsRequest,
-    ListIssuesRequest, ReadRepositoryFileRequest, ReadRepositoryFileResponse, RebaseBranchRequest,
-    RebaseBranchResponse, RepositoryReadService, ScheduleAutoMergeRequest, ServiceError,
+    AddIssueLabelRequest, AssignIssueRequest, ChangeRequest, ChangeRequestComment,
+    ChangeRequestCommentDetail, ChangeRequestDiff, ChangeRequestReview, CloseChangeRequestRequest,
+    CloseIssueRequest, CommentOnChangeRequestRequest, CommentOnIssueRequest, CreateIssueRequest,
+    ForgeCredential, GetChangeRequestCommentsRequest, GetChangeRequestDiffRequest,
+    GetChangeRequestRequest, GetIssueCommentsRequest, GetIssueRequest, Issue, IssueComment,
+    ListChangeRequestsRequest, ListIssuesRequest, ReadRepositoryFileRequest,
+    ReadRepositoryFileResponse, RebaseBranchRequest, RebaseBranchResponse, RemoveIssueLabelRequest,
+    RepositoryReadService, ScheduleAutoMergeRequest, ServiceError,
     SubmitChangeRequestReviewRequest, UpdateChangeRequestRequest, UpdateIssueRequest,
     validate_repository_path,
 };
@@ -412,6 +413,33 @@ where
     A: ForgeAdapter + 'static,
     S: AuditSink + 'static,
 {
+    async fn add_issue_label(
+        &self,
+        request: AddIssueLabelRequest,
+        _authorized: domain::policy::AuthorizedWrite,
+        credential: &ForgeCredential,
+    ) -> Result<Issue, ServiceError> {
+        self.audit_sink
+            .record(AuditRecord {
+                agent: request.agent,
+                action: "add_issue_label".to_string(),
+                repository: request.repository.clone(),
+                target: format!("#{} +label:{}", request.index, request.label),
+            })
+            .await
+            .map_err(|e| ServiceError::Audit(e.to_string()))?;
+
+        self.adapter
+            .add_issue_label(
+                &request.repository,
+                request.index,
+                &request.label,
+                credential,
+            )
+            .await
+            .map_err(|e| ServiceError::Upstream(e.to_string()))
+    }
+
     async fn assign_issue(
         &self,
         request: AssignIssueRequest,
@@ -925,6 +953,33 @@ where
         })
     }
 
+    async fn remove_issue_label(
+        &self,
+        request: RemoveIssueLabelRequest,
+        _authorized: domain::policy::AuthorizedWrite,
+        credential: &ForgeCredential,
+    ) -> Result<Issue, ServiceError> {
+        self.audit_sink
+            .record(AuditRecord {
+                agent: request.agent,
+                action: "remove_issue_label".to_string(),
+                repository: request.repository.clone(),
+                target: format!("#{} -label:{}", request.index, request.label),
+            })
+            .await
+            .map_err(|e| ServiceError::Audit(e.to_string()))?;
+
+        self.adapter
+            .remove_issue_label(
+                &request.repository,
+                request.index,
+                &request.label,
+                credential,
+            )
+            .await
+            .map_err(|e| ServiceError::Upstream(e.to_string()))
+    }
+
     async fn schedule_auto_merge(
         &self,
         request: ScheduleAutoMergeRequest,
@@ -1192,6 +1247,15 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ForgeAdapter for FakeForgeAdapter {
+        async fn add_issue_label(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            unimplemented!()
+        }
         async fn assign_issue(
             &self,
             _: &RepositoryRef,
@@ -1256,6 +1320,15 @@ mod tests {
             _: Option<&str>,
             _: &ForgeCredential,
         ) -> Result<Vec<domain::Issue>, ForgeError> {
+            unimplemented!()
+        }
+        async fn remove_issue_label(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
             unimplemented!()
         }
         async fn get_authenticated_user(
@@ -1413,6 +1486,15 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ForgeAdapter for FailingForgeAdapter {
+        async fn add_issue_label(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            unimplemented!()
+        }
         async fn assign_issue(
             &self,
             _: &RepositoryRef,
@@ -1477,6 +1559,15 @@ mod tests {
             _: Option<&str>,
             _: &ForgeCredential,
         ) -> Result<Vec<domain::Issue>, ForgeError> {
+            unimplemented!()
+        }
+        async fn remove_issue_label(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
             unimplemented!()
         }
         async fn get_authenticated_user(
@@ -1715,6 +1806,26 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ForgeAdapter for WriteTestForgeAdapter {
+        async fn add_issue_label(
+            &self,
+            repository: &RepositoryRef,
+            index: u64,
+            label: &str,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            Ok(domain::Issue {
+                assignees: vec![],
+                body: String::new(),
+                index,
+                labels: vec![label.to_string()],
+                state: "open".to_string(),
+                title: "Test".to_string(),
+                url: format!(
+                    "https://forge.example/{}/{}/issues/{index}",
+                    repository.owner, repository.name
+                ),
+            })
+        }
         async fn assign_issue(
             &self,
             _: &RepositoryRef,
@@ -1791,6 +1902,26 @@ mod tests {
             _: &ForgeCredential,
         ) -> Result<Vec<domain::Issue>, ForgeError> {
             unimplemented!()
+        }
+        async fn remove_issue_label(
+            &self,
+            repository: &RepositoryRef,
+            index: u64,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            Ok(domain::Issue {
+                assignees: vec![],
+                body: String::new(),
+                index,
+                labels: vec![],
+                state: "open".to_string(),
+                title: "Test".to_string(),
+                url: format!(
+                    "https://forge.example/{}/{}/issues/{index}",
+                    repository.owner, repository.name
+                ),
+            })
         }
         async fn get_authenticated_user(
             &self,
@@ -2296,6 +2427,78 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
         assert_eq!(audit.records()[0].target, "Bug report");
     }
 
+    // --- add_issue_label / remove_issue_label tests ---
+
+    #[tokio::test]
+    async fn add_issue_label_records_audit_and_adds() {
+        let adapter = Arc::new(WriteTestForgeAdapter);
+        let audit = Arc::new(InMemoryAuditSink::new());
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
+
+        let result = orchestrator
+            .add_issue_label(
+                domain::AddIssueLabelRequest {
+                    agent: AgentIdentity {
+                        agent_id: "test-agent".to_string(),
+                        session_id: "test-session".to_string(),
+                    },
+                    index: 5,
+                    label: "needs-input".to_string(),
+                    repository: RepositoryRef {
+                        alias: "test".to_string(),
+                        forge: ForgeKind::Forgejo,
+                        host: "https://forge.example".to_string(),
+                        name: "repo".to_string(),
+                        owner: "org".to_string(),
+                    },
+                },
+                default_authorized(),
+                &domain::ForgeCredential { token: None },
+            )
+            .await
+            .expect("should succeed");
+
+        assert_eq!(result.labels, vec!["needs-input"]);
+        assert_eq!(audit.records().len(), 1);
+        assert_eq!(audit.records()[0].action, "add_issue_label");
+        assert_eq!(audit.records()[0].target, "#5 +label:needs-input");
+    }
+
+    #[tokio::test]
+    async fn remove_issue_label_records_audit_and_removes() {
+        let adapter = Arc::new(WriteTestForgeAdapter);
+        let audit = Arc::new(InMemoryAuditSink::new());
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
+
+        let result = orchestrator
+            .remove_issue_label(
+                domain::RemoveIssueLabelRequest {
+                    agent: AgentIdentity {
+                        agent_id: "test-agent".to_string(),
+                        session_id: "test-session".to_string(),
+                    },
+                    index: 5,
+                    label: "needs-input".to_string(),
+                    repository: RepositoryRef {
+                        alias: "test".to_string(),
+                        forge: ForgeKind::Forgejo,
+                        host: "https://forge.example".to_string(),
+                        name: "repo".to_string(),
+                        owner: "org".to_string(),
+                    },
+                },
+                default_authorized(),
+                &domain::ForgeCredential { token: None },
+            )
+            .await
+            .expect("should succeed");
+
+        assert!(result.labels.is_empty());
+        assert_eq!(audit.records().len(), 1);
+        assert_eq!(audit.records()[0].action, "remove_issue_label");
+        assert_eq!(audit.records()[0].target, "#5 -label:needs-input");
+    }
+
     // --- close_change_request tests ---
 
     /// Fake adapter where `get_change_request` returns a PR with a
@@ -2306,6 +2509,15 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
 
     #[async_trait::async_trait]
     impl ForgeAdapter for CloseTestForgeAdapter {
+        async fn add_issue_label(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            unimplemented!()
+        }
         async fn assign_issue(
             &self,
             _: &RepositoryRef,
@@ -2370,6 +2582,15 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             _: Option<&str>,
             _: &ForgeCredential,
         ) -> Result<Vec<domain::Issue>, ForgeError> {
+            unimplemented!()
+        }
+        async fn remove_issue_label(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
             unimplemented!()
         }
         async fn get_authenticated_user(
@@ -2765,6 +2986,15 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
 
     #[async_trait::async_trait]
     impl ForgeAdapter for CredentialCapturingAdapter {
+        async fn add_issue_label(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            unimplemented!()
+        }
         async fn assign_issue(
             &self,
             _: &RepositoryRef,
@@ -2829,6 +3059,15 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             _: Option<&str>,
             _: &ForgeCredential,
         ) -> Result<Vec<domain::Issue>, ForgeError> {
+            unimplemented!()
+        }
+        async fn remove_issue_label(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
             unimplemented!()
         }
         async fn get_authenticated_user(
@@ -3052,6 +3291,15 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
 
     #[async_trait::async_trait]
     impl ForgeAdapter for AutoMergeTestForgeAdapter {
+        async fn add_issue_label(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            unimplemented!()
+        }
         async fn assign_issue(
             &self,
             _: &RepositoryRef,
@@ -3116,6 +3364,15 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             _: Option<&str>,
             _: &ForgeCredential,
         ) -> Result<Vec<domain::Issue>, ForgeError> {
+            unimplemented!()
+        }
+        async fn remove_issue_label(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
             unimplemented!()
         }
         async fn get_authenticated_user(
