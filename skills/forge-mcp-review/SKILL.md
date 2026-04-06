@@ -50,6 +50,10 @@ Use `comment_on_change_request` only as a fallback when a formal review cannot b
 - Use `REQUEST_CHANGES` for blocking bugs, regressions, missing required tests, or commit-hygiene violations.
 - Use `APPROVED` when there are no blocking findings.
 - Use `COMMENT` for non-blocking follow-up notes or when a formal approval/change-request verdict is not appropriate.
+- **Include the model identifier** in the review body as a footer line. Use the exact model ID from your runtime context (e.g., `claude-opus-4-6`, `gpt-4o`, `o3`) — do not hardcode a model name. Format:
+  ```
+  Reviewed-by: <model-id>
+  ```
 
 ## Independent Review Policy
 
@@ -138,7 +142,9 @@ independent analysis and submit your own verdict.
 Call out commit-structure violations as findings, not optional notes.
 
 You MUST call `submit_change_request_review` with the verdict (APPROVED,
-REQUEST_CHANGES, or COMMENT) and a body summarizing findings. The review
+REQUEST_CHANGES, or COMMENT) and a body summarizing findings. Include a
+`Reviewed-by: <model-id>` footer line in the review body, using your
+exact model ID from runtime context (do not hardcode it). The review
 is not complete until this tool call succeeds.
 
 After posting the review, clean up: remove any git worktrees you created
