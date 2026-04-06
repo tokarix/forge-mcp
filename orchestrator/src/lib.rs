@@ -1066,7 +1066,28 @@ where
                 credential,
             )
             .await
-            .map_err(|e| ServiceError::Upstream(e.to_string()))
+            .map_err(|e| ServiceError::Upstream(e.to_string()))?;
+
+        // 8. Post a synthetic commit status to kick auto-merge evaluation.
+        //
+        // Forgejo only evaluates auto-merge on commit-status, review, or push
+        // events. If all conditions were already met before scheduling, no
+        // event fires and the PR sits forever. A synthetic success status
+        // triggers the evaluation path.  Best-effort: ignore failures since
+        // the auto-merge is already scheduled.
+        let _ = self
+            .adapter
+            .create_commit_status(
+                &request.repository,
+                &current_sha,
+                "forge-mcp/auto-merge",
+                "auto-merge scheduled",
+                "success",
+                credential,
+            )
+            .await;
+
+        Ok(())
     }
 
     async fn submit_change_request_review(
@@ -3323,6 +3344,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
         allowed_merge_styles: Vec<String>,
         default_delete_branch_after_merge: Option<bool>,
         head_sha: Option<String>,
+        recorded_commit_statuses: Mutex<Vec<(String, String)>>,
         recorded_delete_branch_after_merge: Mutex<Vec<Option<bool>>>,
     }
 
@@ -3332,8 +3354,16 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
                 allowed_merge_styles: vec!["rebase".to_string(), "squash".to_string()],
                 default_delete_branch_after_merge: Some(true),
                 head_sha: Some(head_sha.to_string()),
+                recorded_commit_statuses: Mutex::new(Vec::new()),
                 recorded_delete_branch_after_merge: Mutex::new(Vec::new()),
             }
+        }
+
+        fn recorded_commit_statuses(&self) -> Vec<(String, String)> {
+            self.recorded_commit_statuses
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
         }
 
         fn recorded_delete_branch_after_merge(&self) -> Vec<Option<bool>> {
@@ -3383,13 +3413,17 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
         }
         async fn create_commit_status(
             &self,
-            _: &RepositoryRef,
-            _: &str,
-            _: &str,
-            _: &str,
-            _: &str,
-            _: &ForgeCredential,
+            _repository: &RepositoryRef,
+            sha: &str,
+            context: &str,
+            _description: &str,
+            _state: &str,
+            _credential: &ForgeCredential,
         ) -> Result<(), ForgeError> {
+            self.recorded_commit_statuses
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((sha.to_string(), context.to_string()));
             Ok(())
         }
         async fn create_issue(
@@ -3690,6 +3724,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             allowed_merge_styles: vec!["rebase".to_string(), "squash".to_string()],
             default_delete_branch_after_merge: Some(true),
             head_sha: None,
+            recorded_commit_statuses: Mutex::new(Vec::new()),
             recorded_delete_branch_after_merge: Mutex::new(Vec::new()),
         });
         let audit = Arc::new(InMemoryAuditSink::new());
@@ -3806,6 +3841,27 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             adapter.recorded_delete_branch_after_merge(),
             vec![Some(false)]
         );
+    }
+
+    #[tokio::test]
+    async fn schedule_auto_merge_posts_kick_status() {
+        let adapter = Arc::new(AutoMergeTestForgeAdapter::new("abc123"));
+        let audit = Arc::new(InMemoryAuditSink::new());
+        let orchestrator = WriteOrchestrator::new(Arc::clone(&adapter), Arc::clone(&audit));
+
+        orchestrator
+            .schedule_auto_merge(
+                auto_merge_test_request("rebase", "abc123"),
+                default_authorized(),
+                &domain::ForgeCredential { token: None },
+            )
+            .await
+            .expect("should succeed");
+
+        let statuses = adapter.recorded_commit_statuses();
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].0, "abc123");
+        assert_eq!(statuses[0].1, "forge-mcp/auto-merge");
     }
 
     // --- update_change_request tests ---
