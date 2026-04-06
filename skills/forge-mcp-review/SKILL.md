@@ -19,7 +19,7 @@ Use this skill for PR review work done through forge-mcp.
    - If there are multiple open PRs, present a short list and ask the user which PR to review. Prefer a selectable `request_user_input` prompt when available; otherwise ask a concise plain-text question.
 4. Read PR metadata with `get_change_request` before reviewing. Capture at least the title, body, changed file count, and current `head_sha`.
 5. Read the patch with `get_change_request_diff`.
-6. Read existing discussion with `get_change_request_comments` before drafting findings so you can see prior reviews, avoid duplicate stale findings, and notice whether the PR changed since earlier review comments.
+6. Read existing discussion with `get_change_request_comments` before drafting findings so you can see prior reviews, avoid duplicate stale findings, and notice whether the PR changed since earlier review comments. **Do not defer your review based on prior approvals** — always perform your own independent analysis regardless of other agents' verdicts.
 7. Inspect the PR branch through the git proxy and run `git log --oneline <merge_base>..HEAD` to inspect the commit series. Prefer fetching the PR branch into an existing local repo and creating a detached `git worktree` for review so objects are reused without touching the active worktree. Fall back to a fresh clone only when no suitable local repo is available. This is required for evaluating commit hygiene regardless of diff size.
 8. Optionally, if the runtime supports subagents, delegate the review pass to a subagent using the prompt template below. Otherwise, perform the review directly in the main agent context.
 9. Validate the highest-signal findings locally, run verification if needed.
@@ -50,6 +50,30 @@ Use `comment_on_change_request` only as a fallback when a formal review cannot b
 - Use `REQUEST_CHANGES` for blocking bugs, regressions, missing required tests, or commit-hygiene violations.
 - Use `APPROVED` when there are no blocking findings.
 - Use `COMMENT` for non-blocking follow-up notes or when a formal approval/change-request verdict is not appropriate.
+
+## Independent Review Policy
+
+Every review agent must perform its own independent analysis of the PR.
+Do not skip or abbreviate a review because another agent already approved.
+
+- **Read prior reviews** to avoid posting duplicate findings and to
+  understand context, but form your own conclusions.
+- **Different agents bring different capabilities.** Your tool access,
+  domain knowledge, and failure-mode coverage may differ from other
+  reviewers. A prior approval does not mean the PR is free of issues
+  you can detect.
+- **Submit your own verdict** based on your findings, not on agreement
+  or disagreement with prior reviewers.
+
+### When to Skip a Review
+
+Skip the review **only** when one of the following applies:
+
+- CI is failing — the PR is not yet in a reviewable state.
+- The PR has been closed or rejected.
+- The operator or user explicitly told you to defer.
+
+A prior approval from another agent is **not** a reason to skip.
 
 ## Required Review Criteria
 
@@ -108,6 +132,9 @@ repo over a fresh clone, and do not switch the active worktree to the
 PR branch. The final diff alone cannot reveal commit-structure problems.
 
 Read the current PR metadata, diff, and existing comments/reviews before concluding.
+Do not skip or abbreviate the review because another agent already approved.
+Read prior reviews to avoid duplicate findings, but perform your own
+independent analysis and submit your own verdict.
 Call out commit-structure violations as findings, not optional notes.
 
 You MUST call `submit_change_request_review` with the verdict (APPROVED,
