@@ -1315,10 +1315,10 @@ impl McpShim {
         self.gateway_get(url).await
     }
 
-    /// Get the unified diff for a change request.
+    /// Get the unified diff for a change request, written to a local file.
     #[tool(
         name = "get_change_request_diff",
-        description = "Get the unified diff (patch) for a change request (pull request)."
+        description = "Get the unified diff (patch) for a change request (pull request). The diff is written to a temporary file to avoid truncation of large patches. Returns JSON with `diff_file` (path to the patch file), `index`, and `size_bytes`. Use a file-reading tool to access the full diff content."
     )]
     async fn get_change_request_diff(
         &self,
@@ -1335,7 +1335,32 @@ impl McpShim {
             &request.index.to_string(),
             "diff",
         ])?;
-        self.gateway_get(url).await
+        let body = self.gateway_get(url).await?;
+
+        // Parse the JSON response to extract the patch text.
+        let parsed: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
+            McpError::internal_error(format!("failed to parse diff response: {e}"), None)
+        })?;
+        let patch = parsed["patch"].as_str().ok_or_else(|| {
+            McpError::internal_error("missing patch field in response".to_string(), None)
+        })?;
+
+        // Write the patch to a temporary file so large diffs are not
+        // truncated by MCP message-size limits.
+        let diff_file = std::env::temp_dir().join(format!(
+            "forge-mcp-diff-{}-{}-{}-{}.patch",
+            request.forge, request.owner, request.repo, request.index,
+        ));
+        tokio::fs::write(&diff_file, patch).await.map_err(|e| {
+            McpError::internal_error(format!("failed to write diff file: {e}"), None)
+        })?;
+
+        let result = serde_json::json!({
+            "diff_file": diff_file.display().to_string(),
+            "index": request.index,
+            "size_bytes": patch.len(),
+        });
+        Ok(result.to_string())
     }
 
     /// Get a single change request by index.
@@ -2996,6 +3021,137 @@ mod tests {
             .map(|t| t.text.clone())
             .expect("text result");
         assert!(text.contains("Updated title"));
+
+        drop(client);
+        server_handle.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_change_request_diff_writes_file() -> Result<(), Box<dyn std::error::Error>> {
+        let mock_server = wiremock::MockServer::start().await;
+        let patch_text = "diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,2 @@\n # Hello\n+World\n";
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path_regex(
+                r"/api/v1/repos/.+/.+/.+/pulls/\d+/diff",
+            ))
+            .and(wiremock::matchers::header(
+                "authorization",
+                "Bearer test-token",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "index": 1,
+                    "patch": patch_text,
+                })),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let (client, server_handle) =
+            spawn_shim_and_client(test_config(&mock_server.uri())).await?;
+
+        let args = serde_json::json!({
+            "forge": "test-forge",
+            "owner": "org",
+            "repo": "repo",
+            "index": 1
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+
+        let result = client
+            .call_tool(CallToolRequestParams::new("get_change_request_diff").with_arguments(args))
+            .await?;
+
+        let text = result
+            .content
+            .first()
+            .and_then(|c| c.raw.as_text())
+            .map(|t| t.text.clone())
+            .expect("text result");
+        let parsed: serde_json::Value = serde_json::from_str(&text)?;
+        assert_eq!(parsed["index"], 1);
+        assert_eq!(parsed["size_bytes"], patch_text.len());
+
+        let diff_file = parsed["diff_file"].as_str().expect("diff_file path");
+        let contents: String = tokio::fs::read_to_string(diff_file).await?;
+        assert_eq!(contents, patch_text);
+
+        // Clean up temp file
+        let _ = tokio::fs::remove_file(diff_file).await;
+
+        drop(client);
+        server_handle.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_change_request_diff_handles_large_patch() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mock_server = wiremock::MockServer::start().await;
+        // Build a patch larger than 52KB to reproduce the truncation scenario.
+        let mut large_patch = String::from(
+            "diff --git a/big.txt b/big.txt\n--- a/big.txt\n+++ b/big.txt\n@@ -1 +1,6001 @@\n",
+        );
+        for i in 0..6000 {
+            large_patch.push_str(&format!("+line {i:04} padding to make each line longer\n"));
+        }
+        let expected_len = large_patch.len();
+        assert!(expected_len > 52_000, "patch should exceed 52KB");
+
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path_regex(
+                r"/api/v1/repos/.+/.+/.+/pulls/\d+/diff",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "index": 42,
+                    "patch": &large_patch,
+                })),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let (client, server_handle) =
+            spawn_shim_and_client(test_config(&mock_server.uri())).await?;
+
+        let args = serde_json::json!({
+            "forge": "test-forge",
+            "owner": "org",
+            "repo": "repo",
+            "index": 42
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+
+        let result = client
+            .call_tool(CallToolRequestParams::new("get_change_request_diff").with_arguments(args))
+            .await?;
+
+        let text = result
+            .content
+            .first()
+            .and_then(|c| c.raw.as_text())
+            .map(|t| t.text.clone())
+            .expect("text result");
+        let parsed: serde_json::Value = serde_json::from_str(&text)?;
+        assert_eq!(parsed["index"], 42);
+        assert_eq!(parsed["size_bytes"], expected_len);
+
+        // The file must contain the complete diff, not a truncated version.
+        let diff_file = parsed["diff_file"].as_str().expect("diff_file path");
+        let contents: String = tokio::fs::read_to_string(diff_file).await?;
+        assert_eq!(
+            contents.len(),
+            expected_len,
+            "diff file must not be truncated"
+        );
+        assert_eq!(contents, large_patch);
+
+        let _ = tokio::fs::remove_file(diff_file).await;
 
         drop(client);
         server_handle.await??;
