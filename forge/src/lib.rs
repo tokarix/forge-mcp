@@ -11,6 +11,7 @@ use domain::{
 };
 use hmac::{Hmac, Mac};
 use reqwest::StatusCode;
+use reqwest::redirect::Policy;
 use serde::Deserialize;
 use sha2::Sha256;
 use thiserror::Error;
@@ -21,6 +22,15 @@ static INSTALL_RING_PROVIDER: Once = Once::new();
 pub enum ForgeError {
     #[error("upstream request failed: {0}")]
     Http(#[from] reqwest::Error),
+    #[error("repository not found (upstream returned {status})")]
+    NotFound { status: StatusCode },
+    #[error(
+        "repository may have moved or been renamed (upstream returned {status} redirect to {location})"
+    )]
+    Redirect {
+        status: StatusCode,
+        location: String,
+    },
     #[error("unexpected upstream status {status}: {body}")]
     UnexpectedStatus { status: StatusCode, body: String },
     #[error("invalid response payload: {0}")]
@@ -325,9 +335,60 @@ impl ForgejoAdapter {
         });
 
         Self {
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .redirect(Policy::none())
+                .build()
+                .expect("failed to build HTTP client"),
             config,
         }
+    }
+
+    /// Checks the HTTP response status and returns a descriptive error for
+    /// non-success codes.  Recognises redirects (3xx) and not-found (404) to
+    /// provide actionable messages instead of the generic "error decoding
+    /// response body" that occurs when the caller tries to parse a non-JSON
+    /// body.
+    async fn check_response(response: reqwest::Response) -> Result<reqwest::Response, ForgeError> {
+        let status = response.status();
+        if status.is_success() {
+            return Ok(response);
+        }
+
+        if status.is_redirection() {
+            let location = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("<unknown>")
+                .to_string();
+            tracing::warn!(
+                %status,
+                %location,
+                url = %response.url(),
+                "upstream returned redirect — repository may have moved or been renamed",
+            );
+            return Err(ForgeError::Redirect { status, location });
+        }
+
+        if status == StatusCode::NOT_FOUND {
+            tracing::warn!(
+                %status,
+                url = %response.url(),
+                "upstream returned 404 — repository or resource not found",
+            );
+            return Err(ForgeError::NotFound { status });
+        }
+
+        let url = response.url().clone();
+        let body = response.text().await.unwrap_or_default();
+        tracing::warn!(
+            %status,
+            %url,
+            body_len = body.len(),
+            body_preview = %&body[..body.len().min(512)],
+            "unexpected upstream status",
+        );
+        Err(ForgeError::UnexpectedStatus { status, body })
     }
 
     async fn get_repository_merge_settings_response(
@@ -348,12 +409,7 @@ impl ForgejoAdapter {
             request = request.bearer_auth(token);
         }
 
-        let response = request.send().await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(ForgeError::UnexpectedStatus { status, body });
-        }
+        let response = Self::check_response(request.send().await?).await?;
 
         response
             .json()
@@ -381,12 +437,7 @@ impl ForgejoAdapter {
             request = request.bearer_auth(token);
         }
 
-        let response = request.send().await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(ForgeError::UnexpectedStatus { status, body });
-        }
+        let response = Self::check_response(request.send().await?).await?;
 
         let labels: Vec<ForgejoLabelResponse> = response.json().await?;
         Ok(labels.into_iter().find(|l| l.name == name).map(|l| l.id))
@@ -420,12 +471,7 @@ impl ForgejoAdapter {
             request = request.bearer_auth(token);
         }
 
-        let response = request.send().await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(ForgeError::UnexpectedStatus { status, body });
-        }
+        let response = Self::check_response(request.send().await?).await?;
 
         let label: ForgejoLabelResponse = response.json().await?;
         Ok(label.id)
@@ -788,12 +834,7 @@ impl ForgeAdapter for ForgejoAdapter {
             request = request.bearer_auth(token);
         }
 
-        let response = request.send().await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(ForgeError::UnexpectedStatus { status, body });
-        }
+        Self::check_response(request.send().await?).await?;
 
         // 3. Return the full updated issue.
         self.get_issue(repository, index, credential).await
@@ -811,12 +852,7 @@ impl ForgeAdapter for ForgejoAdapter {
             request = request.bearer_auth(token);
         }
 
-        let response = request.send().await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(ForgeError::UnexpectedStatus { status, body });
-        }
+        let response = Self::check_response(request.send().await?).await?;
 
         let user: ForgejoAuthUser = response.json().await?;
         Ok(ForgeUser {
@@ -847,12 +883,7 @@ impl ForgeAdapter for ForgejoAdapter {
             request = request.bearer_auth(token);
         }
 
-        let response = request.send().await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(ForgeError::UnexpectedStatus { status, body });
-        }
+        let response = Self::check_response(request.send().await?).await?;
 
         let issue: ForgejoIssueResponse = response.json().await?;
         Ok(issue.into_issue())
@@ -880,12 +911,7 @@ impl ForgeAdapter for ForgejoAdapter {
             request = request.bearer_auth(token);
         }
 
-        let response = request.send().await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(ForgeError::UnexpectedStatus { status, body });
-        }
+        let response = Self::check_response(request.send().await?).await?;
 
         let pr: ForgejoPullRequest = response.json().await?;
         Ok(pr.into_change_request())
@@ -912,12 +938,7 @@ impl ForgeAdapter for ForgejoAdapter {
             request = request.bearer_auth(token);
         }
 
-        let response = request.send().await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(ForgeError::UnexpectedStatus { status, body });
-        }
+        let response = Self::check_response(request.send().await?).await?;
 
         let issue: ForgejoIssueResponse = response.json().await?;
         Ok(issue.into_issue())
@@ -945,15 +966,7 @@ impl ForgeAdapter for ForgejoAdapter {
             request = request.bearer_auth(token);
         }
 
-        let response = request.send().await?;
-        let status = response.status();
-        if !status.is_success() {
-            let resp_body = response.text().await.unwrap_or_default();
-            return Err(ForgeError::UnexpectedStatus {
-                status,
-                body: resp_body,
-            });
-        }
+        let response = Self::check_response(request.send().await?).await?;
 
         let comment: ForgejoIssueCommentResponse = response.json().await?;
         Ok(comment.into_issue_comment())
@@ -982,12 +995,7 @@ impl ForgeAdapter for ForgejoAdapter {
             request = request.bearer_auth(token);
         }
 
-        let response = request.send().await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(ForgeError::UnexpectedStatus { status, body });
-        }
+        let response = Self::check_response(request.send().await?).await?;
 
         let comment: ForgejoCommentResponse = response.json().await?;
         Ok(ChangeRequestComment {
@@ -1024,12 +1032,7 @@ impl ForgeAdapter for ForgejoAdapter {
             request = request.bearer_auth(token);
         }
 
-        let response = request.send().await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(ForgeError::UnexpectedStatus { status, body });
-        }
+        let response = Self::check_response(request.send().await?).await?;
 
         let pr: ForgejoPullRequest = response.json().await?;
         Ok(pr.into_change_request())
@@ -1062,12 +1065,7 @@ impl ForgeAdapter for ForgejoAdapter {
             request = request.bearer_auth(token);
         }
 
-        let response = request.send().await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(ForgeError::UnexpectedStatus { status, body });
-        }
+        Self::check_response(request.send().await?).await?;
 
         Ok(())
     }
@@ -1095,15 +1093,7 @@ impl ForgeAdapter for ForgejoAdapter {
             request = request.bearer_auth(token);
         }
 
-        let response = request.send().await?;
-        let status = response.status();
-        if !status.is_success() {
-            let resp_body = response.text().await.unwrap_or_default();
-            return Err(ForgeError::UnexpectedStatus {
-                status,
-                body: resp_body,
-            });
-        }
+        let response = Self::check_response(request.send().await?).await?;
 
         let issue: ForgejoIssueResponse = response.json().await?;
         Ok(issue.into_issue())
@@ -1140,12 +1130,7 @@ impl ForgeAdapter for ForgejoAdapter {
             request = request.bearer_auth(token);
         }
 
-        let response = request.send().await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(ForgeError::UnexpectedStatus { status, body });
-        }
+        let response = Self::check_response(request.send().await?).await?;
 
         let combined: ForgejoCombinedStatusResponse = response
             .json()
@@ -1192,12 +1177,7 @@ impl ForgeAdapter for ForgejoAdapter {
         if let Some(token) = effective_token {
             comments_req = comments_req.bearer_auth(token);
         }
-        let comments_response = comments_req.send().await?;
-        let status = comments_response.status();
-        if !status.is_success() {
-            let body = comments_response.text().await.unwrap_or_default();
-            return Err(ForgeError::UnexpectedStatus { status, body });
-        }
+        let comments_response = Self::check_response(comments_req.send().await?).await?;
         let issue_comments: Vec<ForgejoIssueComment> = comments_response.json().await?;
 
         // Fetch pull request reviews
@@ -1211,12 +1191,7 @@ impl ForgeAdapter for ForgejoAdapter {
         if let Some(token) = effective_token {
             reviews_req = reviews_req.bearer_auth(token);
         }
-        let reviews_response = reviews_req.send().await?;
-        let status = reviews_response.status();
-        if !status.is_success() {
-            let body = reviews_response.text().await.unwrap_or_default();
-            return Err(ForgeError::UnexpectedStatus { status, body });
-        }
+        let reviews_response = Self::check_response(reviews_req.send().await?).await?;
         let reviews: Vec<ForgejoPullReview> = reviews_response.json().await?;
 
         // Merge comments and non-PENDING reviews, sort chronologically
@@ -1275,12 +1250,7 @@ impl ForgeAdapter for ForgejoAdapter {
             request = request.bearer_auth(token);
         }
 
-        let response = request.send().await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(ForgeError::UnexpectedStatus { status, body });
-        }
+        let response = Self::check_response(request.send().await?).await?;
 
         let pr: ForgejoPullRequest = response.json().await?;
         Ok(pr.into_change_request())
@@ -1305,12 +1275,7 @@ impl ForgeAdapter for ForgejoAdapter {
             request = request.bearer_auth(token);
         }
 
-        let response = request.send().await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(ForgeError::UnexpectedStatus { status, body });
-        }
+        let response = Self::check_response(request.send().await?).await?;
 
         let issue: ForgejoIssueResponse = response.json().await?;
         Ok(issue.into_issue())
@@ -1335,12 +1300,7 @@ impl ForgeAdapter for ForgejoAdapter {
             request = request.bearer_auth(token);
         }
 
-        let response = request.send().await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(ForgeError::UnexpectedStatus { status, body });
-        }
+        let response = Self::check_response(request.send().await?).await?;
 
         let comments: Vec<ForgejoIssueCommentResponse> = response.json().await?;
         Ok(comments
@@ -1366,12 +1326,7 @@ impl ForgeAdapter for ForgejoAdapter {
             request = request.bearer_auth(token);
         }
 
-        let response = request.send().await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(ForgeError::UnexpectedStatus { status, body });
-        }
+        let response = Self::check_response(request.send().await?).await?;
 
         response
             .text()
@@ -1426,12 +1381,7 @@ impl ForgeAdapter for ForgejoAdapter {
             request = request.bearer_auth(token);
         }
 
-        let response = request.send().await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(ForgeError::UnexpectedStatus { status, body });
-        }
+        let response = Self::check_response(request.send().await?).await?;
 
         let prs: Vec<ForgejoPullRequest> = response.json().await?;
         Ok(prs
@@ -1462,12 +1412,7 @@ impl ForgeAdapter for ForgejoAdapter {
             request = request.bearer_auth(token);
         }
 
-        let response = request.send().await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(ForgeError::UnexpectedStatus { status, body });
-        }
+        let response = Self::check_response(request.send().await?).await?;
 
         let issues: Vec<ForgejoIssueResponse> = response.json().await?;
         Ok(issues
@@ -1502,12 +1447,7 @@ impl ForgeAdapter for ForgejoAdapter {
             request = request.bearer_auth(token);
         }
 
-        let response = request.send().await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(ForgeError::UnexpectedStatus { status, body });
-        }
+        Self::check_response(request.send().await?).await?;
 
         // 3. Return the full updated issue.
         self.get_issue(repository, index, credential).await
@@ -1562,6 +1502,28 @@ impl ForgeAdapter for ForgejoAdapter {
             {
                 return Ok(());
             }
+            if status.is_redirection() {
+                let location = "<unknown>".to_string();
+                tracing::warn!(
+                    %status,
+                    %location,
+                    "upstream returned redirect — repository may have moved or been renamed",
+                );
+                return Err(ForgeError::Redirect { status, location });
+            }
+            if status == StatusCode::NOT_FOUND {
+                tracing::warn!(
+                    %status,
+                    "upstream returned 404 — repository or resource not found",
+                );
+                return Err(ForgeError::NotFound { status });
+            }
+            tracing::warn!(
+                %status,
+                body_len = body.len(),
+                body_preview = %&body[..body.len().min(512)],
+                "unexpected upstream status",
+            );
             return Err(ForgeError::UnexpectedStatus { status, body });
         }
 
@@ -1597,12 +1559,7 @@ impl ForgeAdapter for ForgejoAdapter {
             request = request.query(&[("ref", reference)]);
         }
 
-        let response = request.send().await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(ForgeError::UnexpectedStatus { status, body });
-        }
+        let response = Self::check_response(request.send().await?).await?;
 
         let payload: ForgejoContentsResponse = response.json().await?;
         let Some(encoded) = payload.content else {
@@ -1657,15 +1614,7 @@ impl ForgeAdapter for ForgejoAdapter {
             request = request.bearer_auth(token);
         }
 
-        let response = request.send().await?;
-        let status = response.status();
-        if !status.is_success() {
-            let resp_body = response.text().await.unwrap_or_default();
-            return Err(ForgeError::UnexpectedStatus {
-                status,
-                body: resp_body,
-            });
-        }
+        let response = Self::check_response(request.send().await?).await?;
 
         let review: ForgejoReviewResponse = response.json().await?;
         Ok(ChangeRequestReview {
@@ -1714,15 +1663,7 @@ impl ForgeAdapter for ForgejoAdapter {
             request = request.bearer_auth(token);
         }
 
-        let response = request.send().await?;
-        let status = response.status();
-        if !status.is_success() {
-            let resp_body = response.text().await.unwrap_or_default();
-            return Err(ForgeError::UnexpectedStatus {
-                status,
-                body: resp_body,
-            });
-        }
+        let response = Self::check_response(request.send().await?).await?;
 
         let pr: ForgejoPullRequest = response.json().await?;
         Ok(pr.into_change_request())
@@ -1766,15 +1707,7 @@ impl ForgeAdapter for ForgejoAdapter {
             request = request.bearer_auth(token);
         }
 
-        let response = request.send().await?;
-        let status = response.status();
-        if !status.is_success() {
-            let resp_body = response.text().await.unwrap_or_default();
-            return Err(ForgeError::UnexpectedStatus {
-                status,
-                body: resp_body,
-            });
-        }
+        let response = Self::check_response(request.send().await?).await?;
 
         let issue: ForgejoIssueResponse = response.json().await?;
         Ok(issue.into_issue())
@@ -3340,6 +3273,133 @@ mod tests {
         assert_eq!(
             parse_commit_status_state("unknown"),
             domain::CommitStatusState::Pending
+        );
+    }
+
+    #[tokio::test]
+    async fn check_response_returns_redirect_on_301() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/.+"))
+            .respond_with(
+                ResponseTemplate::new(301)
+                    .insert_header("Location", "https://forge.example/new-org/repo"),
+            )
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let result = adapter.get_issue(&test_repo(), 1, &cred).await;
+
+        let err = result.unwrap_err();
+        match err {
+            ForgeError::Redirect { status, location } => {
+                assert_eq!(status, StatusCode::MOVED_PERMANENTLY);
+                assert_eq!(location, "https://forge.example/new-org/repo");
+            }
+            other => panic!("expected Redirect, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn check_response_returns_not_found_on_404() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/.+"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "message": "The target couldn't be found."
+            })))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let result = adapter.get_issue(&test_repo(), 1, &cred).await;
+
+        let err = result.unwrap_err();
+        match err {
+            ForgeError::NotFound { status } => {
+                assert_eq!(status, StatusCode::NOT_FOUND);
+            }
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn check_response_returns_unexpected_status_on_500() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/.+"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("internal server error"))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let result = adapter.get_issue(&test_repo(), 1, &cred).await;
+
+        let err = result.unwrap_err();
+        match err {
+            ForgeError::UnexpectedStatus { status, body } => {
+                assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+                assert!(body.contains("internal server error"));
+            }
+            other => panic!("expected UnexpectedStatus, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn check_response_redirect_error_message_mentions_moved() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/.+"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("Location", "https://forge.example/new-org/repo"),
+            )
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let result = adapter.get_issue(&test_repo(), 1, &cred).await;
+
+        let err = result.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("moved or been renamed"),
+            "error message should mention moved/renamed, got: {msg}"
+        );
+        assert!(
+            msg.contains("302"),
+            "error message should contain status code, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn check_response_not_found_error_message() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/.+"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let result = adapter.get_issue(&test_repo(), 1, &cred).await;
+
+        let err = result.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not found"),
+            "error message should mention not found, got: {msg}"
         );
     }
 }
