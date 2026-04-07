@@ -539,6 +539,8 @@ struct ForgejoIssueComment {
 #[derive(Debug, Deserialize)]
 struct ForgejoPullReview {
     body: Option<String>,
+    #[serde(default)]
+    dismissed: bool,
     id: u64,
     state: String,
     submitted_at: Option<String>,
@@ -1225,6 +1227,7 @@ impl ForgeAdapter for ForgejoAdapter {
                 author: c.user.login,
                 body: c.body,
                 created_at: c.created_at,
+                dismissed: false,
                 id: c.id,
                 kind: "comment".to_string(),
                 review_state: None,
@@ -1239,6 +1242,7 @@ impl ForgeAdapter for ForgejoAdapter {
                 author: r.user.login,
                 body: r.body.unwrap_or_default(),
                 created_at: submitted_at,
+                dismissed: r.dismissed,
                 id: r.id,
                 kind: "review".to_string(),
                 review_state: Some(r.state),
@@ -2445,6 +2449,14 @@ mod tests {
                     "user": { "login": "carol" }
                 },
                 {
+                    "id": 25,
+                    "body": "needs work",
+                    "dismissed": true,
+                    "state": "REQUEST_CHANGES",
+                    "submitted_at": "2026-03-18T11:30:00Z",
+                    "user": { "login": "eve" }
+                },
+                {
                     "id": 30,
                     "body": null,
                     "state": "PENDING",
@@ -2463,22 +2475,32 @@ mod tests {
             .unwrap();
 
         // PENDING review should be filtered out
-        assert_eq!(result.len(), 3);
+        assert_eq!(result.len(), 4);
 
         // Should be sorted chronologically
         assert_eq!(result[0].author, "bob");
         assert_eq!(result[0].created_at, "2026-03-18T10:00:00Z");
         assert_eq!(result[0].kind, "comment");
+        assert!(!result[0].dismissed);
         assert!(result[0].review_state.is_none());
 
         assert_eq!(result[1].author, "carol");
         assert_eq!(result[1].created_at, "2026-03-18T11:00:00Z");
         assert_eq!(result[1].kind, "review");
+        assert!(!result[1].dismissed);
         assert_eq!(result[1].review_state.as_deref(), Some("APPROVED"));
 
-        assert_eq!(result[2].author, "alice");
-        assert_eq!(result[2].created_at, "2026-03-18T12:00:00Z");
-        assert_eq!(result[2].kind, "comment");
+        // Dismissed review should be included with dismissed=true
+        assert_eq!(result[2].author, "eve");
+        assert_eq!(result[2].created_at, "2026-03-18T11:30:00Z");
+        assert_eq!(result[2].kind, "review");
+        assert!(result[2].dismissed);
+        assert_eq!(result[2].review_state.as_deref(), Some("REQUEST_CHANGES"));
+
+        assert_eq!(result[3].author, "alice");
+        assert_eq!(result[3].created_at, "2026-03-18T12:00:00Z");
+        assert_eq!(result[3].kind, "comment");
+        assert!(!result[3].dismissed);
     }
 
     fn sign_payload(secret: &str, body: &[u8]) -> String {
