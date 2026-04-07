@@ -201,6 +201,9 @@ pub struct AgentForgeInfo {
     pub alias: String,
     #[serde(rename = "type")]
     pub forge_type: String,
+    /// Username of the authenticated agent on this forge, if available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
 }
 
 /// Query params for GET /api/v1/agent/events

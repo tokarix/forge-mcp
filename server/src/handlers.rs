@@ -1677,9 +1677,17 @@ pub async fn agent_info(State(state): State<AppState>, headers: HeaderMap) -> im
             crate::config::AllowedForges::Specific(set) => set.contains(alias),
         };
         if visible && let Some(instance) = state.forge_registry.get(alias) {
+            let credential = resolve_credential(agent, alias, instance);
+            let username = instance
+                .adapter
+                .get_authenticated_user(&credential)
+                .await
+                .ok()
+                .map(|u| u.username);
             forges.push(crate::api::AgentForgeInfo {
                 alias: alias.clone(),
                 forge_type: instance.forge_type.clone(),
+                username,
             });
         }
     }
@@ -2780,6 +2788,7 @@ mod tests {
         assert_eq!(forges.len(), 1);
         assert_eq!(forges[0]["alias"], "test-forge");
         assert_eq!(forges[0]["type"], "forgejo");
+        assert_eq!(forges[0]["username"], "test");
     }
 
     #[tokio::test]
@@ -2850,6 +2859,7 @@ mod tests {
         // Only test-forge should be visible, not other-forge
         assert_eq!(forges.len(), 1);
         assert_eq!(forges[0]["alias"], "test-forge");
+        assert_eq!(forges[0]["username"], "test");
     }
 
     #[tokio::test]
