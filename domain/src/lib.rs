@@ -179,8 +179,6 @@ pub struct ChangeRequestCommentDetail {
     pub author: String,
     pub body: String,
     pub created_at: String,
-    /// Whether this review has been dismissed. Always `false` for general comments.
-    pub dismissed: bool,
     pub id: u64,
     /// "comment" for general comments, "review" for formal reviews.
     pub kind: String,

@@ -2009,7 +2009,6 @@ mod tests {
                     author: "reviewer".to_string(),
                     body: "looks good".to_string(),
                     created_at: "2026-03-18T10:00:00Z".to_string(),
-                    dismissed: false,
                     id: 1,
                     kind: "comment".to_string(),
                     review_state: None,
@@ -2018,7 +2017,6 @@ mod tests {
                     author: "reviewer".to_string(),
                     body: "approved".to_string(),
                     created_at: "2026-03-18T11:00:00Z".to_string(),
-                    dismissed: false,
                     id: 2,
                     kind: "review".to_string(),
                     review_state: Some("APPROVED".to_string()),
@@ -2964,11 +2962,11 @@ mod tests {
         assert_eq!(arr.len(), 2);
         assert_eq!(arr[0]["author"], "reviewer");
         assert_eq!(arr[0]["body"], "looks good");
-        assert_eq!(arr[0]["dismissed"], false);
+        assert!(arr[0].get("dismissed").is_none());
         assert_eq!(arr[0]["kind"], "comment");
         assert!(arr[0]["review_state"].is_null());
         assert_eq!(arr[1]["body"], "approved");
-        assert_eq!(arr[1]["dismissed"], false);
+        assert!(arr[1].get("dismissed").is_none());
         assert_eq!(arr[1]["kind"], "review");
         assert_eq!(arr[1]["review_state"], "APPROVED");
     }
