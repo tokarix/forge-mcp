@@ -1515,7 +1515,10 @@ impl McpShim {
     /// Open a change request (pull request) on the forge.
     #[tool(
         name = "open_change_request",
-        description = "Open a change request (pull request) on the forge."
+        description = "Open a change request (pull request) on the forge.\n\
+            Before calling this tool, check if a PR already exists for your branch \
+            using list_change_requests. If one exists, do NOT open a new PR — push \
+            fixes to the existing branch using commit_patch with existing_branch: true."
     )]
     async fn open_change_request(
         &self,
