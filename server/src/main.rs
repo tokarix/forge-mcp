@@ -5,12 +5,13 @@ use std::sync::Arc;
 
 use audit::InMemoryAuditSink;
 use domain::ForgeKind;
+use forge::gitlab::{GitLabAdapter, GitLabConfig};
 use forge::{ForgejoAdapter, ForgejoConfig};
 use orchestrator::{ReadOrchestrator, WriteOrchestrator};
 use server::{
     auth::AgentRegistry,
     build_router,
-    config::{parse_config, validate_config},
+    config::{ForgeConfig, parse_config, validate_config},
     events::EventBus,
     handlers::AppState,
     registry::{ForgeInstance, ForgeRegistry},
@@ -19,6 +20,46 @@ use server::{
 fn server_version() -> String {
     let commit = env!("GIT_COMMIT_SHORT");
     format!("{}+{commit}", env!("CARGO_PKG_VERSION"))
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn build_forge_instance<A>(
+    adapter: Arc<A>,
+    audit_sink: &Arc<InMemoryAuditSink>,
+    client: &reqwest::Client,
+    forge_config: &ForgeConfig,
+    forge_kind: ForgeKind,
+) -> ForgeInstance
+where
+    A: forge::ForgeAdapter + forge::ForgeWebhookAdapter + 'static,
+{
+    let rest_adapter: Arc<dyn forge::ForgeAdapter> = adapter.clone();
+    let webhook_adapter: Arc<dyn forge::ForgeWebhookAdapter> = adapter.clone();
+
+    let read_service = Arc::new(ReadOrchestrator::new(
+        Arc::clone(&adapter),
+        Arc::clone(audit_sink),
+    ));
+
+    let write_service = Arc::new(WriteOrchestrator::new(
+        Arc::clone(&adapter),
+        Arc::clone(audit_sink),
+    ));
+
+    ForgeInstance {
+        adapter: rest_adapter,
+        alias: forge_config.alias.clone(),
+        base_url: forge_config.base_url.clone(),
+        client: client.clone(),
+        forge_kind,
+        forge_type: forge_config.forge_type.clone(),
+        git_auth_user: forge_config.git_auth_user.clone(),
+        read_service,
+        token: forge_config.token.clone(),
+        webhook: forge_config.webhook.clone(),
+        webhook_adapter,
+        write_service,
+    }
 }
 
 #[tokio::main]
@@ -49,49 +90,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut forges = HashMap::new();
 
     for forge_config in &config.forges {
-        match forge_config.forge_type.as_str() {
+        let instance = match forge_config.forge_type.as_str() {
             "forgejo" => {
                 let adapter = Arc::new(ForgejoAdapter::new(ForgejoConfig {
                     base_url: forge_config.base_url.clone(),
                     token: forge_config.token.clone(),
                 }));
-                let rest_adapter: Arc<dyn forge::ForgeAdapter> = adapter.clone();
-                let webhook_adapter: Arc<dyn forge::ForgeWebhookAdapter> = adapter.clone();
-
-                let read_service = Arc::new(ReadOrchestrator::new(
-                    Arc::clone(&adapter),
-                    Arc::clone(&audit_sink),
-                ));
-
-                let write_service = Arc::new(WriteOrchestrator::new(
-                    Arc::clone(&adapter),
-                    Arc::clone(&audit_sink),
-                ));
-
-                forges.insert(
-                    forge_config.alias.clone(),
-                    ForgeInstance {
-                        adapter: rest_adapter,
-                        alias: forge_config.alias.clone(),
-                        base_url: forge_config.base_url.clone(),
-                        client: client.clone(),
-                        forge_kind: ForgeKind::Forgejo,
-                        forge_type: forge_config.forge_type.clone(),
-                        git_auth_user: forge_config.git_auth_user.clone(),
-                        read_service,
-                        token: forge_config.token.clone(),
-                        webhook: forge_config.webhook.clone(),
-                        webhook_adapter,
-                        write_service,
-                    },
-                );
+                build_forge_instance(
+                    adapter,
+                    &audit_sink,
+                    &client,
+                    forge_config,
+                    ForgeKind::Forgejo,
+                )
+            }
+            "gitlab" => {
+                let adapter = Arc::new(GitLabAdapter::new(GitLabConfig {
+                    base_url: forge_config.base_url.clone(),
+                    token: forge_config.token.clone(),
+                }));
+                build_forge_instance(
+                    adapter,
+                    &audit_sink,
+                    &client,
+                    forge_config,
+                    ForgeKind::GitLab,
+                )
             }
             other => panic!(
                 "unsupported forge type '{other}' for alias '{}'",
                 forge_config.alias
             ),
-        }
+        };
 
+        forges.insert(forge_config.alias.clone(), instance);
         tracing::info!(alias = %forge_config.alias, url = %forge_config.base_url, "registered forge");
     }
 

@@ -17,7 +17,15 @@ use serde::Deserialize;
 use sha2::Sha256;
 use thiserror::Error;
 
+pub mod gitlab;
+
 static INSTALL_RING_PROVIDER: Once = Once::new();
+
+fn install_ring_provider() {
+    INSTALL_RING_PROVIDER.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
 
 #[derive(Debug, Error)]
 pub enum ForgeError {
@@ -335,9 +343,7 @@ impl ForgejoAdapter {
     /// default settings).
     #[must_use]
     pub fn new(config: ForgejoConfig) -> Self {
-        INSTALL_RING_PROVIDER.call_once(|| {
-            let _ = rustls::crypto::ring::default_provider().install_default();
-        });
+        install_ring_provider();
 
         Self {
             client: reqwest::Client::builder()
