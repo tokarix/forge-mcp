@@ -412,7 +412,8 @@ pub struct RebaseBranchTool {
     pub forge: String,
     /// List of rebase operations as JSON objects. Each object must have a
     /// `"type"` field. Supported: `{"type": "fixup", "commit": "<sha>", "into": "<sha>"}`,
-    /// `{"type": "drop", "commit": "<sha>"}`.
+    /// `{"type": "drop", "commit": "<sha>"}`,
+    /// `{"type": "rebase_onto"}` (rebase all commits onto the latest base branch; must be the sole operation).
     pub operations: Vec<RebaseBranchOperationTool>,
     /// Repository owner or organization.
     pub owner: String,
@@ -433,6 +434,9 @@ pub enum RebaseBranchOperationTool {
         /// Full SHA of the commit to squash into.
         into: String,
     },
+    /// Rebase all branch commits onto the latest base branch head.
+    /// Must be the sole operation in the list.
+    RebaseOnto {},
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1538,7 +1542,7 @@ impl McpShim {
     /// Rebase a branch by squashing (fixup) or removing (drop) commits.
     #[tool(
         name = "rebase_branch",
-        description = "Rebase a branch by squashing (fixup) or removing (drop) commits. Performs a full clone, validates operations, runs interactive rebase, verifies tree integrity, and force-pushes with lease. Only works on branches matching your configured branch prefix."
+        description = "Rebase a branch by squashing (fixup), removing (drop) commits, or rebasing onto the latest base branch (rebase_onto). Performs a full clone, validates operations, runs the rebase, and force-pushes with lease. Only works on branches matching your configured branch prefix."
     )]
     async fn rebase_branch(
         &self,
@@ -1569,6 +1573,11 @@ impl McpShim {
                         "type": "fixup",
                         "commit": commit,
                         "into": into,
+                    })
+                }
+                RebaseBranchOperationTool::RebaseOnto {} => {
+                    serde_json::json!({
+                        "type": "rebase_onto",
                     })
                 }
             })

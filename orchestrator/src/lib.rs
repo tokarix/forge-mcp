@@ -380,6 +380,11 @@ fn validate_rebase_operations(
 
                 fixup_targets.insert(into.clone());
             }
+            domain::RebaseOperation::RebaseOnto => {
+                return Err(ServiceError::Validation(
+                    "rebase_onto cannot appear in commit-level operations".to_string(),
+                ));
+            }
         }
     }
 
@@ -845,6 +850,17 @@ where
             ));
         }
 
+        // 2a. Validate rebase_onto exclusivity
+        let is_rebase_onto = request
+            .operations
+            .iter()
+            .any(|op| matches!(op, domain::RebaseOperation::RebaseOnto));
+        if is_rebase_onto && request.operations.len() > 1 {
+            return Err(ServiceError::Validation(
+                "rebase_onto cannot be combined with other operations".to_string(),
+            ));
+        }
+
         // 3. Fetch committer identity from forge (best-effort)
         let forge_user_result = self.adapter.get_authenticated_user(credential).await;
         let (committer_name, committer_email) =
@@ -884,61 +900,78 @@ where
                 ));
             }
 
-            // 6. List commits in range and validate operations
-            let commits = workspace
-                .list_commits_in_range(&mb)
-                .map_err(|e| ServiceError::GitExec(e.to_string()))?;
-
-            validate_rebase_operations(&operations, &commits)?;
-
-            // 7. Capture old HEAD SHA and tree SHA
+            // 6. Capture old HEAD SHA
             let old_head = workspace
                 .rev_parse("HEAD")
                 .map_err(|e| ServiceError::GitExec(e.to_string()))?;
-            let old_tree = workspace
-                .rev_parse("HEAD^{tree}")
-                .map_err(|e| ServiceError::GitExec(e.to_string()))?;
 
-            // 8. Convert domain operations to git-exec operations
-            let git_ops: Vec<git_exec::RebaseOperation> = operations
-                .iter()
-                .map(|op| match op {
-                    domain::RebaseOperation::Drop { commit } => git_exec::RebaseOperation::Drop {
-                        commit: commit.clone(),
-                    },
-                    domain::RebaseOperation::Fixup { commit, into } => {
-                        git_exec::RebaseOperation::Fixup {
-                            commit: commit.clone(),
-                            into: into.clone(),
+            if is_rebase_onto {
+                // 7a. Rebase all commits onto the latest base branch
+                workspace
+                    .rebase_onto(
+                        &format!("origin/{base_branch}"),
+                        &committer_name,
+                        &committer_email,
+                    )
+                    .map_err(|e| ServiceError::GitExec(e.to_string()))?;
+            } else {
+                // 7b. List commits in range and validate operations
+                let commits = workspace
+                    .list_commits_in_range(&mb)
+                    .map_err(|e| ServiceError::GitExec(e.to_string()))?;
+
+                validate_rebase_operations(&operations, &commits)?;
+
+                let old_tree = workspace
+                    .rev_parse("HEAD^{tree}")
+                    .map_err(|e| ServiceError::GitExec(e.to_string()))?;
+
+                // Convert domain operations to git-exec operations
+                let git_ops: Vec<git_exec::RebaseOperation> = operations
+                    .iter()
+                    .map(|op| match op {
+                        domain::RebaseOperation::Drop { commit } => {
+                            git_exec::RebaseOperation::Drop {
+                                commit: commit.clone(),
+                            }
                         }
-                    }
-                })
-                .collect();
+                        domain::RebaseOperation::Fixup { commit, into } => {
+                            git_exec::RebaseOperation::Fixup {
+                                commit: commit.clone(),
+                                into: into.clone(),
+                            }
+                        }
+                        domain::RebaseOperation::RebaseOnto => {
+                            unreachable!("rebase_onto excluded by prior validation")
+                        }
+                    })
+                    .collect();
 
-            // 9. Run rebase
-            workspace
-                .rebase_interactive(&mb, &git_ops, &committer_name, &committer_email)
-                .map_err(|e| ServiceError::GitExec(e.to_string()))?;
+                // Run interactive rebase
+                workspace
+                    .rebase_interactive(&mb, &git_ops, &committer_name, &committer_email)
+                    .map_err(|e| ServiceError::GitExec(e.to_string()))?;
 
-            // 10. Capture new HEAD SHA and tree SHA
+                // Verify tree integrity (skip when drops are present — drops
+                // intentionally remove content, so the tree is expected to change)
+                let has_drops = operations
+                    .iter()
+                    .any(|op| matches!(op, domain::RebaseOperation::Drop { .. }));
+                let new_tree = workspace
+                    .rev_parse("HEAD^{tree}")
+                    .map_err(|e| ServiceError::GitExec(e.to_string()))?;
+                if !has_drops && old_tree != new_tree {
+                    return Err(ServiceError::Validation(format!(
+                        "rebase changed the tree: old={old_tree}, new={new_tree}; \
+                         this indicates a conflict or data loss"
+                    )));
+                }
+            }
+
+            // 8. Capture new HEAD SHA
             let new_head = workspace
                 .rev_parse("HEAD")
                 .map_err(|e| ServiceError::GitExec(e.to_string()))?;
-            let new_tree = workspace
-                .rev_parse("HEAD^{tree}")
-                .map_err(|e| ServiceError::GitExec(e.to_string()))?;
-
-            // 11. Verify tree integrity (skip when drops are present — drops
-            //     intentionally remove content, so the tree is expected to change)
-            let has_drops = operations
-                .iter()
-                .any(|op| matches!(op, domain::RebaseOperation::Drop { .. }));
-            if !has_drops && old_tree != new_tree {
-                return Err(ServiceError::Validation(format!(
-                    "rebase changed the tree: old={old_tree}, new={new_tree}; \
-                     this indicates a conflict or data loss"
-                )));
-            }
 
             Ok((
                 workspace,
@@ -954,23 +987,33 @@ where
 
         let (workspace, old_head, new_head, branch, agent_identity, repository) = git_result?;
 
-        // 12. Audit BEFORE push — failure blocks the write
-        let op_count = request.operations.len();
+        // 9. Audit BEFORE push — failure blocks the write
+        let audit_target = if is_rebase_onto {
+            format!(
+                "{}..{} rebase-onto:{} {branch}",
+                &old_head[..8.min(old_head.len())],
+                &new_head[..8.min(new_head.len())],
+                request.base_branch,
+            )
+        } else {
+            let op_count = request.operations.len();
+            format!(
+                "{}..{} fixup:{op_count} {branch}",
+                &old_head[..8.min(old_head.len())],
+                &new_head[..8.min(new_head.len())],
+            )
+        };
         self.audit_sink
             .record(AuditRecord {
                 agent: agent_identity,
                 action: "rebase_branch".to_string(),
                 repository: repository.clone(),
-                target: format!(
-                    "{}..{} fixup:{op_count} {branch}",
-                    &old_head[..8.min(old_head.len())],
-                    &new_head[..8.min(new_head.len())],
-                ),
+                target: audit_target,
             })
             .await
             .map_err(|e| ServiceError::Audit(e.to_string()))?;
 
-        // 13. Force push with lease (after audit succeeds)
+        // 10. Force push with lease (after audit succeeds)
         tokio::task::spawn_blocking(move || {
             workspace
                 .force_push_with_lease(&branch, &old_head)
@@ -1276,6 +1319,7 @@ mod tests {
 
     use super::{
         ReadOrchestrator, WriteOrchestrator, resolve_committer_identity, sanitize_commit_message,
+        validate_rebase_operations,
     };
 
     fn test_request(path: &str) -> ReadRepositoryFileRequest {
@@ -4600,6 +4644,217 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
         assert_eq!(result.branch, branch_name);
         assert_eq!(audit.records().len(), 1);
         assert_eq!(audit.records()[0].action, "rebase_branch");
+    }
+
+    /// Set up a bare remote repo like `setup_rebase_test_repo`, but also
+    /// advance `main` after the branch is created, so rebase-onto has work to do.
+    fn setup_rebase_onto_test_repo(branch: &str) -> tempfile::TempDir {
+        use std::process::Command;
+
+        fn run(dir: &std::path::Path, args: &[&str]) -> String {
+            let out = Command::new("git")
+                .current_dir(dir)
+                .args(args)
+                .output()
+                .expect("git command");
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        }
+
+        let remote_dir = tempfile::TempDir::new().unwrap();
+        run(remote_dir.path(), &["init", "--bare", "remote.git"]);
+        let remote_path = remote_dir.path().join("remote.git");
+
+        // Initial commit on main
+        let work_dir = tempfile::TempDir::new().unwrap();
+        let work = work_dir.path().join("work");
+        run(
+            work_dir.path(),
+            &["clone", remote_path.to_str().unwrap(), "work"],
+        );
+        std::fs::write(work.join("README.md"), "# Hello\n").unwrap();
+        run(&work, &["add", "README.md"]);
+        run(
+            &work,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@test",
+                "commit",
+                "-m",
+                "init",
+            ],
+        );
+        run(&work, &["push", "-u", "origin", "HEAD:main"]);
+
+        // Create branch with commits
+        run(&work, &["checkout", "-b", branch]);
+        for i in 1..=2 {
+            let name = format!("branch{i}.txt");
+            std::fs::write(work.join(&name), format!("branch-content{i}")).unwrap();
+            run(&work, &["add", &name]);
+            run(
+                &work,
+                &[
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@test",
+                    "commit",
+                    "-m",
+                    &format!("branch commit {i}"),
+                ],
+            );
+        }
+        run(&work, &["push", "-u", "origin", branch]);
+
+        // Advance main
+        run(&work, &["checkout", "main"]);
+        std::fs::write(work.join("main-update.txt"), "new main content").unwrap();
+        run(&work, &["add", "main-update.txt"]);
+        run(
+            &work,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@test",
+                "commit",
+                "-m",
+                "advance main",
+            ],
+        );
+        run(&work, &["push", "origin", "main"]);
+
+        remote_dir
+    }
+
+    #[tokio::test]
+    async fn rebase_branch_rebase_onto_succeeds_through_orchestrator() {
+        let branch_name = "agent/test-rebase-onto";
+        let remote_dir = setup_rebase_onto_test_repo(branch_name);
+
+        let remote_path = remote_dir.path().join("remote.git");
+        let adapter = Arc::new(FakeForgeAdapter);
+        let audit = Arc::new(InMemoryAuditSink::new());
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
+
+        let request = domain::RebaseBranchRequest {
+            agent: AgentIdentity {
+                agent_id: "test-agent".to_string(),
+                session_id: "test-session".to_string(),
+            },
+            base_branch: "main".to_string(),
+            branch: branch_name.to_string(),
+            operations: vec![domain::RebaseOperation::RebaseOnto],
+            repository: RepositoryRef {
+                alias: "test".to_string(),
+                forge: domain::ForgeKind::Forgejo,
+                host: format!("file://{}", remote_path.parent().unwrap().display()),
+                name: "remote".to_string(),
+                owner: ".".to_string(),
+            },
+        };
+
+        let authorized = domain::policy::AuthorizedWrite {
+            policy: domain::policy::PolicyConfig {
+                branch_prefix: Some("agent/".to_string()),
+                ..domain::policy::PolicyConfig::default()
+            },
+        };
+
+        let result = orchestrator
+            .rebase_branch(
+                request,
+                authorized,
+                &domain::ForgeCredential { token: None },
+            )
+            .await
+            .expect("rebase_onto should succeed");
+
+        assert_eq!(result.branch, branch_name);
+        assert_eq!(audit.records().len(), 1);
+        assert_eq!(audit.records()[0].action, "rebase_branch");
+        assert!(audit.records()[0].target.contains("rebase-onto:main"));
+    }
+
+    #[tokio::test]
+    async fn rebase_branch_rebase_onto_rejects_combined_operations() {
+        let adapter = Arc::new(FakeForgeAdapter);
+        let audit = Arc::new(InMemoryAuditSink::new());
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
+
+        let request = domain::RebaseBranchRequest {
+            agent: AgentIdentity {
+                agent_id: "test-agent".to_string(),
+                session_id: "test-session".to_string(),
+            },
+            base_branch: "main".to_string(),
+            branch: "agent/test-combined".to_string(),
+            operations: vec![
+                domain::RebaseOperation::RebaseOnto,
+                domain::RebaseOperation::Drop {
+                    commit: "abc123".to_string(),
+                },
+            ],
+            repository: RepositoryRef {
+                alias: "test".to_string(),
+                forge: domain::ForgeKind::Forgejo,
+                host: "file:///tmp".to_string(),
+                name: "repo".to_string(),
+                owner: "owner".to_string(),
+            },
+        };
+
+        let authorized = domain::policy::AuthorizedWrite {
+            policy: domain::policy::PolicyConfig {
+                branch_prefix: Some("agent/".to_string()),
+                ..domain::policy::PolicyConfig::default()
+            },
+        };
+
+        let err = orchestrator
+            .rebase_branch(
+                request,
+                authorized,
+                &domain::ForgeCredential { token: None },
+            )
+            .await
+            .expect_err("should reject combined operations");
+
+        match err {
+            ServiceError::Validation(msg) => {
+                assert!(
+                    msg.contains("cannot be combined"),
+                    "unexpected message: {msg}"
+                );
+            }
+            other => panic!("expected Validation error, got: {other:?}"),
+        }
+    }
+
+    // --- validate_rebase_operations tests ---
+
+    #[test]
+    fn validate_rebase_operations_rejects_rebase_onto() {
+        let ops = vec![domain::RebaseOperation::RebaseOnto];
+        let commits = vec!["abc123".to_string()];
+        let err = validate_rebase_operations(&ops, &commits).expect_err("should reject RebaseOnto");
+        match err {
+            ServiceError::Validation(msg) => {
+                assert!(
+                    msg.contains("cannot appear in commit-level operations"),
+                    "unexpected message: {msg}"
+                );
+            }
+            other => panic!("expected Validation error, got: {other:?}"),
+        }
     }
 
     // --- resolve_committer_identity tests ---

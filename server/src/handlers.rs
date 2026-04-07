@@ -732,6 +732,7 @@ pub async fn post_rebase(
             RebaseOperationBody::Fixup { commit, into } => {
                 domain::RebaseOperation::Fixup { commit, into }
             }
+            RebaseOperationBody::RebaseOnto {} => domain::RebaseOperation::RebaseOnto,
         })
         .collect();
 

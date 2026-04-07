@@ -400,6 +400,35 @@ with open(sys.argv[1], 'w') as f:
         Ok(())
     }
 
+    /// Rebases the current branch onto the given ref.
+    ///
+    /// This performs a non-interactive `git rebase <base_ref>`, replaying
+    /// all branch commits on top of the target ref.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the rebase fails (e.g. due to conflicts).
+    pub fn rebase_onto(
+        &self,
+        base_ref: &str,
+        committer_name: &str,
+        committer_email: &str,
+    ) -> Result<(), GitExecError> {
+        run_git(
+            &self.repo_path,
+            &[
+                "-c",
+                &format!("user.name={committer_name}"),
+                "-c",
+                &format!("user.email={committer_email}"),
+                "rebase",
+                base_ref,
+            ],
+            &self.auth_env,
+        )
+        .map(|_| ())
+    }
+
     /// Resolves a refspec to a full SHA.
     ///
     /// # Errors
@@ -810,6 +839,80 @@ index 7e59600..1234567 100644
 
         let commits_after = ws.list_commits_in_range(&mb).unwrap();
         assert_eq!(commits_after.len(), 1);
+    }
+
+    #[test]
+    fn rebase_onto_replays_commits_on_updated_base() {
+        let (_remote_dir, remote_path) = setup_remote_with_initial_commit();
+        let remote_url = format!("file://{}", remote_path.display());
+        let empty_env: Vec<(String, String)> = vec![];
+
+        // Clone and create a branch with commits
+        let ws = GitWorkspace::clone_repo(&remote_url, "main", None, false).unwrap();
+        ws.create_branch("agent/test-rebase-onto").unwrap();
+
+        add_commit(&ws, "branch1.txt", "branch content 1", "branch commit 1");
+        add_commit(&ws, "branch2.txt", "branch content 2", "branch commit 2");
+
+        ws.push_branch("agent/test-rebase-onto").unwrap();
+
+        // Simulate main advancing: clone fresh, add a commit to main, push
+        let advance_dir = tempfile::TempDir::new().unwrap();
+        let advance_path = advance_dir.path().join("work");
+        run_git(
+            advance_dir.path(),
+            &[
+                "clone",
+                "--branch",
+                "main",
+                remote_path.to_str().unwrap(),
+                "work",
+            ],
+            &empty_env,
+        )
+        .unwrap();
+        std::fs::write(advance_path.join("main-update.txt"), "new main content").unwrap();
+        run_git(&advance_path, &["add", "main-update.txt"], &empty_env).unwrap();
+        run_git(
+            &advance_path,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@test",
+                "commit",
+                "-m",
+                "advance main",
+            ],
+            &empty_env,
+        )
+        .unwrap();
+        run_git(&advance_path, &["push", "origin", "main"], &empty_env).unwrap();
+
+        // Fetch latest main into our workspace
+        run_git(&ws.repo_path, &["fetch", "origin", "main"], &ws.auth_env).unwrap();
+
+        // Verify our branch doesn't have the main update yet
+        assert!(!ws.repo_path.join("main-update.txt").exists());
+
+        // Rebase onto updated main
+        ws.rebase_onto("origin/main", "Test Committer", "committer@test")
+            .unwrap();
+
+        // Branch should now have the main update
+        assert!(ws.repo_path.join("main-update.txt").exists());
+        // Branch commits should still be present
+        assert!(ws.repo_path.join("branch1.txt").exists());
+        assert!(ws.repo_path.join("branch2.txt").exists());
+
+        // Merge base should now be at the tip of origin/main
+        let mb = ws.merge_base("HEAD", "origin/main").unwrap();
+        let origin_main = ws.rev_parse("origin/main").unwrap();
+        assert_eq!(mb, origin_main);
+
+        // Should still have 2 branch commits
+        let commits = ws.list_commits_in_range(&mb).unwrap();
+        assert_eq!(commits.len(), 2);
     }
 
     #[test]

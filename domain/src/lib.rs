@@ -762,6 +762,7 @@ pub struct OpenChangeRequestRequest {
 pub enum RebaseOperation {
     Drop { commit: String },
     Fixup { commit: String, into: String },
+    RebaseOnto,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

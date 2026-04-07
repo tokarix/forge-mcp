@@ -49,6 +49,7 @@ pub struct RebaseBranchBody {
 pub enum RebaseOperationBody {
     Drop { commit: String },
     Fixup { commit: String, into: String },
+    RebaseOnto {},
 }
 
 /// Response for POST /rebase
@@ -255,6 +256,23 @@ mod tests {
         let json = serde_json::json!({});
         let query: ContentsQuery = serde_json::from_value(json).expect("should deserialize");
         assert!(query.git_ref.is_none());
+    }
+
+    #[test]
+    fn rebase_body_deserializes_rebase_onto() {
+        let json = serde_json::json!({
+            "base_branch": "main",
+            "branch": "agent/feature",
+            "operations": [{"type": "rebase_onto"}]
+        });
+        let body: RebaseBranchBody = serde_json::from_value(json).expect("should deserialize");
+        assert_eq!(body.base_branch, "main");
+        assert_eq!(body.branch, "agent/feature");
+        assert_eq!(body.operations.len(), 1);
+        assert!(matches!(
+            body.operations[0],
+            RebaseOperationBody::RebaseOnto {}
+        ));
     }
 
     #[test]
