@@ -30,7 +30,7 @@ where
 {
     struct U64LenientVisitor;
 
-    impl<'de> de::Visitor<'de> for U64LenientVisitor {
+    impl de::Visitor<'_> for U64LenientVisitor {
         type Value = u64;
 
         fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1875,6 +1875,7 @@ pub async fn serve_stdio(config: ShimConfig) -> Result<(), TransportError> {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write;
     use std::sync::Arc;
 
     use rmcp::{
@@ -2729,10 +2730,8 @@ mod tests {
                 "delivery_id": "delivery-456"
             }
         });
-        let sse = format!(
-            "event: change_request\nid: internal:delivery-456\ndata: {}\n\n",
-            event_body
-        );
+        let sse =
+            format!("event: change_request\nid: internal:delivery-456\ndata: {event_body}\n\n",);
 
         wiremock::Mock::given(wiremock::matchers::method("GET"))
             .and(wiremock::matchers::path("/api/v1/agent/events"))
@@ -2800,8 +2799,7 @@ mod tests {
             }
         });
         let sse = format!(
-            "event: change_request\nid: internal:delivery-no-channels\ndata: {}\n\n",
-            event_body
+            "event: change_request\nid: internal:delivery-no-channels\ndata: {event_body}\n\n",
         );
 
         wiremock::Mock::given(wiremock::matchers::method("GET"))
@@ -2857,10 +2855,7 @@ mod tests {
                 "delivery_id": "delivery-issue-1"
             }
         });
-        let sse = format!(
-            "event: issue\nid: internal:delivery-issue-1\ndata: {}\n\n",
-            event_body
-        );
+        let sse = format!("event: issue\nid: internal:delivery-issue-1\ndata: {event_body}\n\n",);
 
         wiremock::Mock::given(wiremock::matchers::method("GET"))
             .and(wiremock::matchers::path("/api/v1/agent/events"))
@@ -2918,8 +2913,7 @@ mod tests {
             }
         });
         let sse = format!(
-            "event: issue_comment\nid: internal:delivery-comment-1\ndata: {}\n\n",
-            event_body
+            "event: issue_comment\nid: internal:delivery-comment-1\ndata: {event_body}\n\n",
         );
 
         wiremock::Mock::given(wiremock::matchers::method("GET"))
@@ -2980,8 +2974,7 @@ mod tests {
             }
         });
         let sse = format!(
-            "event: pull_request_review\nid: internal:delivery-review-1\ndata: {}\n\n",
-            event_body
+            "event: pull_request_review\nid: internal:delivery-review-1\ndata: {event_body}\n\n",
         );
 
         wiremock::Mock::given(wiremock::matchers::method("GET"))
@@ -3141,7 +3134,7 @@ mod tests {
             "diff --git a/big.txt b/big.txt\n--- a/big.txt\n+++ b/big.txt\n@@ -1 +1,6001 @@\n",
         );
         for i in 0..6000 {
-            large_patch.push_str(&format!("+line {i:04} padding to make each line longer\n"));
+            let _ = writeln!(large_patch, "+line {i:04} padding to make each line longer");
         }
         let expected_len = large_patch.len();
         assert!(expected_len > 52_000, "patch should exceed 52KB");

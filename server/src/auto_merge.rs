@@ -32,12 +32,9 @@ impl AutoMergeService {
         }
 
         let alias = &event.repository.alias;
-        let forge = match self.forge_registry.get(alias) {
-            Some(f) => f,
-            None => {
-                tracing::warn!(alias, "auto-merge: unknown forge");
-                return;
-            }
+        let Some(forge) = self.forge_registry.get(alias) else {
+            tracing::warn!(alias, "auto-merge: unknown forge");
+            return;
         };
 
         let credential = ForgeCredential {

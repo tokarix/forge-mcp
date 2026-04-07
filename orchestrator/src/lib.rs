@@ -1937,8 +1937,8 @@ mod tests {
 
     // --- get_change_request_checks tests ---
 
-    /// A minimal ForgeAdapter that returns a PR with a head_sha and a combined
-    /// commit status, used to test the ReadOrchestrator::get_change_request_checks
+    /// A minimal `ForgeAdapter` that returns a PR with a `head_sha` and a combined
+    /// commit status, used to test the `ReadOrchestrator::get_change_request_checks`
     /// method.
     struct ChecksTestForgeAdapter {
         combined_status: domain::CombinedCommitStatus,

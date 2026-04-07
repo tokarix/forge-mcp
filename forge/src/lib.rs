@@ -1,5 +1,6 @@
 //! Forge adapter traits and the Phase 1 Forgejo implementation.
 
+use std::fmt::Write;
 use std::sync::Once;
 
 use async_trait::async_trait;
@@ -328,6 +329,10 @@ pub struct ForgejoAdapter {
 }
 
 impl ForgejoAdapter {
+    /// # Panics
+    ///
+    /// Panics if the HTTP client cannot be built (should never happen with
+    /// default settings).
     #[must_use]
     pub fn new(config: ForgejoConfig) -> Self {
         INSTALL_RING_PROVIDER.call_once(|| {
@@ -1403,7 +1408,7 @@ impl ForgeAdapter for ForgejoAdapter {
             repository.name,
         );
         if let Some(state) = state {
-            url.push_str(&format!("&state={state}"));
+            let _ = write!(url, "&state={state}");
         }
 
         let effective_token = credential.token.as_deref().or(self.config.token.as_deref());
@@ -1735,147 +1740,16 @@ impl ForgeWebhookAdapter for ForgejoAdapter {
 
         match event_type {
             WebhookEventType::PullRequest => {
-                let payload: ForgejoWebhookPullRequestEventPayload =
-                    serde_json::from_slice(body)
-                        .map_err(|e| ForgeWebhookError::InvalidPayload(e.to_string()))?;
-
-                let action = match payload.action.as_str() {
-                    "opened" => ChangeRequestEventAction::Opened,
-                    "reopened" => ChangeRequestEventAction::Reopened,
-                    "synchronize" | "synchronized" => ChangeRequestEventAction::Synchronized,
-                    _ => return Ok(None),
-                };
-
-                let owner = payload.repository.owner.into_owner()?;
-                let index = payload
-                    .number
-                    .or(payload.pull_request.number)
-                    .ok_or_else(|| {
-                        ForgeWebhookError::InvalidPayload("pull request number missing".to_string())
-                    })?;
-
-                Ok(Some(domain::WebhookEvent::ChangeRequest(
-                    ChangeRequestEvent {
-                        action,
-                        delivery_id,
-                        head_sha: payload.pull_request.head.sha,
-                        index,
-                        repository: RepositoryRef {
-                            alias: forge_alias.to_string(),
-                            forge: forge_kind,
-                            host: host.to_string(),
-                            name: payload.repository.name,
-                            owner,
-                        },
-                        title: payload.pull_request.title,
-                        url: payload.pull_request.html_url,
-                    },
-                )))
+                parse_pull_request_event(body, delivery_id, forge_alias, forge_kind, host)
             }
             WebhookEventType::Issues => {
-                let payload: ForgejoWebhookIssueEventPayload = serde_json::from_slice(body)
-                    .map_err(|e| ForgeWebhookError::InvalidPayload(e.to_string()))?;
-
-                let action = match payload.action.as_str() {
-                    "closed" => domain::IssueEventAction::Closed,
-                    "opened" => domain::IssueEventAction::Opened,
-                    _ => return Ok(None),
-                };
-
-                let owner = payload.repository.owner.into_owner()?;
-                let index = payload.number.or(payload.issue.number).ok_or_else(|| {
-                    ForgeWebhookError::InvalidPayload("issue number missing".to_string())
-                })?;
-
-                Ok(Some(domain::WebhookEvent::Issue(domain::IssueEvent {
-                    action,
-                    delivery_id,
-                    index,
-                    repository: RepositoryRef {
-                        alias: forge_alias.to_string(),
-                        forge: forge_kind,
-                        host: host.to_string(),
-                        name: payload.repository.name,
-                        owner,
-                    },
-                    title: payload.issue.title,
-                    url: payload.issue.html_url,
-                })))
+                parse_issue_event(body, delivery_id, forge_alias, forge_kind, host)
             }
             WebhookEventType::IssueComment => {
-                let payload: ForgejoWebhookIssueCommentPayload = serde_json::from_slice(body)
-                    .map_err(|e| ForgeWebhookError::InvalidPayload(e.to_string()))?;
-
-                let action = match payload.action.as_str() {
-                    "created" => domain::IssueCommentEventAction::Created,
-                    _ => return Ok(None),
-                };
-
-                let owner = payload.repository.owner.into_owner()?;
-                let issue_index = payload.issue.number.ok_or_else(|| {
-                    ForgeWebhookError::InvalidPayload("issue number missing".to_string())
-                })?;
-
-                Ok(Some(domain::WebhookEvent::IssueComment(
-                    domain::IssueCommentEvent {
-                        action,
-                        body: payload.comment.body,
-                        comment_id: payload.comment.id,
-                        delivery_id,
-                        issue_index,
-                        repository: RepositoryRef {
-                            alias: forge_alias.to_string(),
-                            forge: forge_kind,
-                            host: host.to_string(),
-                            name: payload.repository.name,
-                            owner,
-                        },
-                    },
-                )))
+                parse_issue_comment_event(body, delivery_id, forge_alias, forge_kind, host)
             }
             WebhookEventType::PullRequestReview => {
-                let payload: ForgejoWebhookPullRequestReviewEventPayload =
-                    serde_json::from_slice(body)
-                        .map_err(|e| ForgeWebhookError::InvalidPayload(e.to_string()))?;
-
-                let action = match payload.action.as_str() {
-                    "reviewed" | "submitted" => domain::PullRequestReviewEventAction::Submitted,
-                    _ => return Ok(None),
-                };
-
-                // Skip pending reviews — they are incomplete drafts.
-                let review_state = match payload.review.review_type.as_str() {
-                    "pull_request_review_approved" => domain::ReviewState::Approved,
-                    "pull_request_review_rejected" => domain::ReviewState::RequestChanges,
-                    "pull_request_review_comment" => domain::ReviewState::Comment,
-                    _ => return Ok(None),
-                };
-
-                let owner = payload.repository.owner.into_owner()?;
-                let index = payload.pull_request.number.ok_or_else(|| {
-                    ForgeWebhookError::InvalidPayload("pull request number missing".to_string())
-                })?;
-
-                Ok(Some(domain::WebhookEvent::PullRequestReview(
-                    domain::PullRequestReviewEvent {
-                        action,
-                        delivery_id,
-                        head_sha: payload.pull_request.head.sha,
-                        index,
-                        repository: RepositoryRef {
-                            alias: forge_alias.to_string(),
-                            forge: forge_kind,
-                            host: host.to_string(),
-                            name: payload.repository.name,
-                            owner,
-                        },
-                        review_body: payload.review.body.unwrap_or_default(),
-                        review_id: payload.review.id.unwrap_or(0),
-                        review_state,
-                        title: payload.pull_request.title,
-                        url: payload.pull_request.html_url,
-                    },
-                )))
+                parse_pull_request_review_event(body, delivery_id, forge_alias, forge_kind, host)
             }
             WebhookEventType::Unknown(name) => {
                 tracing::debug!(event_type = %name, "ignoring unhandled webhook event type");
@@ -1883,6 +1757,177 @@ impl ForgeWebhookAdapter for ForgejoAdapter {
             }
         }
     }
+}
+
+fn parse_pull_request_event(
+    body: &[u8],
+    delivery_id: String,
+    forge_alias: &str,
+    forge_kind: domain::ForgeKind,
+    host: &str,
+) -> Result<Option<domain::WebhookEvent>, ForgeWebhookError> {
+    let payload: ForgejoWebhookPullRequestEventPayload = serde_json::from_slice(body)
+        .map_err(|e| ForgeWebhookError::InvalidPayload(e.to_string()))?;
+
+    let action = match payload.action.as_str() {
+        "opened" => ChangeRequestEventAction::Opened,
+        "reopened" => ChangeRequestEventAction::Reopened,
+        "synchronize" | "synchronized" => ChangeRequestEventAction::Synchronized,
+        _ => return Ok(None),
+    };
+
+    let owner = payload.repository.owner.into_owner()?;
+    let index = payload
+        .number
+        .or(payload.pull_request.number)
+        .ok_or_else(|| {
+            ForgeWebhookError::InvalidPayload("pull request number missing".to_string())
+        })?;
+
+    Ok(Some(domain::WebhookEvent::ChangeRequest(
+        ChangeRequestEvent {
+            action,
+            delivery_id,
+            head_sha: payload.pull_request.head.sha,
+            index,
+            repository: RepositoryRef {
+                alias: forge_alias.to_string(),
+                forge: forge_kind,
+                host: host.to_string(),
+                name: payload.repository.name,
+                owner,
+            },
+            title: payload.pull_request.title,
+            url: payload.pull_request.html_url,
+        },
+    )))
+}
+
+fn parse_issue_event(
+    body: &[u8],
+    delivery_id: String,
+    forge_alias: &str,
+    forge_kind: domain::ForgeKind,
+    host: &str,
+) -> Result<Option<domain::WebhookEvent>, ForgeWebhookError> {
+    let payload: ForgejoWebhookIssueEventPayload = serde_json::from_slice(body)
+        .map_err(|e| ForgeWebhookError::InvalidPayload(e.to_string()))?;
+
+    let action = match payload.action.as_str() {
+        "closed" => domain::IssueEventAction::Closed,
+        "opened" => domain::IssueEventAction::Opened,
+        _ => return Ok(None),
+    };
+
+    let owner = payload.repository.owner.into_owner()?;
+    let index = payload
+        .number
+        .or(payload.issue.number)
+        .ok_or_else(|| ForgeWebhookError::InvalidPayload("issue number missing".to_string()))?;
+
+    Ok(Some(domain::WebhookEvent::Issue(domain::IssueEvent {
+        action,
+        delivery_id,
+        index,
+        repository: RepositoryRef {
+            alias: forge_alias.to_string(),
+            forge: forge_kind,
+            host: host.to_string(),
+            name: payload.repository.name,
+            owner,
+        },
+        title: payload.issue.title,
+        url: payload.issue.html_url,
+    })))
+}
+
+fn parse_issue_comment_event(
+    body: &[u8],
+    delivery_id: String,
+    forge_alias: &str,
+    forge_kind: domain::ForgeKind,
+    host: &str,
+) -> Result<Option<domain::WebhookEvent>, ForgeWebhookError> {
+    let payload: ForgejoWebhookIssueCommentPayload = serde_json::from_slice(body)
+        .map_err(|e| ForgeWebhookError::InvalidPayload(e.to_string()))?;
+
+    let action = match payload.action.as_str() {
+        "created" => domain::IssueCommentEventAction::Created,
+        _ => return Ok(None),
+    };
+
+    let owner = payload.repository.owner.into_owner()?;
+    let issue_index = payload
+        .issue
+        .number
+        .ok_or_else(|| ForgeWebhookError::InvalidPayload("issue number missing".to_string()))?;
+
+    Ok(Some(domain::WebhookEvent::IssueComment(
+        domain::IssueCommentEvent {
+            action,
+            body: payload.comment.body,
+            comment_id: payload.comment.id,
+            delivery_id,
+            issue_index,
+            repository: RepositoryRef {
+                alias: forge_alias.to_string(),
+                forge: forge_kind,
+                host: host.to_string(),
+                name: payload.repository.name,
+                owner,
+            },
+        },
+    )))
+}
+
+fn parse_pull_request_review_event(
+    body: &[u8],
+    delivery_id: String,
+    forge_alias: &str,
+    forge_kind: domain::ForgeKind,
+    host: &str,
+) -> Result<Option<domain::WebhookEvent>, ForgeWebhookError> {
+    let payload: ForgejoWebhookPullRequestReviewEventPayload = serde_json::from_slice(body)
+        .map_err(|e| ForgeWebhookError::InvalidPayload(e.to_string()))?;
+
+    let action = match payload.action.as_str() {
+        "reviewed" | "submitted" => domain::PullRequestReviewEventAction::Submitted,
+        _ => return Ok(None),
+    };
+
+    // Skip pending reviews — they are incomplete drafts.
+    let review_state = match payload.review.review_type.as_str() {
+        "pull_request_review_approved" => domain::ReviewState::Approved,
+        "pull_request_review_rejected" => domain::ReviewState::RequestChanges,
+        "pull_request_review_comment" => domain::ReviewState::Comment,
+        _ => return Ok(None),
+    };
+
+    let owner = payload.repository.owner.into_owner()?;
+    let index = payload.pull_request.number.ok_or_else(|| {
+        ForgeWebhookError::InvalidPayload("pull request number missing".to_string())
+    })?;
+
+    Ok(Some(domain::WebhookEvent::PullRequestReview(
+        domain::PullRequestReviewEvent {
+            action,
+            delivery_id,
+            head_sha: payload.pull_request.head.sha,
+            index,
+            repository: RepositoryRef {
+                alias: forge_alias.to_string(),
+                forge: forge_kind,
+                host: host.to_string(),
+                name: payload.repository.name,
+                owner,
+            },
+            review_body: payload.review.body.unwrap_or_default(),
+            review_id: payload.review.id.unwrap_or(0),
+            review_state,
+            title: payload.pull_request.title,
+            url: payload.pull_request.html_url,
+        },
+    )))
 }
 
 fn decode_hex(input: &str) -> Result<Vec<u8>, ForgeWebhookError> {
@@ -1911,10 +1956,10 @@ fn parse_commit_status_state(s: &str) -> domain::CommitStatusState {
     match s {
         "error" => domain::CommitStatusState::Error,
         "failure" => domain::CommitStatusState::Failure,
-        "pending" => domain::CommitStatusState::Pending,
         "success" => domain::CommitStatusState::Success,
         "warning" => domain::CommitStatusState::Warning,
-        // Forgejo may return an empty string when there are no statuses.
+        // Forgejo may return "pending" or an empty string when there are no
+        // statuses, so the fallback covers both.
         _ => domain::CommitStatusState::Pending,
     }
 }

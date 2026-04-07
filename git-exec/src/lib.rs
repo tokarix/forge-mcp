@@ -261,93 +261,7 @@ impl GitWorkspace {
         committer_name: &str,
         committer_email: &str,
     ) -> Result<(), GitExecError> {
-        use std::fmt::Write;
-
-        let mut py_script = String::from(
-            r"#!/usr/bin/env python3
-import sys
-
-with open(sys.argv[1]) as f:
-    lines = f.readlines()
-
-# Parse operations
-drops = set()  # full SHAs to drop
-fixups = {}  # commit_prefix -> into_prefix
-",
-        );
-
-        for op in operations {
-            match op {
-                RebaseOperation::Drop { commit } => {
-                    let _ = writeln!(py_script, "drops.add('{commit}')");
-                }
-                RebaseOperation::Fixup { commit, into } => {
-                    // Use full SHAs — git's todo uses abbreviated SHAs which are
-                    // prefixes of these, so startswith() matching still works.
-                    let _ = writeln!(py_script, "fixups['{commit}'] = '{into}'");
-                }
-            }
-        }
-
-        py_script.push_str(
-            r"
-# First pass: separate fixup lines from regular lines
-regular = []
-fixup_by_target = {}  # into_prefix -> [fixup_lines]
-
-for line in lines:
-    stripped = line.strip()
-    if not stripped or stripped.startswith('#'):
-        regular.append(line)
-        continue
-
-    parts = stripped.split(None, 2)
-    if len(parts) < 2:
-        regular.append(line)
-        continue
-
-    action, sha = parts[0], parts[1]
-
-    # Check if this commit should be dropped
-    is_drop = any(full_sha.startswith(sha) for full_sha in drops)
-    if is_drop:
-        drop_line = line.replace(action, 'drop', 1)
-        regular.append(drop_line)
-        continue
-
-    # Check if this commit should be a fixup (full SHA starts with todo's abbreviated SHA)
-    matched_full_sha = None
-    for full_sha in fixups:
-        if full_sha.startswith(sha):
-            matched_full_sha = full_sha
-            break
-
-    if matched_full_sha:
-        into_full_sha = fixups[matched_full_sha]
-        fixup_line = line.replace(action, 'fixup', 1)
-        fixup_by_target.setdefault(into_full_sha, []).append(fixup_line)
-    else:
-        regular.append(line)
-
-# Second pass: insert fixup lines after their targets
-result = []
-for line in regular:
-    result.append(line)
-    stripped = line.strip()
-    if not stripped or stripped.startswith('#'):
-        continue
-    parts = stripped.split(None, 2)
-    if len(parts) < 2:
-        continue
-    sha = parts[1]
-    for full_sha, fixup_lines in list(fixup_by_target.items()):
-        if full_sha.startswith(sha):
-            result.extend(fixup_lines)
-
-with open(sys.argv[1], 'w') as f:
-    f.writelines(result)
-",
-        );
+        let py_script = build_rebase_editor_script(operations);
 
         // Write the script to a temp file
         let script_path = self.repo_path.join(".rebase-editor.py");
@@ -438,6 +352,101 @@ with open(sys.argv[1], 'w') as f:
         let output = run_git(&self.repo_path, &["rev-parse", refspec], &self.auth_env)?;
         Ok(output.trim().to_string())
     }
+}
+
+/// Builds a Python script for use as `GIT_SEQUENCE_EDITOR` during
+/// interactive rebase.  The script rewrites the rebase todo list to
+/// apply the requested drop / fixup operations.
+fn build_rebase_editor_script(operations: &[RebaseOperation]) -> String {
+    use std::fmt::Write;
+
+    let mut py_script = String::from(
+        r"#!/usr/bin/env python3
+import sys
+
+with open(sys.argv[1]) as f:
+    lines = f.readlines()
+
+# Parse operations
+drops = set()  # full SHAs to drop
+fixups = {}  # commit_prefix -> into_prefix
+",
+    );
+
+    for op in operations {
+        match op {
+            RebaseOperation::Drop { commit } => {
+                let _ = writeln!(py_script, "drops.add('{commit}')");
+            }
+            RebaseOperation::Fixup { commit, into } => {
+                // Use full SHAs — git's todo uses abbreviated SHAs which are
+                // prefixes of these, so startswith() matching still works.
+                let _ = writeln!(py_script, "fixups['{commit}'] = '{into}'");
+            }
+        }
+    }
+
+    py_script.push_str(
+        r"
+# First pass: separate fixup lines from regular lines
+regular = []
+fixup_by_target = {}  # into_prefix -> [fixup_lines]
+
+for line in lines:
+    stripped = line.strip()
+    if not stripped or stripped.startswith('#'):
+        regular.append(line)
+        continue
+
+    parts = stripped.split(None, 2)
+    if len(parts) < 2:
+        regular.append(line)
+        continue
+
+    action, sha = parts[0], parts[1]
+
+    # Check if this commit should be dropped
+    is_drop = any(full_sha.startswith(sha) for full_sha in drops)
+    if is_drop:
+        drop_line = line.replace(action, 'drop', 1)
+        regular.append(drop_line)
+        continue
+
+    # Check if this commit should be a fixup (full SHA starts with todo's abbreviated SHA)
+    matched_full_sha = None
+    for full_sha in fixups:
+        if full_sha.startswith(sha):
+            matched_full_sha = full_sha
+            break
+
+    if matched_full_sha:
+        into_full_sha = fixups[matched_full_sha]
+        fixup_line = line.replace(action, 'fixup', 1)
+        fixup_by_target.setdefault(into_full_sha, []).append(fixup_line)
+    else:
+        regular.append(line)
+
+# Second pass: insert fixup lines after their targets
+result = []
+for line in regular:
+    result.append(line)
+    stripped = line.strip()
+    if not stripped or stripped.startswith('#'):
+        continue
+    parts = stripped.split(None, 2)
+    if len(parts) < 2:
+        continue
+    sha = parts[1]
+    for full_sha, fixup_lines in list(fixup_by_target.items()):
+        if full_sha.startswith(sha):
+            result.extend(fixup_lines)
+
+with open(sys.argv[1], 'w') as f:
+    f.writelines(result)
+",
+    );
+
+    py_script
 }
 
 fn run_git(

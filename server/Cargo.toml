@@ -3,6 +3,9 @@ name = "server"
 version = "0.1.0"
 edition = "2024"
 
+[lints]
+workspace = true
+
 [dependencies]
 audit = { version = "0.1.0", path = "../audit" }
 axum = "0.8"

@@ -195,7 +195,7 @@ pub struct GetChangeRequestCommentsRequest {
 
 pub trait PublishableEvent {
     fn dedupe_key(&self) -> String;
-    fn event_name(&self) -> &str;
+    fn event_name(&self) -> &'static str;
     fn repository_ref(&self) -> &RepositoryRef;
     fn to_channel_event(&self) -> ChannelEvent;
 }
@@ -227,7 +227,7 @@ impl PublishableEvent for ChangeRequestEvent {
         )
     }
 
-    fn event_name(&self) -> &str {
+    fn event_name(&self) -> &'static str {
         "change_request"
     }
 
@@ -350,7 +350,7 @@ impl PublishableEvent for IssueCommentEvent {
         )
     }
 
-    fn event_name(&self) -> &str {
+    fn event_name(&self) -> &'static str {
         "issue_comment"
     }
 
@@ -410,7 +410,7 @@ impl PublishableEvent for IssueEvent {
         )
     }
 
-    fn event_name(&self) -> &str {
+    fn event_name(&self) -> &'static str {
         "issue"
     }
 
@@ -491,7 +491,7 @@ impl PublishableEvent for PullRequestReviewEvent {
         )
     }
 
-    fn event_name(&self) -> &str {
+    fn event_name(&self) -> &'static str {
         "pull_request_review"
     }
 
@@ -582,7 +582,7 @@ impl PublishableEvent for AutoMergeFailedEvent {
         )
     }
 
-    fn event_name(&self) -> &str {
+    fn event_name(&self) -> &'static str {
         "auto_merge_failed"
     }
 
