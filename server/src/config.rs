@@ -136,23 +136,35 @@ impl AgentPolicyConfig {
 
     /// Returns whether the agent is allowed to access the given repo.
     ///
-    /// Patterns use `forge/owner/repo` triplets with wildcard support:
+    /// Patterns use `forge/namespace/repo` paths with wildcard support:
     /// - `"*"` — all repos on all forges
     /// - `"alias/*"` — all repos on a specific forge
-    /// - `"alias/owner/*"` — all repos under an owner
+    /// - `"alias/owner/*"` — all repos under an owner/namespace
     /// - `"alias/owner/repo"` — exact match
+    /// - `"alias/group/subgroup/repo"` — exact match with nested namespace
+    /// - `"alias/group/subgroup/*"` — all repos under a nested namespace
     #[must_use]
     pub fn is_repo_allowed(&self, forge_alias: &str, owner: &str, repo: &str) -> bool {
         self.allowed_repos.iter().any(|pattern| {
             if pattern == "*" {
                 return true;
             }
-            let parts: Vec<&str> = pattern.splitn(3, '/').collect();
-            match parts.as_slice() {
-                [f, "*"] if *f == forge_alias => true,
-                [f, o, "*"] if *f == forge_alias && *o == owner => true,
-                [f, o, r] if *f == forge_alias && *o == owner && *r == repo => true,
-                _ => false,
+            let Some((alias, rest)) = pattern.split_once('/') else {
+                return false;
+            };
+            if alias != forge_alias {
+                return false;
+            }
+            if rest == "*" {
+                return true;
+            }
+            let Some((namespace, repo_pattern)) = rest.rsplit_once('/') else {
+                return false;
+            };
+            if repo_pattern == "*" {
+                namespace == owner
+            } else {
+                namespace == owner && repo_pattern == repo
             }
         })
     }
@@ -190,7 +202,7 @@ pub fn validate_forge_alias(alias: &str) -> Result<(), String> {
 ///
 /// Returns a description of the first validation error found.
 pub fn validate_config(config: &ServerConfig) -> Result<(), String> {
-    const SUPPORTED_FORGE_TYPES: &[&str] = &["forgejo"];
+    const SUPPORTED_FORGE_TYPES: &[&str] = &["forgejo", "gitlab"];
 
     let mut seen_aliases = std::collections::HashSet::new();
     for forge in &config.forges {
@@ -230,19 +242,24 @@ pub fn validate_config(config: &ServerConfig) -> Result<(), String> {
             if pattern == "*" {
                 continue;
             }
-            // Validate pattern shape: alias/*, alias/owner/*, or alias/owner/repo
-            let parts: Vec<&str> = pattern.splitn(3, '/').collect();
-            match parts.as_slice() {
-                [_alias, _] | [_alias, _, _] => {}
-                _ => {
-                    return Err(format!(
-                        "agent '{}' has malformed allowed_repos pattern '{pattern}' \
-                         (expected alias/*, alias/owner/*, or alias/owner/repo)",
-                        agent.agent_id
-                    ));
-                }
+            // Validate pattern shape: alias/*, alias/ns/*, alias/ns/repo,
+            // or alias/group/subgroup/repo (variable-depth namespace).
+            let Some((forge_part, rest)) = pattern.split_once('/') else {
+                return Err(format!(
+                    "agent '{}' has malformed allowed_repos pattern '{pattern}' \
+                     (expected alias/*, alias/namespace/*, or alias/namespace/repo)",
+                    agent.agent_id
+                ));
+            };
+            // After the alias, we need at least one segment (the wildcard or
+            // a namespace/repo pair).
+            if rest.is_empty() {
+                return Err(format!(
+                    "agent '{}' has malformed allowed_repos pattern '{pattern}' \
+                     (expected alias/*, alias/namespace/*, or alias/namespace/repo)",
+                    agent.agent_id
+                ));
             }
-            let forge_part = parts[0];
             if forge_part != "*" && !seen_aliases.contains(&forge_part.to_string()) {
                 return Err(format!(
                     "agent '{}' references unknown forge alias '{forge_part}' in allowed_repos pattern '{pattern}'",
@@ -579,7 +596,7 @@ listen = "0.0.0.0:8443"
 
 [[forges]]
 alias = "internal"
-type = "gitlab"
+type = "bitbucket"
 base_url = "https://a.example"
 
 [[agents]]
@@ -591,8 +608,30 @@ session_id = "s"
 "#;
         let config = parse_config(toml_str).expect("should parse");
         let err = validate_config(&config).expect_err("should reject unknown type");
-        assert!(err.contains("unsupported forge type 'gitlab'"));
+        assert!(err.contains("unsupported forge type 'bitbucket'"));
         assert!(err.contains("internal"));
+    }
+
+    #[test]
+    fn accepts_gitlab_forge_type() {
+        let toml_str = r#"
+[server]
+listen = "0.0.0.0:8443"
+
+[[forges]]
+alias = "gl"
+type = "gitlab"
+base_url = "https://gitlab.example"
+
+[[agents]]
+token = "t"
+agent_id = "a"
+session_id = "s"
+
+[agents.policy]
+"#;
+        let config = parse_config(toml_str).expect("should parse");
+        assert!(validate_config(&config).is_ok());
     }
 
     #[test]
@@ -691,6 +730,85 @@ allowed_repos = ["internal"]
         let err = validate_config(&config).expect_err("should reject bare alias");
         assert!(err.contains("malformed"));
         assert!(err.contains("internal"));
+    }
+
+    #[test]
+    fn repo_nested_namespace_exact_match() {
+        let policy = AgentPolicyConfig {
+            allowed_repos: vec!["gl/group/subgroup/repo".to_string()],
+            branch_prefix: None,
+            protected_paths: vec![],
+        };
+        assert!(policy.is_repo_allowed("gl", "group/subgroup", "repo"));
+        assert!(!policy.is_repo_allowed("gl", "group", "subgroup"));
+        assert!(!policy.is_repo_allowed("gl", "group/subgroup", "other"));
+    }
+
+    #[test]
+    fn repo_nested_namespace_wildcard() {
+        let policy = AgentPolicyConfig {
+            allowed_repos: vec!["gl/group/subgroup/*".to_string()],
+            branch_prefix: None,
+            protected_paths: vec![],
+        };
+        assert!(policy.is_repo_allowed("gl", "group/subgroup", "any-repo"));
+        assert!(!policy.is_repo_allowed("gl", "group", "any-repo"));
+        assert!(!policy.is_repo_allowed("other", "group/subgroup", "repo"));
+    }
+
+    #[test]
+    fn repo_deeply_nested_namespace() {
+        let policy = AgentPolicyConfig {
+            allowed_repos: vec!["gl/a/b/c/repo".to_string()],
+            branch_prefix: None,
+            protected_paths: vec![],
+        };
+        assert!(policy.is_repo_allowed("gl", "a/b/c", "repo"));
+        assert!(!policy.is_repo_allowed("gl", "a/b", "repo"));
+    }
+
+    #[test]
+    fn allowed_forge_aliases_nested_namespace() {
+        let policy = AgentPolicyConfig {
+            allowed_repos: vec![
+                "gl/group/subgroup/repo".to_string(),
+                "internal/org/repo".to_string(),
+            ],
+            branch_prefix: None,
+            protected_paths: vec![],
+        };
+        let result = policy.allowed_forge_aliases();
+        match result {
+            AllowedForges::Specific(set) => {
+                assert_eq!(set.len(), 2);
+                assert!(set.contains("gl"));
+                assert!(set.contains("internal"));
+            }
+            AllowedForges::All => panic!("expected Specific"),
+        }
+    }
+
+    #[test]
+    fn validates_nested_namespace_pattern() {
+        let toml_str = r#"
+[server]
+listen = "0.0.0.0:8443"
+
+[[forges]]
+alias = "gl"
+type = "gitlab"
+base_url = "https://gitlab.example"
+
+[[agents]]
+token = "t"
+agent_id = "a"
+session_id = "s"
+
+[agents.policy]
+allowed_repos = ["gl/group/subgroup/repo", "gl/group/subgroup/*"]
+"#;
+        let config = parse_config(toml_str).expect("should parse");
+        assert!(validate_config(&config).is_ok());
     }
 
     #[test]
