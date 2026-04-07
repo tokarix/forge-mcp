@@ -159,6 +159,14 @@ pub trait ForgeAdapter: Send + Sync {
         index: u64,
     ) -> Result<String, ForgeError>;
 
+    /// Returns the combined CI/check status for the given commit SHA.
+    async fn get_combined_commit_status(
+        &self,
+        repository: &RepositoryRef,
+        sha: &str,
+        credential: &ForgeCredential,
+    ) -> Result<domain::CombinedCommitStatus, ForgeError>;
+
     /// Returns the repository's default merge style, if configured.
     async fn get_default_merge_style(
         &self,
@@ -428,6 +436,25 @@ impl ForgejoAdapter {
 struct ForgejoAuthUser {
     email: String,
     login: String,
+}
+
+/// Forgejo combined commit status response from
+/// `GET /api/v1/repos/{owner}/{repo}/commits/{ref}/status`.
+#[derive(Debug, Deserialize)]
+struct ForgejoCombinedStatusResponse {
+    sha: String,
+    state: String,
+    statuses: Option<Vec<ForgejoCommitStatusResponse>>,
+    total_count: u64,
+}
+
+/// A single commit status entry in the Forgejo response.
+#[derive(Debug, Deserialize)]
+struct ForgejoCommitStatusResponse {
+    context: String,
+    description: Option<String>,
+    status: String,
+    target_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1089,6 +1116,59 @@ impl ForgeAdapter for ForgejoAdapter {
             .get_repository_merge_settings_response(repository, credential)
             .await?;
         Ok(repo.allowed_merge_styles())
+    }
+
+    async fn get_combined_commit_status(
+        &self,
+        repository: &RepositoryRef,
+        sha: &str,
+        credential: &ForgeCredential,
+    ) -> Result<domain::CombinedCommitStatus, ForgeError> {
+        let url = format!(
+            "{}/api/v1/repos/{}/{}/commits/{}/status",
+            self.config.base_url.trim_end_matches('/'),
+            repository.owner,
+            repository.name,
+            sha,
+        );
+
+        let effective_token = credential.token.as_deref().or(self.config.token.as_deref());
+        let mut request = self.client.get(&url);
+        if let Some(token) = effective_token {
+            request = request.bearer_auth(token);
+        }
+
+        let response = request.send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(ForgeError::UnexpectedStatus { status, body });
+        }
+
+        let combined: ForgejoCombinedStatusResponse = response
+            .json()
+            .await
+            .map_err(|e| ForgeError::InvalidPayload(e.to_string()))?;
+
+        let state = parse_commit_status_state(&combined.state);
+        let statuses = combined
+            .statuses
+            .unwrap_or_default()
+            .into_iter()
+            .map(|s| domain::CommitStatus {
+                context: s.context,
+                description: s.description.unwrap_or_default(),
+                state: parse_commit_status_state(&s.status),
+                target_url: s.target_url.unwrap_or_default(),
+            })
+            .collect();
+
+        Ok(domain::CombinedCommitStatus {
+            head_sha: combined.sha,
+            state,
+            statuses,
+            total_count: combined.total_count,
+        })
     }
 
     async fn get_change_request_comments(
@@ -1885,6 +1965,18 @@ fn decode_hex(input: &str) -> Result<Vec<u8>, ForgeWebhookError> {
         bytes.push(combined);
     }
     Ok(bytes)
+}
+
+fn parse_commit_status_state(s: &str) -> domain::CommitStatusState {
+    match s {
+        "error" => domain::CommitStatusState::Error,
+        "failure" => domain::CommitStatusState::Failure,
+        "pending" => domain::CommitStatusState::Pending,
+        "success" => domain::CommitStatusState::Success,
+        "warning" => domain::CommitStatusState::Warning,
+        // Forgejo may return an empty string when there are no statuses.
+        _ => domain::CommitStatusState::Pending,
+    }
 }
 
 fn header_value<'a>(headers: &'a [(String, String)], names: &[&str]) -> Option<&'a str> {
@@ -3107,6 +3199,126 @@ mod tests {
         assert!(
             err.contains("not found"),
             "expected 'not found' in error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_combined_commit_status_returns_success() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/org/repo/commits/abc123/status"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "sha": "abc123",
+                "state": "success",
+                "statuses": [
+                    {
+                        "context": "ci/woodpecker",
+                        "description": "build passed",
+                        "status": "success",
+                        "target_url": "https://ci.example/1"
+                    }
+                ],
+                "total_count": 1
+            })))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let result = adapter
+            .get_combined_commit_status(&test_repo(), "abc123", &cred)
+            .await
+            .unwrap();
+
+        assert_eq!(result.head_sha, "abc123");
+        assert_eq!(result.state, domain::CommitStatusState::Success);
+        assert_eq!(result.total_count, 1);
+        assert_eq!(result.statuses.len(), 1);
+        assert_eq!(result.statuses[0].context, "ci/woodpecker");
+        assert_eq!(result.statuses[0].state, domain::CommitStatusState::Success);
+    }
+
+    #[tokio::test]
+    async fn get_combined_commit_status_handles_empty_statuses() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/org/repo/commits/def456/status"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "sha": "def456",
+                "state": "",
+                "statuses": null,
+                "total_count": 0
+            })))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let result = adapter
+            .get_combined_commit_status(&test_repo(), "def456", &cred)
+            .await
+            .unwrap();
+
+        assert_eq!(result.head_sha, "def456");
+        assert_eq!(result.state, domain::CommitStatusState::Pending);
+        assert_eq!(result.total_count, 0);
+        assert!(result.statuses.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_combined_commit_status_propagates_error() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/.+/commits/.+/status"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let result = adapter
+            .get_combined_commit_status(&test_repo(), "abc123", &cred)
+            .await;
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_commit_status_state_known_values() {
+        assert_eq!(
+            parse_commit_status_state("success"),
+            domain::CommitStatusState::Success
+        );
+        assert_eq!(
+            parse_commit_status_state("failure"),
+            domain::CommitStatusState::Failure
+        );
+        assert_eq!(
+            parse_commit_status_state("pending"),
+            domain::CommitStatusState::Pending
+        );
+        assert_eq!(
+            parse_commit_status_state("error"),
+            domain::CommitStatusState::Error
+        );
+        assert_eq!(
+            parse_commit_status_state("warning"),
+            domain::CommitStatusState::Warning
+        );
+    }
+
+    #[test]
+    fn parse_commit_status_state_unknown_defaults_to_pending() {
+        assert_eq!(
+            parse_commit_status_state(""),
+            domain::CommitStatusState::Pending
+        );
+        assert_eq!(
+            parse_commit_status_state("unknown"),
+            domain::CommitStatusState::Pending
         );
     }
 }

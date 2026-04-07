@@ -132,6 +132,34 @@ pub struct ChangeRequestDiff {
     pub patch: String,
 }
 
+/// Aggregate CI/check status for a commit.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct CombinedCommitStatus {
+    pub head_sha: String,
+    pub state: CommitStatusState,
+    pub statuses: Vec<CommitStatus>,
+    pub total_count: u64,
+}
+
+/// A single CI/check status entry.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct CommitStatus {
+    pub context: String,
+    pub description: String,
+    pub state: CommitStatusState,
+    pub target_url: String,
+}
+
+/// Aggregate state of commit statuses.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub enum CommitStatusState {
+    Error,
+    Failure,
+    Pending,
+    Success,
+    Warning,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum ChangeRequestState {
     Closed,
@@ -672,6 +700,13 @@ pub struct CreateIssueRequest {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GetChangeRequestChecksRequest {
+    pub agent: AgentIdentity,
+    pub index: u64,
+    pub repository: RepositoryRef,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GetChangeRequestDiffRequest {
     pub agent: AgentIdentity,
     pub index: u64,
@@ -844,6 +879,17 @@ pub enum ServiceError {
 
 #[async_trait]
 pub trait RepositoryReadService: Send + Sync {
+    /// Retrieves the combined CI/check status for a change request's head SHA.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the upstream forge request fails or audit
+    /// recording fails.
+    async fn get_change_request_checks(
+        &self,
+        request: GetChangeRequestChecksRequest,
+    ) -> Result<CombinedCommitStatus, ServiceError>;
+
     /// Retrieves the unified diff for a change request.
     ///
     /// # Errors
@@ -1346,5 +1392,26 @@ mod tests {
         assert_eq!(channel.meta.issue, Some(42));
         assert_eq!(channel.meta.issue_comment, Some(99));
         assert_eq!(channel.meta.change_request, None);
+    }
+
+    #[test]
+    fn combined_commit_status_serializes() {
+        use super::{CombinedCommitStatus, CommitStatus, CommitStatusState};
+        let status = CombinedCommitStatus {
+            head_sha: "abc123".to_string(),
+            state: CommitStatusState::Success,
+            statuses: vec![CommitStatus {
+                context: "ci/woodpecker".to_string(),
+                description: "build passed".to_string(),
+                state: CommitStatusState::Success,
+                target_url: "https://ci.example/1".to_string(),
+            }],
+            total_count: 1,
+        };
+        let json = serde_json::to_value(&status).expect("should serialize");
+        assert_eq!(json["head_sha"], "abc123");
+        assert_eq!(json["state"], "Success");
+        assert_eq!(json["total_count"], 1);
+        assert_eq!(json["statuses"][0]["context"], "ci/woodpecker");
     }
 }

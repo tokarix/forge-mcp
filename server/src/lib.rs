@@ -141,6 +141,10 @@ pub fn build_router(state: AppState, enable_docs: bool) -> Router {
             post(handlers::schedule_auto_merge),
         )
         .route(
+            "/api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}/checks",
+            get(handlers::get_pull_checks),
+        )
+        .route(
             "/api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}/comments",
             get(handlers::get_pull_comments).post(handlers::comment_on_pull),
         )

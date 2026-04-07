@@ -556,6 +556,14 @@ mod tests {
         ) -> Result<Vec<domain::ChangeRequestCommentDetail>, forge::ForgeError> {
             unimplemented!()
         }
+        async fn get_combined_commit_status(
+            &self,
+            _: &domain::RepositoryRef,
+            _: &str,
+            _: &domain::ForgeCredential,
+        ) -> Result<domain::CombinedCommitStatus, forge::ForgeError> {
+            unimplemented!()
+        }
         async fn get_allowed_merge_styles(
             &self,
             _: &domain::RepositoryRef,
@@ -684,6 +692,13 @@ mod tests {
                 path: request.path,
                 repository: request.repository,
             })
+        }
+
+        async fn get_change_request_checks(
+            &self,
+            _request: domain::GetChangeRequestChecksRequest,
+        ) -> Result<domain::CombinedCommitStatus, ServiceError> {
+            unimplemented!()
         }
 
         async fn get_change_request_comments(

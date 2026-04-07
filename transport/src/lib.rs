@@ -296,6 +296,19 @@ pub struct GetChangeRequestDiffTool {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct GetChangeRequestChecksTool {
+    /// Forge alias -- use `forge_info` to discover available aliases.
+    pub forge: String,
+    /// Change request (pull request) index number.
+    #[serde(deserialize_with = "deserialize_u64_lenient")]
+    pub index: u64,
+    /// Repository owner or organization.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct GetChangeRequestCommentsTool {
     /// Forge alias -- use `forge_info` to discover available aliases.
     pub forge: String,
@@ -1381,6 +1394,29 @@ impl McpShim {
             &request.repo,
             "pulls",
             &request.index.to_string(),
+        ])?;
+        self.gateway_get(url).await
+    }
+
+    /// Get the combined CI/check status for a change request's current head.
+    #[tool(
+        name = "get_change_request_checks",
+        description = "Get the combined CI/check status for a change request (pull request). Returns the aggregate state (success, pending, failure, error) and per-check details for the current PR head SHA."
+    )]
+    async fn get_change_request_checks(
+        &self,
+        Parameters(request): Parameters<GetChangeRequestChecksTool>,
+    ) -> Result<String, McpError> {
+        let url = self.build_url(&[
+            "api",
+            "v1",
+            "repos",
+            &request.forge,
+            &request.owner,
+            &request.repo,
+            "pulls",
+            &request.index.to_string(),
+            "checks",
         ])?;
         self.gateway_get(url).await
     }

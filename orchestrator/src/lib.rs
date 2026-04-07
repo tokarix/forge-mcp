@@ -7,13 +7,13 @@ use audit::{AuditRecord, AuditSink};
 use domain::{
     AddIssueLabelRequest, AssignIssueRequest, ChangeRequest, ChangeRequestComment,
     ChangeRequestCommentDetail, ChangeRequestDiff, ChangeRequestReview, CloseChangeRequestRequest,
-    CloseIssueRequest, CommentOnChangeRequestRequest, CommentOnIssueRequest, CreateIssueRequest,
-    ForgeCredential, GetChangeRequestCommentsRequest, GetChangeRequestDiffRequest,
-    GetChangeRequestRequest, GetIssueCommentsRequest, GetIssueRequest, Issue, IssueComment,
-    ListChangeRequestsRequest, ListIssuesRequest, ReadRepositoryFileRequest,
-    ReadRepositoryFileResponse, RebaseBranchRequest, RebaseBranchResponse, RemoveIssueLabelRequest,
-    RepositoryReadService, ScheduleAutoMergeRequest, ServiceError,
-    SubmitChangeRequestReviewRequest, UpdateChangeRequestRequest, UpdateIssueRequest,
+    CloseIssueRequest, CombinedCommitStatus, CommentOnChangeRequestRequest, CommentOnIssueRequest,
+    CreateIssueRequest, ForgeCredential, GetChangeRequestChecksRequest,
+    GetChangeRequestCommentsRequest, GetChangeRequestDiffRequest, GetChangeRequestRequest,
+    GetIssueCommentsRequest, GetIssueRequest, Issue, IssueComment, ListChangeRequestsRequest,
+    ListIssuesRequest, ReadRepositoryFileRequest, ReadRepositoryFileResponse, RebaseBranchRequest,
+    RebaseBranchResponse, RemoveIssueLabelRequest, RepositoryReadService, ScheduleAutoMergeRequest,
+    ServiceError, SubmitChangeRequestReviewRequest, UpdateChangeRequestRequest, UpdateIssueRequest,
     validate_repository_path,
 };
 use forge::ForgeAdapter;
@@ -81,6 +81,38 @@ where
     A: ForgeAdapter,
     S: AuditSink,
 {
+    async fn get_change_request_checks(
+        &self,
+        request: GetChangeRequestChecksRequest,
+    ) -> Result<CombinedCommitStatus, ServiceError> {
+        self.audit_sink
+            .record(AuditRecord {
+                agent: request.agent,
+                action: "get_change_request_checks".to_string(),
+                repository: request.repository.clone(),
+                target: request.index.to_string(),
+            })
+            .await
+            .map_err(|e| ServiceError::Audit(e.to_string()))?;
+
+        let credential = ForgeCredential { token: None };
+
+        let cr = self
+            .adapter
+            .get_change_request(&request.repository, request.index, &credential)
+            .await
+            .map_err(|e| ServiceError::Upstream(e.to_string()))?;
+
+        let head_sha = cr
+            .head_sha
+            .ok_or_else(|| ServiceError::Upstream("change request has no head SHA".to_string()))?;
+
+        self.adapter
+            .get_combined_commit_status(&request.repository, &head_sha, &credential)
+            .await
+            .map_err(|e| ServiceError::Upstream(e.to_string()))
+    }
+
     async fn get_change_request_comments(
         &self,
         request: GetChangeRequestCommentsRequest,
@@ -1323,6 +1355,14 @@ mod tests {
         ) -> Result<domain::Issue, ForgeError> {
             unimplemented!()
         }
+        async fn get_combined_commit_status(
+            &self,
+            _: &RepositoryRef,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<domain::CombinedCommitStatus, ForgeError> {
+            unimplemented!()
+        }
         async fn get_allowed_merge_styles(
             &self,
             _: &RepositoryRef,
@@ -1571,6 +1611,14 @@ mod tests {
             _: &str,
             _: &ForgeCredential,
         ) -> Result<domain::Issue, ForgeError> {
+            unimplemented!()
+        }
+        async fn get_combined_commit_status(
+            &self,
+            _: &RepositoryRef,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<domain::CombinedCommitStatus, ForgeError> {
             unimplemented!()
         }
         async fn get_allowed_merge_styles(
@@ -1843,6 +1891,347 @@ mod tests {
         assert!(matches!(err, ServiceError::Audit(_)));
     }
 
+    // --- get_change_request_checks tests ---
+
+    /// A minimal ForgeAdapter that returns a PR with a head_sha and a combined
+    /// commit status, used to test the ReadOrchestrator::get_change_request_checks
+    /// method.
+    struct ChecksTestForgeAdapter {
+        combined_status: domain::CombinedCommitStatus,
+        head_sha: Option<String>,
+    }
+
+    impl ChecksTestForgeAdapter {
+        fn success() -> Self {
+            Self {
+                combined_status: domain::CombinedCommitStatus {
+                    head_sha: "abc123".to_string(),
+                    state: domain::CommitStatusState::Success,
+                    statuses: vec![domain::CommitStatus {
+                        context: "ci/test".to_string(),
+                        description: "passed".to_string(),
+                        state: domain::CommitStatusState::Success,
+                        target_url: "https://ci.example/1".to_string(),
+                    }],
+                    total_count: 1,
+                },
+                head_sha: Some("abc123".to_string()),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ForgeAdapter for ChecksTestForgeAdapter {
+        async fn add_issue_label(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            unimplemented!()
+        }
+        async fn assign_issue(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            unimplemented!()
+        }
+        async fn close_change_request(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<ChangeRequest, ForgeError> {
+            unimplemented!()
+        }
+        async fn close_issue(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            unimplemented!()
+        }
+        async fn comment_on_change_request(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<domain::ChangeRequestComment, ForgeError> {
+            unimplemented!()
+        }
+        async fn comment_on_issue(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<domain::IssueComment, ForgeError> {
+            unimplemented!()
+        }
+        async fn create_change_request(
+            &self,
+            _: &RepositoryRef,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<ChangeRequest, ForgeError> {
+            unimplemented!()
+        }
+        async fn create_commit_status(
+            &self,
+            _: &RepositoryRef,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<(), ForgeError> {
+            unimplemented!()
+        }
+        async fn create_issue(
+            &self,
+            _: &RepositoryRef,
+            _: &str,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            unimplemented!()
+        }
+        async fn get_combined_commit_status(
+            &self,
+            _: &RepositoryRef,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<domain::CombinedCommitStatus, ForgeError> {
+            Ok(self.combined_status.clone())
+        }
+        async fn get_allowed_merge_styles(
+            &self,
+            _: &RepositoryRef,
+            _: &ForgeCredential,
+        ) -> Result<Vec<String>, ForgeError> {
+            unimplemented!()
+        }
+        async fn get_authenticated_user(
+            &self,
+            _: &ForgeCredential,
+        ) -> Result<domain::ForgeUser, ForgeError> {
+            unimplemented!()
+        }
+        async fn get_change_request(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<ChangeRequest, ForgeError> {
+            Ok(ChangeRequest {
+                base_branch: "main".to_string(),
+                body: String::new(),
+                changed_files_count: None,
+                commit_count: None,
+                head_branch: "feature".to_string(),
+                head_sha: self.head_sha.clone(),
+                index: 1,
+                merge_base_sha: None,
+                state: ChangeRequestState::Open,
+                title: "test".to_string(),
+                url: "https://example.com/pulls/1".to_string(),
+            })
+        }
+        async fn get_change_request_comments(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<Vec<ChangeRequestCommentDetail>, ForgeError> {
+            unimplemented!()
+        }
+        async fn get_change_request_diff(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+        ) -> Result<String, ForgeError> {
+            unimplemented!()
+        }
+        async fn get_default_merge_style(
+            &self,
+            _: &RepositoryRef,
+            _: &ForgeCredential,
+        ) -> Result<Option<String>, ForgeError> {
+            unimplemented!()
+        }
+        async fn get_issue(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            unimplemented!()
+        }
+        async fn get_issue_comments(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<Vec<domain::IssueComment>, ForgeError> {
+            unimplemented!()
+        }
+        async fn get_repository_merge_settings(
+            &self,
+            _: &RepositoryRef,
+            _: &ForgeCredential,
+        ) -> Result<domain::RepositoryMergeSettings, ForgeError> {
+            unimplemented!()
+        }
+        async fn list_change_requests(
+            &self,
+            _: &RepositoryRef,
+            _: Option<&ChangeRequestState>,
+        ) -> Result<Vec<ChangeRequest>, ForgeError> {
+            unimplemented!()
+        }
+        async fn list_issues(
+            &self,
+            _: &RepositoryRef,
+            _: Option<&str>,
+            _: &ForgeCredential,
+        ) -> Result<Vec<domain::Issue>, ForgeError> {
+            unimplemented!()
+        }
+        async fn read_repository_file(
+            &self,
+            _: &RepositoryRef,
+            _: &str,
+            _: Option<&str>,
+        ) -> Result<domain::ReadRepositoryFileResponse, ForgeError> {
+            unimplemented!()
+        }
+        async fn remove_issue_label(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            unimplemented!()
+        }
+        async fn schedule_auto_merge(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &str,
+            _: &str,
+            _: Option<bool>,
+            _: &ForgeCredential,
+        ) -> Result<(), ForgeError> {
+            unimplemented!()
+        }
+        async fn submit_change_request_review(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &str,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<domain::ChangeRequestReview, ForgeError> {
+            unimplemented!()
+        }
+        async fn update_change_request(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: &ForgeCredential,
+        ) -> Result<ChangeRequest, ForgeError> {
+            unimplemented!()
+        }
+        async fn update_issue(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            unimplemented!()
+        }
+    }
+
+    fn checks_test_agent() -> AgentIdentity {
+        AgentIdentity {
+            agent_id: "codex".to_string(),
+            session_id: "test".to_string(),
+        }
+    }
+
+    fn checks_test_repo() -> RepositoryRef {
+        RepositoryRef {
+            alias: "test".to_string(),
+            forge: ForgeKind::Forgejo,
+            host: "https://forge.example".to_string(),
+            name: "repo".to_string(),
+            owner: "org".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn get_change_request_checks_returns_status_and_audits() {
+        let adapter = Arc::new(ChecksTestForgeAdapter::success());
+        let audit = Arc::new(InMemoryAuditSink::new());
+        let orchestrator = ReadOrchestrator::new(adapter, Arc::clone(&audit));
+
+        let result = orchestrator
+            .get_change_request_checks(domain::GetChangeRequestChecksRequest {
+                agent: checks_test_agent(),
+                index: 1,
+                repository: checks_test_repo(),
+            })
+            .await
+            .expect("should succeed");
+
+        assert_eq!(result.head_sha, "abc123");
+        assert_eq!(result.state, domain::CommitStatusState::Success);
+        assert_eq!(result.total_count, 1);
+        assert_eq!(result.statuses.len(), 1);
+        assert_eq!(audit.records().len(), 1);
+        assert_eq!(audit.records()[0].action, "get_change_request_checks");
+    }
+
+    #[tokio::test]
+    async fn get_change_request_checks_errors_when_no_head_sha() {
+        let adapter = Arc::new(ChecksTestForgeAdapter {
+            combined_status: domain::CombinedCommitStatus {
+                head_sha: String::new(),
+                state: domain::CommitStatusState::Pending,
+                statuses: vec![],
+                total_count: 0,
+            },
+            head_sha: None,
+        });
+        let audit = Arc::new(InMemoryAuditSink::new());
+        let orchestrator = ReadOrchestrator::new(adapter, Arc::clone(&audit));
+
+        let err = orchestrator
+            .get_change_request_checks(domain::GetChangeRequestChecksRequest {
+                agent: checks_test_agent(),
+                index: 1,
+                repository: checks_test_repo(),
+            })
+            .await
+            .expect_err("should fail without head_sha");
+
+        assert!(matches!(err, ServiceError::Upstream(_)));
+    }
+
     // --- WriteOrchestrator tests ---
 
     struct WriteTestForgeAdapter;
@@ -1925,6 +2314,14 @@ mod tests {
                     repository.owner, repository.name
                 ),
             })
+        }
+        async fn get_combined_commit_status(
+            &self,
+            _: &RepositoryRef,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<domain::CombinedCommitStatus, ForgeError> {
+            unimplemented!()
         }
         async fn get_allowed_merge_styles(
             &self,
@@ -2618,6 +3015,14 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
         ) -> Result<domain::Issue, ForgeError> {
             unimplemented!()
         }
+        async fn get_combined_commit_status(
+            &self,
+            _: &RepositoryRef,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<domain::CombinedCommitStatus, ForgeError> {
+            unimplemented!()
+        }
         async fn get_allowed_merge_styles(
             &self,
             _: &RepositoryRef,
@@ -3106,6 +3511,14 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
         ) -> Result<domain::Issue, ForgeError> {
             unimplemented!()
         }
+        async fn get_combined_commit_status(
+            &self,
+            _: &RepositoryRef,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<domain::CombinedCommitStatus, ForgeError> {
+            unimplemented!()
+        }
         async fn get_allowed_merge_styles(
             &self,
             _: &RepositoryRef,
@@ -3433,6 +3846,14 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             _: &str,
             _: &ForgeCredential,
         ) -> Result<domain::Issue, ForgeError> {
+            unimplemented!()
+        }
+        async fn get_combined_commit_status(
+            &self,
+            _: &RepositoryRef,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<domain::CombinedCommitStatus, ForgeError> {
             unimplemented!()
         }
         async fn get_allowed_merge_styles(

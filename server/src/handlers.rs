@@ -16,10 +16,10 @@ use axum::{
 };
 use domain::{
     CloseChangeRequestRequest, CommentOnChangeRequestRequest, CommitPatchRequest, ForgeKind,
-    GetChangeRequestCommentsRequest, GetChangeRequestRequest, ListChangeRequestsRequest,
-    OpenChangeRequestRequest, PublishableEvent, ReadRepositoryFileRequest, RebaseBranchRequest,
-    RepositoryRef, ScheduleAutoMergeRequest, ServiceError, SubmitChangeRequestReviewRequest,
-    UpdateChangeRequestRequest,
+    GetChangeRequestChecksRequest, GetChangeRequestCommentsRequest, GetChangeRequestRequest,
+    ListChangeRequestsRequest, OpenChangeRequestRequest, PublishableEvent,
+    ReadRepositoryFileRequest, RebaseBranchRequest, RepositoryRef, ScheduleAutoMergeRequest,
+    ServiceError, SubmitChangeRequestReviewRequest, UpdateChangeRequestRequest,
 };
 
 use crate::api::AgentEventsQuery;
@@ -467,6 +467,51 @@ pub async fn get_pull(
     let result = forge
         .read_service
         .get_change_request(GetChangeRequestRequest {
+            agent: agent.identity.clone(),
+            index: path.index,
+            repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
+        })
+        .await
+        .map_err(map_service_error)?;
+
+    Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(
+        serde_json::to_value(&result).expect("serializable"),
+    ))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}/checks",
+    params(
+        ("forge" = String, Path, description = "Forge alias"),
+        ("owner" = String, Path, description = "Repository owner"),
+        ("repo" = String, Path, description = "Repository name"),
+        ("index" = u64, Path, description = "Pull request index"),
+    ),
+    responses(
+        (status = 200, description = "Combined CI/check status for the PR head"),
+        (status = 401, description = "Unauthorized", body = ErrorBody),
+    ),
+    security(("bearer" = []))
+)]
+/// GET /api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}/checks
+pub async fn get_pull_checks(
+    State(state): State<AppState>,
+    Path(path): Path<PullPath>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let forge = resolve_forge(&state.forge_registry, &path.forge)?;
+    let agent = resolve_agent(
+        &headers,
+        &state.agent_registry,
+        &path.forge,
+        &path.owner,
+        &path.repo,
+    )?;
+
+    let result = forge
+        .read_service
+        .get_change_request_checks(GetChangeRequestChecksRequest {
             agent: agent.identity.clone(),
             index: path.index,
             repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
@@ -1817,6 +1862,14 @@ mod tests {
         ) -> Result<Vec<domain::ChangeRequestCommentDetail>, forge::ForgeError> {
             unimplemented!()
         }
+        async fn get_combined_commit_status(
+            &self,
+            _: &domain::RepositoryRef,
+            _: &str,
+            _: &domain::ForgeCredential,
+        ) -> Result<domain::CombinedCommitStatus, forge::ForgeError> {
+            unimplemented!()
+        }
         async fn get_allowed_merge_styles(
             &self,
             _: &domain::RepositoryRef,
@@ -1969,6 +2022,13 @@ mod tests {
                     review_state: Some("APPROVED".to_string()),
                 },
             ])
+        }
+
+        async fn get_change_request_checks(
+            &self,
+            _request: domain::GetChangeRequestChecksRequest,
+        ) -> Result<domain::CombinedCommitStatus, ServiceError> {
+            unimplemented!()
         }
 
         async fn get_change_request_diff(
