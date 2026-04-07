@@ -4,6 +4,7 @@
 //! with token authentication via `http.extraHeader` (never in argv or URLs).
 //! Designed to be called behind `tokio::task::spawn_blocking`.
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -244,16 +245,20 @@ impl GitWorkspace {
         .map(|_| ())
     }
 
-    /// Runs an interactive rebase with programmatic operations.
+    /// Runs a rebase with programmatic operations using explicit
+    /// cherry-picks.
     ///
-    /// Uses a Python script as `GIT_SEQUENCE_EDITOR` to transform the
-    /// todo list, supporting fixup operations that squash a commit into
-    /// another.
+    /// Instead of relying on `git rebase -i` with a sequence editor
+    /// script, this method manually cherry-picks each commit and
+    /// applies fixup operations via `cherry-pick --no-commit` + amend.
+    /// This avoids issues where `git rebase -i` silently drops new
+    /// files introduced by the target commit during fixup squashing
+    /// (observed with SHA-256 repositories).
     ///
     /// # Errors
     ///
-    /// Returns an error if the rebase fails. On failure, the rebase is
-    /// automatically aborted.
+    /// Returns an error if any cherry-pick or amend fails. On failure,
+    /// the branch is restored to its original state.
     pub fn rebase_interactive(
         &self,
         merge_base: &str,
@@ -261,57 +266,153 @@ impl GitWorkspace {
         committer_name: &str,
         committer_email: &str,
     ) -> Result<(), GitExecError> {
-        let py_script = build_rebase_editor_script(operations);
+        // Build operation maps
+        let mut drops: HashSet<&str> = HashSet::new();
+        let mut fixup_sources: HashSet<&str> = HashSet::new();
+        let mut fixup_by_target: HashMap<&str, Vec<&str>> = HashMap::new();
 
-        // Write the script to a temp file
-        let script_path = self.repo_path.join(".rebase-editor.py");
-        std::fs::write(&script_path, &py_script).map_err(GitExecError::Spawn)?;
-
-        // Make executable
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))
-                .map_err(GitExecError::Spawn)?;
+        for op in operations {
+            match op {
+                RebaseOperation::Drop { commit } => {
+                    drops.insert(commit);
+                }
+                RebaseOperation::Fixup { commit, into } => {
+                    fixup_sources.insert(commit);
+                    fixup_by_target
+                        .entry(into.as_str())
+                        .or_default()
+                        .push(commit);
+                }
+            }
         }
 
-        // Run rebase with our sequence editor
-        let editor_path = script_path.to_string_lossy().to_string();
+        // Get commit list and save current state for rollback
+        let commits = self.list_commits_in_range(merge_base)?;
+        let branch = run_git(
+            &self.repo_path,
+            &["rev-parse", "--abbrev-ref", "HEAD"],
+            &self.auth_env,
+        )?
+        .trim()
+        .to_string();
+        let original_head = self.rev_parse("HEAD")?;
 
-        let mut cmd = Command::new("git");
-        cmd.current_dir(&self.repo_path)
-            .args([
-                "-c",
-                &format!("user.name={committer_name}"),
-                "-c",
-                &format!("user.email={committer_email}"),
-                "rebase",
-                "-i",
-                merge_base,
-            ])
-            .env("GIT_SEQUENCE_EDITOR", &editor_path)
-            .env("GIT_TERMINAL_PROMPT", "0");
-
-        for (key, value) in &self.auth_env {
-            cmd.env(key, value);
-        }
-
-        let output = cmd.output().map_err(GitExecError::Spawn)?;
-
-        // Clean up script
-        let _ = std::fs::remove_file(&script_path);
-
-        if !output.status.success() {
-            // Abort the rebase if it failed
-            let _ = run_git(&self.repo_path, &["rebase", "--abort"], &self.auth_env);
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            return Err(GitExecError::CommandFailed {
-                command: "git rebase -i".to_string(),
-                stderr,
+        // Order fixup sources by their position in the commit list so
+        // they are applied in chronological order.
+        for sources in fixup_by_target.values_mut() {
+            sources.sort_by_key(|s| {
+                commits
+                    .iter()
+                    .position(|c| c.as_str() == *s)
+                    .unwrap_or(usize::MAX)
             });
         }
 
+        // Detach HEAD at merge base
+        run_git(
+            &self.repo_path,
+            &["checkout", "--detach", merge_base],
+            &self.auth_env,
+        )
+        .inspect_err(|_| {
+            let _ = self.restore_branch(&branch, &original_head);
+        })?;
+
+        let committer_name_arg = format!("user.name={committer_name}");
+        let committer_email_arg = format!("user.email={committer_email}");
+
+        // Process each commit in order
+        for commit in &commits {
+            let sha = commit.as_str();
+
+            if drops.contains(sha) || fixup_sources.contains(sha) {
+                continue;
+            }
+
+            // Cherry-pick this commit
+            if let Err(e) = run_git(
+                &self.repo_path,
+                &[
+                    "-c",
+                    &committer_name_arg,
+                    "-c",
+                    &committer_email_arg,
+                    "cherry-pick",
+                    sha,
+                ],
+                &self.auth_env,
+            ) {
+                let _ = run_git(&self.repo_path, &["cherry-pick", "--abort"], &self.auth_env);
+                let _ = self.restore_branch(&branch, &original_head);
+                return Err(e);
+            }
+
+            // Apply fixup sources for this target
+            if let Some(sources) = fixup_by_target.get(sha) {
+                for source in sources {
+                    if let Err(e) =
+                        self.apply_fixup(source, &committer_name_arg, &committer_email_arg)
+                    {
+                        let _ = self.restore_branch(&branch, &original_head);
+                        return Err(e);
+                    }
+                }
+            }
+        }
+
+        // Update the branch ref to the new HEAD and check it out
+        let new_head = self.rev_parse("HEAD")?;
+        run_git(
+            &self.repo_path,
+            &["branch", "-f", &branch, &new_head],
+            &self.auth_env,
+        )?;
+        run_git(&self.repo_path, &["checkout", &branch], &self.auth_env)?;
+
         Ok(())
+    }
+
+    /// Applies a single fixup commit on top of the current HEAD.
+    fn apply_fixup(
+        &self,
+        source: &str,
+        committer_name_arg: &str,
+        committer_email_arg: &str,
+    ) -> Result<(), GitExecError> {
+        if let Err(e) = run_git(
+            &self.repo_path,
+            &["cherry-pick", "--no-commit", source],
+            &self.auth_env,
+        ) {
+            let _ = run_git(&self.repo_path, &["cherry-pick", "--abort"], &self.auth_env);
+            return Err(e);
+        }
+
+        run_git(
+            &self.repo_path,
+            &[
+                "-c",
+                committer_name_arg,
+                "-c",
+                committer_email_arg,
+                "commit",
+                "--amend",
+                "--no-edit",
+            ],
+            &self.auth_env,
+        )
+        .map(|_| ())
+    }
+
+    /// Restores a branch to a known good state after a failed rebase.
+    fn restore_branch(&self, branch: &str, original_head: &str) -> Result<(), GitExecError> {
+        let _ = run_git(&self.repo_path, &["checkout", "-f", branch], &self.auth_env);
+        run_git(
+            &self.repo_path,
+            &["reset", "--hard", original_head],
+            &self.auth_env,
+        )
+        .map(|_| ())
     }
 
     /// Rebases the current branch onto the given ref.
@@ -352,101 +453,6 @@ impl GitWorkspace {
         let output = run_git(&self.repo_path, &["rev-parse", refspec], &self.auth_env)?;
         Ok(output.trim().to_string())
     }
-}
-
-/// Builds a Python script for use as `GIT_SEQUENCE_EDITOR` during
-/// interactive rebase.  The script rewrites the rebase todo list to
-/// apply the requested drop / fixup operations.
-fn build_rebase_editor_script(operations: &[RebaseOperation]) -> String {
-    use std::fmt::Write;
-
-    let mut py_script = String::from(
-        r"#!/usr/bin/env python3
-import sys
-
-with open(sys.argv[1]) as f:
-    lines = f.readlines()
-
-# Parse operations
-drops = set()  # full SHAs to drop
-fixups = {}  # commit_prefix -> into_prefix
-",
-    );
-
-    for op in operations {
-        match op {
-            RebaseOperation::Drop { commit } => {
-                let _ = writeln!(py_script, "drops.add('{commit}')");
-            }
-            RebaseOperation::Fixup { commit, into } => {
-                // Use full SHAs — git's todo uses abbreviated SHAs which are
-                // prefixes of these, so startswith() matching still works.
-                let _ = writeln!(py_script, "fixups['{commit}'] = '{into}'");
-            }
-        }
-    }
-
-    py_script.push_str(
-        r"
-# First pass: separate fixup lines from regular lines
-regular = []
-fixup_by_target = {}  # into_prefix -> [fixup_lines]
-
-for line in lines:
-    stripped = line.strip()
-    if not stripped or stripped.startswith('#'):
-        regular.append(line)
-        continue
-
-    parts = stripped.split(None, 2)
-    if len(parts) < 2:
-        regular.append(line)
-        continue
-
-    action, sha = parts[0], parts[1]
-
-    # Check if this commit should be dropped
-    is_drop = any(full_sha.startswith(sha) for full_sha in drops)
-    if is_drop:
-        drop_line = line.replace(action, 'drop', 1)
-        regular.append(drop_line)
-        continue
-
-    # Check if this commit should be a fixup (full SHA starts with todo's abbreviated SHA)
-    matched_full_sha = None
-    for full_sha in fixups:
-        if full_sha.startswith(sha):
-            matched_full_sha = full_sha
-            break
-
-    if matched_full_sha:
-        into_full_sha = fixups[matched_full_sha]
-        fixup_line = line.replace(action, 'fixup', 1)
-        fixup_by_target.setdefault(into_full_sha, []).append(fixup_line)
-    else:
-        regular.append(line)
-
-# Second pass: insert fixup lines after their targets
-result = []
-for line in regular:
-    result.append(line)
-    stripped = line.strip()
-    if not stripped or stripped.startswith('#'):
-        continue
-    parts = stripped.split(None, 2)
-    if len(parts) < 2:
-        continue
-    sha = parts[1]
-    for full_sha, fixup_lines in list(fixup_by_target.items()):
-        if full_sha.startswith(sha):
-            result.extend(fixup_lines)
-
-with open(sys.argv[1], 'w') as f:
-    f.writelines(result)
-",
-    );
-
-    py_script
 }
 
 fn run_git(
@@ -922,6 +928,117 @@ index 7e59600..1234567 100644
         // Should still have 2 branch commits
         let commits = ws.list_commits_in_range(&mb).unwrap();
         assert_eq!(commits.len(), 2);
+    }
+
+    /// Helper: add a multi-file commit to a workspace.
+    fn add_multi_file_commit(
+        workspace: &GitWorkspace,
+        files: &[(&str, &str)],
+        message: &str,
+    ) -> String {
+        for (filename, content) in files {
+            if let Some(parent) = Path::new(filename).parent()
+                && !parent.as_os_str().is_empty()
+            {
+                std::fs::create_dir_all(workspace.repo_path.join(parent)).unwrap();
+            }
+            std::fs::write(workspace.repo_path.join(filename), content).unwrap();
+            run_git(
+                &workspace.repo_path,
+                &["add", filename],
+                &workspace.auth_env,
+            )
+            .unwrap();
+        }
+        workspace
+            .commit(message, "Test", "test@test")
+            .unwrap()
+            .commit_sha
+    }
+
+    #[test]
+    fn rebase_fixup_preserves_new_files_from_target() {
+        let (_remote_dir, remote_path) = setup_remote_with_initial_commit();
+        let remote_url = format!("file://{}", remote_path.display());
+
+        let ws = GitWorkspace::clone_repo(&remote_url, "main", None, false).unwrap();
+        ws.create_branch("agent/test-fixup-newfiles").unwrap();
+
+        // Commit 1 (target): modifies existing file AND introduces new files
+        // This matches the bug scenario from issue #77
+        let sha1 = add_multi_file_commit(
+            &ws,
+            &[
+                ("README.md", "# Hello\npub mod memory;\npub mod store;\n"),
+                ("src/store.rs", "pub struct Store;\n"),
+                ("src/memory.rs", "pub struct Memory;\n"),
+            ],
+            "add store traits and in-memory implementation",
+        );
+
+        // Commit 2 (fixup): modifies the files introduced by commit 1
+        let sha2 = add_multi_file_commit(
+            &ws,
+            &[
+                (
+                    "src/store.rs",
+                    "pub struct Store {\n    pub data: Vec<u8>,\n}\n",
+                ),
+                (
+                    "src/memory.rs",
+                    "pub struct Memory {\n    pub data: Vec<u8>,\n}\n",
+                ),
+            ],
+            "return owned values from store traits",
+        );
+
+        ws.push_branch("agent/test-fixup-newfiles").unwrap();
+
+        // Capture tree before rebase
+        let tree_before = ws.rev_parse("HEAD^{tree}").unwrap();
+        let mb = ws.merge_base("HEAD", "origin/main").unwrap();
+
+        let commits = ws.list_commits_in_range(&mb).unwrap();
+        assert_eq!(commits.len(), 2);
+
+        // Fixup commit 2 into commit 1
+        ws.rebase_interactive(
+            &mb,
+            &[RebaseOperation::Fixup {
+                commit: sha2.clone(),
+                into: sha1.clone(),
+            }],
+            "Test Committer",
+            "committer@test",
+        )
+        .unwrap();
+
+        // Tree should be identical after fixup
+        let tree_after = ws.rev_parse("HEAD^{tree}").unwrap();
+        assert_eq!(
+            tree_before, tree_after,
+            "tree changed after fixup — new files likely dropped"
+        );
+
+        // Should now have 1 commit
+        let commits_after = ws.list_commits_in_range(&mb).unwrap();
+        assert_eq!(commits_after.len(), 1);
+
+        // Both new files must still exist with the fixup content
+        assert!(
+            ws.repo_path.join("src/store.rs").exists(),
+            "src/store.rs was dropped"
+        );
+        assert!(
+            ws.repo_path.join("src/memory.rs").exists(),
+            "src/memory.rs was dropped"
+        );
+
+        let store_content = std::fs::read_to_string(ws.repo_path.join("src/store.rs")).unwrap();
+        assert!(
+            store_content.contains("Vec<u8>"),
+            "store.rs should have fixup content"
+        );
     }
 
     #[test]
