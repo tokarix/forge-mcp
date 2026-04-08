@@ -1,6 +1,7 @@
 //! MCP shim — translates MCP tool calls into HTTP requests to the control plane.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
+use std::fmt::Write as _;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -53,28 +54,35 @@ where
     deserializer.deserialize_any(U64LenientVisitor)
 }
 
-/// Configuration for the MCP shim.
+/// Configuration for a single gateway.
 #[derive(Clone)]
+pub struct GatewayConfig {
+    /// Human-readable name for this gateway.
+    pub name: String,
+    /// Bearer token for authentication.
+    pub token: String,
+    /// Base URL of the gateway (e.g. `https://forge-mcp.example:8443`).
+    pub url: String,
+}
+
+impl std::fmt::Debug for GatewayConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GatewayConfig")
+            .field("name", &self.name)
+            .field("token", &"[REDACTED]")
+            .field("url", &self.url)
+            .finish()
+    }
+}
+
+/// Configuration for the MCP shim.
+#[derive(Clone, Debug)]
 pub struct ShimConfig {
     pub channel_startup_spike: bool,
     pub enable_channels: bool,
-    pub gateway_url: String,
+    pub gateways: Vec<GatewayConfig>,
     pub server_name: String,
     pub server_version: String,
-    pub token: String,
-}
-
-impl std::fmt::Debug for ShimConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ShimConfig")
-            .field("channel_startup_spike", &self.channel_startup_spike)
-            .field("enable_channels", &self.enable_channels)
-            .field("gateway_url", &self.gateway_url)
-            .field("server_name", &self.server_name)
-            .field("server_version", &self.server_version)
-            .field("token", &"[REDACTED]")
-            .finish()
-    }
 }
 
 #[derive(Debug, Error)]
@@ -665,7 +673,6 @@ pub struct McpShim {
     config: ShimConfig,
     event_buffer: Arc<Mutex<VecDeque<AgentEventEnvelope>>>,
     event_forwarder_started: AtomicBool,
-    subscriber_id: String,
     tool_router: ToolRouter<Self>,
 }
 
@@ -677,24 +684,101 @@ impl McpShim {
             config,
             event_buffer: Arc::new(Mutex::new(VecDeque::new())),
             event_forwarder_started: AtomicBool::new(false),
-            subscriber_id: generate_subscriber_id(),
             tool_router: Self::tool_router(),
         }
     }
 
-    /// Parses the gateway base URL, returning an MCP error on failure.
-    fn base_url(&self) -> Result<reqwest::Url, McpError> {
-        let mut base = self.config.gateway_url.clone();
+    /// Discover which forge aliases each gateway advertises and build the
+    /// routing table.
+    ///
+    /// Unreachable gateways are logged and skipped so that one down gateway
+    /// does not prevent routing to healthy ones.  Returns an error only if
+    /// two reachable gateways claim the same alias.
+    async fn discover_routes(&self) -> Result<HashMap<String, usize>, McpError> {
+        let mut routes: HashMap<String, usize> = HashMap::new();
+        for (index, gateway) in self.config.gateways.iter().enumerate() {
+            let url = match Self::build_url(&gateway.url, &["api", "v1", "agent", "info"]) {
+                Ok(u) => u,
+                Err(e) => {
+                    tracing::warn!(
+                        gateway = gateway.name,
+                        error = %e,
+                        "skipping gateway with malformed URL during route discovery",
+                    );
+                    continue;
+                }
+            };
+            let body = match self.gateway_get(url, &gateway.token).await {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::warn!(
+                        gateway = gateway.name,
+                        error = %e,
+                        "skipping unreachable gateway during route discovery",
+                    );
+                    continue;
+                }
+            };
+            let info: serde_json::Value = match serde_json::from_str(&body) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(
+                        gateway = gateway.name,
+                        error = %e,
+                        "skipping gateway with invalid discovery JSON",
+                    );
+                    continue;
+                }
+            };
+            if let Some(forges) = info["forges"].as_array() {
+                for forge in forges {
+                    if let Some(alias) = forge["alias"].as_str() {
+                        if let Some(existing_idx) = routes.get(alias).copied() {
+                            return Err(McpError::internal_error(
+                                format!(
+                                    "ambiguous forge alias \'{}\': advertised by gateways \'{}\' and \'{}\'",
+                                    alias, self.config.gateways[existing_idx].name, gateway.name,
+                                ),
+                                None,
+                            ));
+                        }
+                        routes.insert(alias.to_string(), index);
+                    }
+                }
+            }
+        }
+        Ok(routes)
+    }
+
+    /// Resolve a forge alias to the gateway that advertises it.
+    ///
+    /// Single-gateway configurations skip discovery entirely — all aliases
+    /// route to the sole configured gateway.  Multi-gateway configurations
+    /// discover routes on every call so that topology changes (added, removed,
+    /// or moved forge aliases) and gateway recovery are picked up immediately.
+    async fn resolve_gateway(&self, forge: &str) -> Result<&GatewayConfig, McpError> {
+        if self.config.gateways.len() == 1 {
+            return Ok(&self.config.gateways[0]);
+        }
+
+        let routes = self.discover_routes().await?;
+        match routes.get(forge) {
+            Some(&index) => Ok(&self.config.gateways[index]),
+            None => Err(McpError::invalid_params(
+                format!("unknown forge alias '{forge}': not advertised by any configured gateway"),
+                None,
+            )),
+        }
+    }
+
+    /// Builds a URL by appending percent-encoded path segments to a gateway base URL.
+    fn build_url(gateway_url: &str, segments: &[&str]) -> Result<reqwest::Url, McpError> {
+        let mut base = gateway_url.to_string();
         if !base.ends_with('/') {
             base.push('/');
         }
-        reqwest::Url::parse(&base)
-            .map_err(|e| McpError::internal_error(format!("invalid gateway URL: {e}"), None))
-    }
-
-    /// Builds a URL by appending percent-encoded path segments to the base.
-    fn build_url(&self, segments: &[&str]) -> Result<reqwest::Url, McpError> {
-        let mut url = self.base_url()?;
+        let mut url = reqwest::Url::parse(&base)
+            .map_err(|e| McpError::internal_error(format!("invalid gateway URL: {e}"), None))?;
         {
             let mut path = url
                 .path_segments_mut()
@@ -717,12 +801,12 @@ impl McpShim {
         }
     }
 
-    /// Makes an HTTP GET request to the control plane.
-    async fn gateway_get(&self, url: reqwest::Url) -> Result<String, McpError> {
+    /// Makes an HTTP GET request to a gateway.
+    async fn gateway_get(&self, url: reqwest::Url, token: &str) -> Result<String, McpError> {
         let response = self
             .client
             .get(url)
-            .bearer_auth(&self.config.token)
+            .bearer_auth(token)
             .send()
             .await
             .map_err(|e| McpError::internal_error(format!("HTTP request failed: {e}"), None))?;
@@ -740,12 +824,12 @@ impl McpShim {
         Ok(body)
     }
 
-    /// Makes an HTTP DELETE request to the control plane.
-    async fn gateway_delete(&self, url: reqwest::Url) -> Result<String, McpError> {
+    /// Makes an HTTP DELETE request to a gateway.
+    async fn gateway_delete(&self, url: reqwest::Url, token: &str) -> Result<String, McpError> {
         let response = self
             .client
             .delete(url)
-            .bearer_auth(&self.config.token)
+            .bearer_auth(token)
             .send()
             .await
             .map_err(|e| McpError::internal_error(format!("HTTP request failed: {e}"), None))?;
@@ -763,16 +847,17 @@ impl McpShim {
         Ok(body)
     }
 
-    /// Makes an HTTP PATCH request to the control plane.
+    /// Makes an HTTP PATCH request to a gateway.
     async fn gateway_patch(
         &self,
         url: reqwest::Url,
+        token: &str,
         json_body: &impl serde::Serialize,
     ) -> Result<String, McpError> {
         let response = self
             .client
             .patch(url)
-            .bearer_auth(&self.config.token)
+            .bearer_auth(token)
             .json(json_body)
             .send()
             .await
@@ -791,16 +876,17 @@ impl McpShim {
         Ok(body)
     }
 
-    /// Makes an HTTP POST request to the control plane.
+    /// Makes an HTTP POST request to a gateway.
     async fn gateway_post(
         &self,
         url: reqwest::Url,
+        token: &str,
         json_body: &impl serde::Serialize,
     ) -> Result<String, McpError> {
         let response = self
             .client
             .post(url)
-            .bearer_auth(&self.config.token)
+            .bearer_auth(token)
             .json(json_body)
             .send()
             .await
@@ -858,14 +944,32 @@ impl McpShim {
     }
 
     fn instructions(&self) -> String {
-        let mut instructions = format!(
+        let mut instructions = String::from(
             "MCP shim for forge-mcp control plane. Proxies tool calls to the HTTP API.\n\
              \n\
-             Git clone/fetch: the gateway provides a read-only git smart HTTP proxy.\n\
-             URL: {gateway_url}/git/{{forge}}/{{owner}}/{{repo}}\n\
+             Git clone/fetch: each gateway provides a read-only git smart HTTP proxy.\n\
+             URL: <gateway_url>/git/{forge}/{owner}/{repo}\n\
              Auth: HTTP Basic -- any non-empty username, password is your agent token.\n\
-             git push is blocked -- use the commit_patch tool instead.\n\
-             \n\
+             git push is blocked -- use the commit_patch tool instead.\n",
+        );
+
+        if self.config.gateways.len() == 1 {
+            let gw_url = self.config.gateways[0].url.trim_end_matches('/');
+            let _ = write!(
+                instructions,
+                "\nGateway: {gw_url}\n\
+                 Git URL template: {gw_url}/git/{{forge}}/{{owner}}/{{repo}}\n",
+            );
+        } else {
+            instructions.push_str("\nConfigured gateways:\n");
+            for gw in &self.config.gateways {
+                let gw_url = gw.url.trim_end_matches('/');
+                let _ = writeln!(instructions, "- {}: {gw_url}", gw.name);
+            }
+        }
+
+        instructions.push_str(
+            "\n\
              Write workflow: clone via git proxy, make changes, generate a git-format patch\n\
              with git itself (`git diff --no-ext-diff --binary` or `git show`), verify it\n\
              with `git apply --check`, submit via commit_patch, then open a PR via\n\
@@ -874,7 +978,6 @@ impl McpShim {
              Never commit to the default branch directly. Work on branches matching\n\
              your configured branch_prefix and submit via commit_patch + open_change_request.\n\
              Use forge_info to discover your available forges.",
-            gateway_url = self.config.gateway_url.trim_end_matches('/'),
         );
 
         if self.config.enable_channels {
@@ -895,12 +998,13 @@ impl McpShim {
 
     async fn run_event_forwarder(
         client: reqwest::Client,
-        config: ShimConfig,
+        gateway: GatewayConfig,
+        channel_startup_spike: bool,
         event_buffer: Arc<Mutex<VecDeque<AgentEventEnvelope>>>,
         subscriber_id: String,
         peer: rmcp::service::Peer<RoleServer>,
     ) {
-        if config.channel_startup_spike {
+        if channel_startup_spike {
             let startup_event = AgentEventEnvelope {
                 content: "change_request opened on test/org/repo#1 at deadbeef".to_string(),
                 kind: "change_request".to_string(),
@@ -929,7 +1033,7 @@ impl McpShim {
         while !peer.is_transport_closed() {
             let response = match send_event_stream_request(
                 &client,
-                &config,
+                &gateway,
                 &subscriber_id,
                 last_event_id.as_deref(),
             )
@@ -993,15 +1097,15 @@ fn build_event_stream_url(gateway_url: &str, subscriber_id: &str) -> Result<reqw
 
 async fn send_event_stream_request(
     client: &reqwest::Client,
-    config: &ShimConfig,
+    gateway: &GatewayConfig,
     subscriber_id: &str,
     last_event_id: Option<&str>,
 ) -> Result<reqwest::Response, String> {
-    let url = build_event_stream_url(&config.gateway_url, subscriber_id)?;
+    let url = build_event_stream_url(&gateway.url, subscriber_id)?;
 
     let mut request = client
         .get(url)
-        .bearer_auth(&config.token)
+        .bearer_auth(&gateway.token)
         .header("accept", "text/event-stream");
     if let Some(last_event_id) = last_event_id {
         request = request.header("last-event-id", last_event_id);
@@ -1117,19 +1221,23 @@ impl McpShim {
         &self,
         Parameters(request): Parameters<AddIssueLabelTool>,
     ) -> Result<String, McpError> {
-        let url = self.build_url(&[
-            "api",
-            "v1",
-            "repos",
-            &request.forge,
-            &request.owner,
-            &request.repo,
-            "issues",
-            &request.index.to_string(),
-            "labels",
-        ])?;
+        let gw = self.resolve_gateway(&request.forge).await?;
+        let url = Self::build_url(
+            &gw.url,
+            &[
+                "api",
+                "v1",
+                "repos",
+                &request.forge,
+                &request.owner,
+                &request.repo,
+                "issues",
+                &request.index.to_string(),
+                "labels",
+            ],
+        )?;
         let body = serde_json::json!({"label": request.label});
-        self.gateway_post(url, &body).await
+        self.gateway_post(url, &gw.token, &body).await
     }
 
     /// Assign an issue to a user.
@@ -1138,18 +1246,22 @@ impl McpShim {
         &self,
         Parameters(request): Parameters<AssignIssueTool>,
     ) -> Result<String, McpError> {
-        let url = self.build_url(&[
-            "api",
-            "v1",
-            "repos",
-            &request.forge,
-            &request.owner,
-            &request.repo,
-            "issues",
-            &request.index.to_string(),
-        ])?;
+        let gw = self.resolve_gateway(&request.forge).await?;
+        let url = Self::build_url(
+            &gw.url,
+            &[
+                "api",
+                "v1",
+                "repos",
+                &request.forge,
+                &request.owner,
+                &request.repo,
+                "issues",
+                &request.index.to_string(),
+            ],
+        )?;
         let body = serde_json::json!({"assignees": [request.assignee]});
-        self.gateway_patch(url, &body).await
+        self.gateway_patch(url, &gw.token, &body).await
     }
 
     /// Close a change request (pull request) on the forge.
@@ -1161,17 +1273,21 @@ impl McpShim {
         &self,
         Parameters(request): Parameters<CloseChangeRequestTool>,
     ) -> Result<String, McpError> {
-        let url = self.build_url(&[
-            "api",
-            "v1",
-            "repos",
-            &request.forge,
-            &request.owner,
-            &request.repo,
-            "pulls",
-            &request.index.to_string(),
-        ])?;
-        self.gateway_delete(url).await
+        let gw = self.resolve_gateway(&request.forge).await?;
+        let url = Self::build_url(
+            &gw.url,
+            &[
+                "api",
+                "v1",
+                "repos",
+                &request.forge,
+                &request.owner,
+                &request.repo,
+                "pulls",
+                &request.index.to_string(),
+            ],
+        )?;
+        self.gateway_delete(url, &gw.token).await
     }
 
     /// Close an issue.
@@ -1180,18 +1296,22 @@ impl McpShim {
         &self,
         Parameters(request): Parameters<CloseIssueTool>,
     ) -> Result<String, McpError> {
-        let url = self.build_url(&[
-            "api",
-            "v1",
-            "repos",
-            &request.forge,
-            &request.owner,
-            &request.repo,
-            "issues",
-            &request.index.to_string(),
-        ])?;
+        let gw = self.resolve_gateway(&request.forge).await?;
+        let url = Self::build_url(
+            &gw.url,
+            &[
+                "api",
+                "v1",
+                "repos",
+                &request.forge,
+                &request.owner,
+                &request.repo,
+                "issues",
+                &request.index.to_string(),
+            ],
+        )?;
         let body = serde_json::json!({"state": "closed"});
-        self.gateway_patch(url, &body).await
+        self.gateway_patch(url, &gw.token, &body).await
     }
 
     /// Post a comment on an issue.
@@ -1200,19 +1320,23 @@ impl McpShim {
         &self,
         Parameters(request): Parameters<CommentOnIssueTool>,
     ) -> Result<String, McpError> {
-        let url = self.build_url(&[
-            "api",
-            "v1",
-            "repos",
-            &request.forge,
-            &request.owner,
-            &request.repo,
-            "issues",
-            &request.index.to_string(),
-            "comments",
-        ])?;
+        let gw = self.resolve_gateway(&request.forge).await?;
+        let url = Self::build_url(
+            &gw.url,
+            &[
+                "api",
+                "v1",
+                "repos",
+                &request.forge,
+                &request.owner,
+                &request.repo,
+                "issues",
+                &request.index.to_string(),
+                "comments",
+            ],
+        )?;
         let body = serde_json::json!({"body": request.body});
-        self.gateway_post(url, &body).await
+        self.gateway_post(url, &gw.token, &body).await
     }
 
     /// Create a new issue after checking for an existing open issue.
@@ -1224,17 +1348,21 @@ impl McpShim {
         &self,
         Parameters(request): Parameters<CreateIssueTool>,
     ) -> Result<String, McpError> {
-        let url = self.build_url(&[
-            "api",
-            "v1",
-            "repos",
-            &request.forge,
-            &request.owner,
-            &request.repo,
-            "issues",
-        ])?;
+        let gw = self.resolve_gateway(&request.forge).await?;
+        let url = Self::build_url(
+            &gw.url,
+            &[
+                "api",
+                "v1",
+                "repos",
+                &request.forge,
+                &request.owner,
+                &request.repo,
+                "issues",
+            ],
+        )?;
         let body = serde_json::json!({"title": request.title, "body": request.body});
-        self.gateway_post(url, &body).await
+        self.gateway_post(url, &gw.token, &body).await
     }
 
     /// Post a general comment on a change request (pull request).
@@ -1246,21 +1374,25 @@ impl McpShim {
         &self,
         Parameters(request): Parameters<CommentOnChangeRequestTool>,
     ) -> Result<String, McpError> {
-        let url = self.build_url(&[
-            "api",
-            "v1",
-            "repos",
-            &request.forge,
-            &request.owner,
-            &request.repo,
-            "pulls",
-            &request.index.to_string(),
-            "comments",
-        ])?;
+        let gw = self.resolve_gateway(&request.forge).await?;
+        let url = Self::build_url(
+            &gw.url,
+            &[
+                "api",
+                "v1",
+                "repos",
+                &request.forge,
+                &request.owner,
+                &request.repo,
+                "pulls",
+                &request.index.to_string(),
+                "comments",
+            ],
+        )?;
         let body = serde_json::json!({
             "body": request.body,
         });
-        self.gateway_post(url, &body).await
+        self.gateway_post(url, &gw.token, &body).await
     }
 
     /// Apply a git-format patch to a new branch and push it.
@@ -1272,6 +1404,7 @@ impl McpShim {
         &self,
         Parameters(request): Parameters<CommitPatchTool>,
     ) -> Result<String, McpError> {
+        let gw = self.resolve_gateway(&request.forge).await?;
         let commit_author = resolve_commit_author(&request, discover_local_commit_author)?;
 
         // Resolve patch content from either inline or file
@@ -1288,15 +1421,18 @@ impl McpShim {
             }
         };
 
-        let url = self.build_url(&[
-            "api",
-            "v1",
-            "repos",
-            &request.forge,
-            &request.owner,
-            &request.repo,
-            "patches",
-        ])?;
+        let url = Self::build_url(
+            &gw.url,
+            &[
+                "api",
+                "v1",
+                "repos",
+                &request.forge,
+                &request.owner,
+                &request.repo,
+                "patches",
+            ],
+        )?;
         let body = serde_json::json!({
             "author_email": commit_author.as_ref().map(|a| a.email.clone()),
             "author_name": commit_author.as_ref().map(|a| a.name.clone()),
@@ -1306,7 +1442,7 @@ impl McpShim {
             "new_branch": request.new_branch,
             "patch": patch,
         });
-        self.gateway_post(url, &body).await
+        self.gateway_post(url, &gw.token, &body).await
     }
 
     /// Get all comments and reviews for a change request.
@@ -1318,18 +1454,22 @@ impl McpShim {
         &self,
         Parameters(request): Parameters<GetChangeRequestCommentsTool>,
     ) -> Result<String, McpError> {
-        let url = self.build_url(&[
-            "api",
-            "v1",
-            "repos",
-            &request.forge,
-            &request.owner,
-            &request.repo,
-            "pulls",
-            &request.index.to_string(),
-            "comments",
-        ])?;
-        self.gateway_get(url).await
+        let gw = self.resolve_gateway(&request.forge).await?;
+        let url = Self::build_url(
+            &gw.url,
+            &[
+                "api",
+                "v1",
+                "repos",
+                &request.forge,
+                &request.owner,
+                &request.repo,
+                "pulls",
+                &request.index.to_string(),
+                "comments",
+            ],
+        )?;
+        self.gateway_get(url, &gw.token).await
     }
 
     /// Get the unified diff for a change request, written to a local file.
@@ -1341,18 +1481,22 @@ impl McpShim {
         &self,
         Parameters(request): Parameters<GetChangeRequestDiffTool>,
     ) -> Result<String, McpError> {
-        let url = self.build_url(&[
-            "api",
-            "v1",
-            "repos",
-            &request.forge,
-            &request.owner,
-            &request.repo,
-            "pulls",
-            &request.index.to_string(),
-            "diff",
-        ])?;
-        let body = self.gateway_get(url).await?;
+        let gw = self.resolve_gateway(&request.forge).await?;
+        let url = Self::build_url(
+            &gw.url,
+            &[
+                "api",
+                "v1",
+                "repos",
+                &request.forge,
+                &request.owner,
+                &request.repo,
+                "pulls",
+                &request.index.to_string(),
+                "diff",
+            ],
+        )?;
+        let body = self.gateway_get(url, &gw.token).await?;
 
         // Parse the JSON response to extract the patch text.
         let parsed: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
@@ -1389,17 +1533,21 @@ impl McpShim {
         &self,
         Parameters(request): Parameters<GetChangeRequestTool>,
     ) -> Result<String, McpError> {
-        let url = self.build_url(&[
-            "api",
-            "v1",
-            "repos",
-            &request.forge,
-            &request.owner,
-            &request.repo,
-            "pulls",
-            &request.index.to_string(),
-        ])?;
-        self.gateway_get(url).await
+        let gw = self.resolve_gateway(&request.forge).await?;
+        let url = Self::build_url(
+            &gw.url,
+            &[
+                "api",
+                "v1",
+                "repos",
+                &request.forge,
+                &request.owner,
+                &request.repo,
+                "pulls",
+                &request.index.to_string(),
+            ],
+        )?;
+        self.gateway_get(url, &gw.token).await
     }
 
     /// Get the combined CI/check status for a change request's current head.
@@ -1411,18 +1559,22 @@ impl McpShim {
         &self,
         Parameters(request): Parameters<GetChangeRequestChecksTool>,
     ) -> Result<String, McpError> {
-        let url = self.build_url(&[
-            "api",
-            "v1",
-            "repos",
-            &request.forge,
-            &request.owner,
-            &request.repo,
-            "pulls",
-            &request.index.to_string(),
-            "checks",
-        ])?;
-        self.gateway_get(url).await
+        let gw = self.resolve_gateway(&request.forge).await?;
+        let url = Self::build_url(
+            &gw.url,
+            &[
+                "api",
+                "v1",
+                "repos",
+                &request.forge,
+                &request.owner,
+                &request.repo,
+                "pulls",
+                &request.index.to_string(),
+                "checks",
+            ],
+        )?;
+        self.gateway_get(url, &gw.token).await
     }
 
     /// Get a single issue by index.
@@ -1431,17 +1583,21 @@ impl McpShim {
         &self,
         Parameters(request): Parameters<GetIssueTool>,
     ) -> Result<String, McpError> {
-        let url = self.build_url(&[
-            "api",
-            "v1",
-            "repos",
-            &request.forge,
-            &request.owner,
-            &request.repo,
-            "issues",
-            &request.index.to_string(),
-        ])?;
-        self.gateway_get(url).await
+        let gw = self.resolve_gateway(&request.forge).await?;
+        let url = Self::build_url(
+            &gw.url,
+            &[
+                "api",
+                "v1",
+                "repos",
+                &request.forge,
+                &request.owner,
+                &request.repo,
+                "issues",
+                &request.index.to_string(),
+            ],
+        )?;
+        self.gateway_get(url, &gw.token).await
     }
 
     /// Get all comments for an issue.
@@ -1453,18 +1609,22 @@ impl McpShim {
         &self,
         Parameters(request): Parameters<GetIssueCommentsTool>,
     ) -> Result<String, McpError> {
-        let url = self.build_url(&[
-            "api",
-            "v1",
-            "repos",
-            &request.forge,
-            &request.owner,
-            &request.repo,
-            "issues",
-            &request.index.to_string(),
-            "comments",
-        ])?;
-        self.gateway_get(url).await
+        let gw = self.resolve_gateway(&request.forge).await?;
+        let url = Self::build_url(
+            &gw.url,
+            &[
+                "api",
+                "v1",
+                "repos",
+                &request.forge,
+                &request.owner,
+                &request.repo,
+                "issues",
+                &request.index.to_string(),
+                "comments",
+            ],
+        )?;
+        self.gateway_get(url, &gw.token).await
     }
 
     /// List change requests for a repository.
@@ -1476,19 +1636,23 @@ impl McpShim {
         &self,
         Parameters(request): Parameters<ListChangeRequestsTool>,
     ) -> Result<String, McpError> {
-        let mut url = self.build_url(&[
-            "api",
-            "v1",
-            "repos",
-            &request.forge,
-            &request.owner,
-            &request.repo,
-            "pulls",
-        ])?;
+        let gw = self.resolve_gateway(&request.forge).await?;
+        let mut url = Self::build_url(
+            &gw.url,
+            &[
+                "api",
+                "v1",
+                "repos",
+                &request.forge,
+                &request.owner,
+                &request.repo,
+                "pulls",
+            ],
+        )?;
         if let Some(state) = &request.state {
             url.query_pairs_mut().append_pair("state", state);
         }
-        self.gateway_get(url).await
+        self.gateway_get(url, &gw.token).await
     }
 
     /// List issues for a repository.
@@ -1497,19 +1661,23 @@ impl McpShim {
         &self,
         Parameters(request): Parameters<ListIssuesTool>,
     ) -> Result<String, McpError> {
-        let mut url = self.build_url(&[
-            "api",
-            "v1",
-            "repos",
-            &request.forge,
-            &request.owner,
-            &request.repo,
-            "issues",
-        ])?;
+        let gw = self.resolve_gateway(&request.forge).await?;
+        let mut url = Self::build_url(
+            &gw.url,
+            &[
+                "api",
+                "v1",
+                "repos",
+                &request.forge,
+                &request.owner,
+                &request.repo,
+                "issues",
+            ],
+        )?;
         if let Some(state) = &request.state {
             url.query_pairs_mut().append_pair("state", state);
         }
-        self.gateway_get(url).await
+        self.gateway_get(url, &gw.token).await
     }
 
     /// Open a change request (pull request) on the forge.
@@ -1524,22 +1692,26 @@ impl McpShim {
         &self,
         Parameters(request): Parameters<OpenChangeRequestTool>,
     ) -> Result<String, McpError> {
-        let url = self.build_url(&[
-            "api",
-            "v1",
-            "repos",
-            &request.forge,
-            &request.owner,
-            &request.repo,
-            "pulls",
-        ])?;
+        let gw = self.resolve_gateway(&request.forge).await?;
+        let url = Self::build_url(
+            &gw.url,
+            &[
+                "api",
+                "v1",
+                "repos",
+                &request.forge,
+                &request.owner,
+                &request.repo,
+                "pulls",
+            ],
+        )?;
         let body = serde_json::json!({
             "base_branch": request.base_branch,
             "body": request.body,
             "head_branch": request.head_branch,
             "title": request.title,
         });
-        self.gateway_post(url, &body).await
+        self.gateway_post(url, &gw.token, &body).await
     }
 
     /// Rebase a branch by squashing (fixup) or removing (drop) commits.
@@ -1551,15 +1723,19 @@ impl McpShim {
         &self,
         Parameters(request): Parameters<RebaseBranchTool>,
     ) -> Result<String, McpError> {
-        let url = self.build_url(&[
-            "api",
-            "v1",
-            "repos",
-            &request.forge,
-            &request.owner,
-            &request.repo,
-            "rebase",
-        ])?;
+        let gw = self.resolve_gateway(&request.forge).await?;
+        let url = Self::build_url(
+            &gw.url,
+            &[
+                "api",
+                "v1",
+                "repos",
+                &request.forge,
+                &request.owner,
+                &request.repo,
+                "rebase",
+            ],
+        )?;
 
         let operations: Vec<serde_json::Value> = request
             .operations
@@ -1591,7 +1767,7 @@ impl McpShim {
             "branch": request.branch,
             "operations": operations,
         });
-        self.gateway_post(url, &body).await
+        self.gateway_post(url, &gw.token, &body).await
     }
 
     /// Schedule a pull request for automatic merge when all checks pass.
@@ -1603,23 +1779,27 @@ impl McpShim {
         &self,
         Parameters(request): Parameters<ScheduleAutoMergeTool>,
     ) -> Result<String, McpError> {
-        let url = self.build_url(&[
-            "api",
-            "v1",
-            "repos",
-            &request.forge,
-            &request.owner,
-            &request.repo,
-            "pulls",
-            &request.index.to_string(),
-            "automerge",
-        ])?;
+        let gw = self.resolve_gateway(&request.forge).await?;
+        let url = Self::build_url(
+            &gw.url,
+            &[
+                "api",
+                "v1",
+                "repos",
+                &request.forge,
+                &request.owner,
+                &request.repo,
+                "pulls",
+                &request.index.to_string(),
+                "automerge",
+            ],
+        )?;
         let body = ScheduleAutoMergeBody {
             delete_branch_after_merge: request.delete_branch_after_merge,
             expected_head_sha: request.expected_head_sha,
             merge_style: request.merge_style,
         };
-        self.gateway_post(url, &body).await
+        self.gateway_post(url, &gw.token, &body).await
     }
 
     /// Poll for pending webhook events. Returns any buffered change request
@@ -1649,6 +1829,7 @@ impl McpShim {
         &self,
         Parameters(request): Parameters<ReadRepositoryFileTool>,
     ) -> Result<String, McpError> {
+        let gw = self.resolve_gateway(&request.forge).await?;
         // Each path component is pushed as a separate segment so reqwest
         // percent-encodes reserved characters (?, #, &, etc.) automatically.
         let mut segments: Vec<&str> = vec![
@@ -1662,12 +1843,12 @@ impl McpShim {
         ];
         let path_parts: Vec<&str> = request.path.split('/').collect();
         segments.extend(path_parts.iter());
-        let mut url = self.build_url(&segments)?;
+        let mut url = Self::build_url(&gw.url, &segments)?;
 
         if let Some(git_ref) = &request.git_ref {
             url.query_pairs_mut().append_pair("ref", git_ref);
         }
-        let response = self.gateway_get(url).await?;
+        let response = self.gateway_get(url, &gw.token).await?;
 
         // Extract just the content field from the JSON response
         let parsed: serde_json::Value = serde_json::from_str(&response)
@@ -1687,19 +1868,23 @@ impl McpShim {
         &self,
         Parameters(request): Parameters<RemoveIssueLabelTool>,
     ) -> Result<String, McpError> {
-        let url = self.build_url(&[
-            "api",
-            "v1",
-            "repos",
-            &request.forge,
-            &request.owner,
-            &request.repo,
-            "issues",
-            &request.index.to_string(),
-            "labels",
-            &request.label,
-        ])?;
-        self.gateway_delete(url).await
+        let gw = self.resolve_gateway(&request.forge).await?;
+        let url = Self::build_url(
+            &gw.url,
+            &[
+                "api",
+                "v1",
+                "repos",
+                &request.forge,
+                &request.owner,
+                &request.repo,
+                "issues",
+                &request.index.to_string(),
+                "labels",
+                &request.label,
+            ],
+        )?;
+        self.gateway_delete(url, &gw.token).await
     }
 
     /// Submit a formal review on a change request (pull request).
@@ -1711,22 +1896,26 @@ impl McpShim {
         &self,
         Parameters(request): Parameters<SubmitChangeRequestReviewTool>,
     ) -> Result<String, McpError> {
-        let url = self.build_url(&[
-            "api",
-            "v1",
-            "repos",
-            &request.forge,
-            &request.owner,
-            &request.repo,
-            "pulls",
-            &request.index.to_string(),
-            "reviews",
-        ])?;
+        let gw = self.resolve_gateway(&request.forge).await?;
+        let url = Self::build_url(
+            &gw.url,
+            &[
+                "api",
+                "v1",
+                "repos",
+                &request.forge,
+                &request.owner,
+                &request.repo,
+                "pulls",
+                &request.index.to_string(),
+                "reviews",
+            ],
+        )?;
         let body = serde_json::json!({
             "body": request.body,
             "event": request.event,
         });
-        self.gateway_post(url, &body).await
+        self.gateway_post(url, &gw.token, &body).await
     }
 
     /// Update a change request's title and/or body.
@@ -1738,16 +1927,20 @@ impl McpShim {
         &self,
         Parameters(request): Parameters<UpdateChangeRequestTool>,
     ) -> Result<String, McpError> {
-        let url = self.build_url(&[
-            "api",
-            "v1",
-            "repos",
-            &request.forge,
-            &request.owner,
-            &request.repo,
-            "pulls",
-            &request.index.to_string(),
-        ])?;
+        let gw = self.resolve_gateway(&request.forge).await?;
+        let url = Self::build_url(
+            &gw.url,
+            &[
+                "api",
+                "v1",
+                "repos",
+                &request.forge,
+                &request.owner,
+                &request.repo,
+                "pulls",
+                &request.index.to_string(),
+            ],
+        )?;
         let mut json_body = serde_json::Map::new();
         if let Some(title) = &request.title {
             json_body.insert(
@@ -1758,7 +1951,7 @@ impl McpShim {
         if let Some(body) = &request.body {
             json_body.insert("body".to_string(), serde_json::Value::String(body.clone()));
         }
-        self.gateway_patch(url, &serde_json::Value::Object(json_body))
+        self.gateway_patch(url, &gw.token, &serde_json::Value::Object(json_body))
             .await
     }
 
@@ -1771,16 +1964,20 @@ impl McpShim {
         &self,
         Parameters(request): Parameters<UpdateIssueTool>,
     ) -> Result<String, McpError> {
-        let url = self.build_url(&[
-            "api",
-            "v1",
-            "repos",
-            &request.forge,
-            &request.owner,
-            &request.repo,
-            "issues",
-            &request.index.to_string(),
-        ])?;
+        let gw = self.resolve_gateway(&request.forge).await?;
+        let url = Self::build_url(
+            &gw.url,
+            &[
+                "api",
+                "v1",
+                "repos",
+                &request.forge,
+                &request.owner,
+                &request.repo,
+                "issues",
+                &request.index.to_string(),
+            ],
+        )?;
         let mut json_body = serde_json::Map::new();
         if let Some(title) = &request.title {
             json_body.insert(
@@ -1791,33 +1988,138 @@ impl McpShim {
         if let Some(body) = &request.body {
             json_body.insert("body".to_string(), serde_json::Value::String(body.clone()));
         }
-        self.gateway_patch(url, &serde_json::Value::Object(json_body))
+        self.gateway_patch(url, &gw.token, &serde_json::Value::Object(json_body))
             .await
     }
 
-    /// Discover available forges, gateway URL, git proxy pattern, and auth.
+    /// Discover available forges across all configured gateways.
     #[tool(
         name = "forge_info",
         description = "Discover available forge instances, gateway URL, git proxy URL template, and authentication details. Call this first to learn which forges you can access and how to clone repositories."
     )]
     async fn forge_info(&self) -> Result<String, McpError> {
-        let url = self.build_url(&["api", "v1", "agent", "info"])?;
-        let response = self.gateway_get(url).await?;
-
-        let mut parsed: serde_json::Value = serde_json::from_str(&response)
-            .map_err(|e| McpError::internal_error(format!("invalid JSON response: {e}"), None))?;
-
-        let gateway_url = self.config.gateway_url.trim_end_matches('/');
-        parsed["gateway_url"] = serde_json::Value::String(gateway_url.to_string());
-        parsed["git_url_template"] =
-            serde_json::Value::String(format!("{gateway_url}/git/{{forge}}/{{owner}}/{{repo}}"));
-        parsed["git_auth"] = serde_json::json!({
+        let git_auth = serde_json::json!({
             "scheme": "basic",
             "username": "any non-empty value",
             "password_source": "agent_token"
         });
 
-        serde_json::to_string_pretty(&parsed)
+        // Single gateway: preserve the original flat response shape.
+        if self.config.gateways.len() == 1 {
+            let gw = &self.config.gateways[0];
+            let url = Self::build_url(&gw.url, &["api", "v1", "agent", "info"])?;
+            let response = self.gateway_get(url, &gw.token).await?;
+            let mut parsed: serde_json::Value = serde_json::from_str(&response).map_err(|e| {
+                McpError::internal_error(format!("invalid JSON response: {e}"), None)
+            })?;
+
+            let gw_url = gw.url.trim_end_matches('/');
+            parsed["gateway_url"] = serde_json::Value::String(gw_url.to_string());
+            parsed["git_url_template"] =
+                serde_json::Value::String(format!("{gw_url}/git/{{forge}}/{{owner}}/{{repo}}"));
+            parsed["git_auth"] = git_auth;
+
+            return serde_json::to_string_pretty(&parsed).map_err(|e| {
+                McpError::internal_error(format!("JSON serialization failed: {e}"), None)
+            });
+        }
+
+        // Multiple gateways: aggregate per-gateway info and merge forges.
+        // Unreachable gateways are included with an error note rather than
+        // failing the entire response.
+        let mut all_forges = Vec::new();
+        let mut alias_sources: HashMap<String, String> = HashMap::new();
+        let mut ambiguous_aliases: Vec<String> = Vec::new();
+        let mut gateway_entries = Vec::new();
+
+        for gw in &self.config.gateways {
+            let gw_url = gw.url.trim_end_matches('/');
+            let url = match Self::build_url(&gw.url, &["api", "v1", "agent", "info"]) {
+                Ok(u) => u,
+                Err(e) => {
+                    tracing::warn!(
+                        gateway = gw.name,
+                        error = %e,
+                        "skipping gateway with malformed URL during forge_info",
+                    );
+                    gateway_entries.push(serde_json::json!({
+                        "name": gw.name,
+                        "gateway_url": gw_url,
+                        "error": format!("{e}"),
+                    }));
+                    continue;
+                }
+            };
+            let response = match self.gateway_get(url, &gw.token).await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(
+                        gateway = gw.name,
+                        error = %e,
+                        "gateway unreachable during forge_info",
+                    );
+                    gateway_entries.push(serde_json::json!({
+                        "name": gw.name,
+                        "gateway_url": gw_url,
+                        "error": format!("{e}"),
+                    }));
+                    continue;
+                }
+            };
+            let info: serde_json::Value = match serde_json::from_str(&response) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(
+                        gateway = gw.name,
+                        error = %e,
+                        "gateway returned invalid JSON during forge_info",
+                    );
+                    gateway_entries.push(serde_json::json!({
+                        "name": gw.name,
+                        "gateway_url": gw_url,
+                        "error": format!("invalid JSON: {e}"),
+                    }));
+                    continue;
+                }
+            };
+
+            let forges = info["forges"].clone();
+            if let Some(forge_arr) = forges.as_array() {
+                for forge in forge_arr {
+                    if let Some(alias) = forge["alias"].as_str() {
+                        if let Some(existing_gw) = alias_sources.get(alias) {
+                            ambiguous_aliases.push(format!(
+                                "forge alias '{}' advertised by gateways '{}' and '{}'",
+                                alias, existing_gw, gw.name,
+                            ));
+                        } else {
+                            alias_sources.insert(alias.to_string(), gw.name.clone());
+                        }
+                    }
+                    all_forges.push(forge.clone());
+                }
+            }
+
+            gateway_entries.push(serde_json::json!({
+                "name": gw.name,
+                "gateway_url": gw_url,
+                "git_url_template": format!("{gw_url}/git/{{forge}}/{{owner}}/{{repo}}"),
+                "agent_id": info["agent_id"],
+                "branch_prefix": info["branch_prefix"],
+                "forges": forges,
+            }));
+        }
+
+        let mut result = serde_json::json!({
+            "forges": all_forges,
+            "gateways": gateway_entries,
+            "git_auth": git_auth,
+        });
+        if !ambiguous_aliases.is_empty() {
+            result["ambiguous_aliases"] = serde_json::json!(ambiguous_aliases);
+        }
+
+        serde_json::to_string_pretty(&result)
             .map_err(|e| McpError::internal_error(format!("JSON serialization failed: {e}"), None))
     }
 }
@@ -1834,7 +2136,7 @@ impl ServerHandler for McpShim {
     }
 
     async fn on_initialized(&self, context: NotificationContext<RoleServer>) {
-        // Always start the event forwarder so poll_events works regardless of
+        // Always start the event forwarders so poll_events works regardless of
         // whether Claude channel notifications are enabled.
         if self
             .event_forwarder_started
@@ -1844,18 +2146,33 @@ impl ServerHandler for McpShim {
             return;
         }
 
-        let peer = context.peer.clone();
-        let client = self.client.clone();
-        let config = self.config.clone();
-        let event_buffer = self.event_buffer.clone();
-        let subscriber_id = self.subscriber_id.clone();
-        tracing::info!(
-            channels = self.config.enable_channels,
-            "event forwarder started",
-        );
-        tokio::spawn(async move {
-            Self::run_event_forwarder(client, config, event_buffer, subscriber_id, peer).await;
-        });
+        // Start one event forwarder per gateway. Each has its own SSE
+        // connection and reconnect state, but they share the event buffer.
+        for (i, gateway) in self.config.gateways.iter().enumerate() {
+            let peer = context.peer.clone();
+            let client = self.client.clone();
+            let gw = gateway.clone();
+            let event_buffer = self.event_buffer.clone();
+            let subscriber_id = generate_subscriber_id();
+            // Only send the startup spike on the first gateway.
+            let startup_spike = i == 0 && self.config.channel_startup_spike;
+            tracing::info!(
+                gateway = gw.name,
+                channels = self.config.enable_channels,
+                "event forwarder started",
+            );
+            tokio::spawn(async move {
+                Self::run_event_forwarder(
+                    client,
+                    gw,
+                    startup_spike,
+                    event_buffer,
+                    subscriber_id,
+                    peer,
+                )
+                .await;
+            });
+        }
     }
 }
 
@@ -1969,10 +2286,13 @@ mod tests {
         ShimConfig {
             channel_startup_spike: false,
             enable_channels: false,
-            gateway_url: gateway_url.to_string(),
+            gateways: vec![GatewayConfig {
+                name: "test".to_string(),
+                token: "test-token".to_string(),
+                url: gateway_url.to_string(),
+            }],
             server_name: "forge-mcp-shim".to_string(),
             server_version: "0.1.0-test".to_string(),
-            token: "test-token".to_string(),
         }
     }
 
@@ -1983,11 +2303,40 @@ mod tests {
         }
     }
 
+    fn test_multi_gateway_config(urls: &[(&str, &str, &str)]) -> ShimConfig {
+        ShimConfig {
+            channel_startup_spike: false,
+            enable_channels: false,
+            gateways: urls
+                .iter()
+                .map(|(name, url, token)| GatewayConfig {
+                    name: (*name).to_string(),
+                    token: (*token).to_string(),
+                    url: (*url).to_string(),
+                })
+                .collect(),
+            server_name: "forge-mcp-shim".to_string(),
+            server_version: "0.1.0-test".to_string(),
+        }
+    }
+
     #[test]
     fn debug_redacts_token() {
         let config = test_config("https://example.com");
         let debug = format!("{config:?}");
         assert!(!debug.contains("test-token"));
+        assert!(debug.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn gateway_config_debug_redacts_token() {
+        let gw = GatewayConfig {
+            name: "test".to_string(),
+            token: "super-secret".to_string(),
+            url: "https://example.com".to_string(),
+        };
+        let debug = format!("{gw:?}");
+        assert!(!debug.contains("super-secret"));
         assert!(debug.contains("[REDACTED]"));
     }
 
@@ -2004,10 +2353,11 @@ mod tests {
 
     #[test]
     fn build_url_encodes_reserved_characters() {
-        let shim = McpShim::new(test_config("https://example.com"));
-        let url = shim
-            .build_url(&["api", "v1", "repos", "org", "repo", "contents", "a?b#c"])
-            .unwrap();
+        let url = McpShim::build_url(
+            "https://example.com",
+            &["api", "v1", "repos", "org", "repo", "contents", "a?b#c"],
+        )
+        .unwrap();
         let path = url.path();
         // '?' and '#' change URL semantics and must be percent-encoded in paths
         assert!(
@@ -2026,10 +2376,11 @@ mod tests {
 
     #[test]
     fn build_url_query_params_encoded() {
-        let shim = McpShim::new(test_config("https://example.com"));
-        let mut url = shim
-            .build_url(&["api", "v1", "repos", "org", "repo", "contents", "file"])
-            .unwrap();
+        let mut url = McpShim::build_url(
+            "https://example.com",
+            &["api", "v1", "repos", "org", "repo", "contents", "file"],
+        )
+        .unwrap();
         url.query_pairs_mut()
             .append_pair("ref", "feat/branch&evil=1");
         let query = url.query().unwrap();
@@ -2042,11 +2393,10 @@ mod tests {
 
     #[test]
     fn build_url_nested_path_segments() {
-        let shim = McpShim::new(test_config("https://example.com"));
         let path_parts: Vec<&str> = "src/main.rs".split('/').collect();
         let mut segments: Vec<&str> = vec!["api", "v1", "repos", "org", "repo", "contents"];
         segments.extend(path_parts.iter());
-        let url = shim.build_url(&segments).unwrap();
+        let url = McpShim::build_url("https://example.com", &segments).unwrap();
         assert_eq!(url.path(), "/api/v1/repos/org/repo/contents/src/main.rs");
     }
 
@@ -3196,6 +3546,798 @@ mod tests {
 
         drop(client);
         server_handle.await??;
+        Ok(())
+    }
+    #[tokio::test]
+    async fn multi_gateway_routes_to_correct_gateway() -> Result<(), Box<dyn std::error::Error>> {
+        let mock_gw_a = wiremock::MockServer::start().await;
+        let mock_gw_b = wiremock::MockServer::start().await;
+
+        // Gateway A advertises forge "alpha"
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/api/v1/agent/info"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "agent_id": "test",
+                    "forges": [{"alias": "alpha", "type": "forgejo"}]
+                })),
+            )
+            .mount(&mock_gw_a)
+            .await;
+
+        // Gateway B advertises forge "beta"
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/api/v1/agent/info"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "agent_id": "test",
+                    "forges": [{"alias": "beta", "type": "gitlab"}]
+                })),
+            )
+            .mount(&mock_gw_b)
+            .await;
+
+        // Issue endpoint only on gateway A (forge alpha)
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(
+                "/api/v1/repos/alpha/org/repo/issues/1",
+            ))
+            .and(wiremock::matchers::header(
+                "authorization",
+                "Bearer token-a",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"number": 1, "title": "Alpha issue"})),
+            )
+            .mount(&mock_gw_a)
+            .await;
+
+        // Issue endpoint only on gateway B (forge beta)
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(
+                "/api/v1/repos/beta/org/repo/issues/2",
+            ))
+            .and(wiremock::matchers::header(
+                "authorization",
+                "Bearer token-b",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"number": 2, "title": "Beta issue"})),
+            )
+            .mount(&mock_gw_b)
+            .await;
+
+        let config = test_multi_gateway_config(&[
+            ("gw-a", &mock_gw_a.uri(), "token-a"),
+            ("gw-b", &mock_gw_b.uri(), "token-b"),
+        ]);
+        let (client, server_handle) = spawn_shim_and_client(config).await?;
+
+        // Request to forge "alpha" should hit gateway A
+        let args_alpha = serde_json::json!({
+            "forge": "alpha", "owner": "org", "repo": "repo", "index": 1
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let result = client
+            .call_tool(CallToolRequestParams::new("get_issue").with_arguments(args_alpha))
+            .await?;
+        let text = result
+            .content
+            .first()
+            .and_then(|c| c.raw.as_text())
+            .map(|t| t.text.clone())
+            .expect("text result");
+        assert!(text.contains("Alpha issue"));
+
+        // Request to forge "beta" should hit gateway B
+        let args_beta = serde_json::json!({
+            "forge": "beta", "owner": "org", "repo": "repo", "index": 2
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let result = client
+            .call_tool(CallToolRequestParams::new("get_issue").with_arguments(args_beta))
+            .await?;
+        let text = result
+            .content
+            .first()
+            .and_then(|c| c.raw.as_text())
+            .map(|t| t.text.clone())
+            .expect("text result");
+        assert!(text.contains("Beta issue"));
+
+        drop(client);
+        server_handle.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn multi_gateway_ambiguous_alias_returns_error() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mock_gw_a = wiremock::MockServer::start().await;
+        let mock_gw_b = wiremock::MockServer::start().await;
+
+        // Both gateways advertise forge "shared"
+        for mock in [&mock_gw_a, &mock_gw_b] {
+            wiremock::Mock::given(wiremock::matchers::method("GET"))
+                .and(wiremock::matchers::path("/api/v1/agent/info"))
+                .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({
+                        "agent_id": "test",
+                        "forges": [{"alias": "shared", "type": "forgejo"}]
+                    }),
+                ))
+                .mount(mock)
+                .await;
+        }
+
+        let config = test_multi_gateway_config(&[
+            ("gw-a", &mock_gw_a.uri(), "token-a"),
+            ("gw-b", &mock_gw_b.uri(), "token-b"),
+        ]);
+        let (client, server_handle) = spawn_shim_and_client(config).await?;
+
+        let args = serde_json::json!({
+            "forge": "shared", "owner": "org", "repo": "repo", "index": 1
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+
+        // MCP tool errors propagate as Err from call_tool
+        let result = client
+            .call_tool(CallToolRequestParams::new("get_issue").with_arguments(args))
+            .await;
+        let err = result.expect_err("expected error for ambiguous alias");
+        let err_msg = format!("{err}");
+        assert!(
+            err_msg.contains("ambiguous"),
+            "error should mention ambiguity: {err_msg}"
+        );
+
+        drop(client);
+        server_handle.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn multi_gateway_unknown_forge_returns_error() -> Result<(), Box<dyn std::error::Error>> {
+        let mock_gw = wiremock::MockServer::start().await;
+
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/api/v1/agent/info"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "agent_id": "test",
+                    "forges": [{"alias": "known", "type": "forgejo"}]
+                })),
+            )
+            .mount(&mock_gw)
+            .await;
+
+        // Need a second gateway to trigger multi-gw discovery path
+        let mock_gw_b = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/api/v1/agent/info"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "agent_id": "test",
+                    "forges": [{"alias": "other", "type": "gitlab"}]
+                })),
+            )
+            .mount(&mock_gw_b)
+            .await;
+
+        let config = test_multi_gateway_config(&[
+            ("gw-a", &mock_gw.uri(), "token-a"),
+            ("gw-b", &mock_gw_b.uri(), "token-b"),
+        ]);
+        let (client, server_handle) = spawn_shim_and_client(config).await?;
+
+        let args = serde_json::json!({
+            "forge": "nonexistent", "owner": "org", "repo": "repo", "index": 1
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+
+        // MCP tool errors propagate as Err from call_tool
+        let result = client
+            .call_tool(CallToolRequestParams::new("get_issue").with_arguments(args))
+            .await;
+        let err = result.expect_err("expected error for unknown forge");
+        let err_msg = format!("{err}");
+        assert!(
+            err_msg.contains("unknown forge alias"),
+            "error should mention unknown alias: {err_msg}"
+        );
+
+        drop(client);
+        server_handle.await??;
+        Ok(())
+    }
+
+    /// A gateway that was unreachable during initial discovery becomes
+    /// reachable later.  The shim should re-discover and route to it.
+    #[tokio::test]
+    async fn multi_gateway_rediscovers_when_gateway_recovers()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mock_gw_a = wiremock::MockServer::start().await;
+        let mock_gw_b = wiremock::MockServer::start().await;
+
+        // Gateway A advertises forge "alpha" and always responds.
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/api/v1/agent/info"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "agent_id": "test",
+                    "forges": [{"alias": "alpha", "type": "forgejo"}]
+                })),
+            )
+            .mount(&mock_gw_a)
+            .await;
+
+        // Gateway B initially returns 503 (unreachable) for discovery, then
+        // responds normally.  We use `up_to(1)` for the 503 so the first
+        // discovery hits a failure, then mount a 200 for the retry.
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/api/v1/agent/info"))
+            .respond_with(wiremock::ResponseTemplate::new(503))
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(&mock_gw_b)
+            .await;
+
+        // Issue endpoint on gateway A (forge alpha)
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(
+                "/api/v1/repos/alpha/org/repo/issues/1",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"number": 1, "title": "Alpha issue"})),
+            )
+            .mount(&mock_gw_a)
+            .await;
+
+        // Issue endpoint on gateway B (forge beta) — will be reachable later.
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(
+                "/api/v1/repos/beta/org/repo/issues/2",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"number": 2, "title": "Beta issue"})),
+            )
+            .mount(&mock_gw_b)
+            .await;
+
+        let config = test_multi_gateway_config(&[
+            ("gw-a", &mock_gw_a.uri(), "token-a"),
+            ("gw-b", &mock_gw_b.uri(), "token-b"),
+        ]);
+        let (client, server_handle) = spawn_shim_and_client(config).await?;
+
+        // First call to forge "alpha" triggers discovery — gateway B is
+        // unreachable (503), but alpha works because it's on gateway A.
+        let args_alpha = serde_json::json!({
+            "forge": "alpha", "owner": "org", "repo": "repo", "index": 1
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let result = client
+            .call_tool(CallToolRequestParams::new("get_issue").with_arguments(args_alpha))
+            .await?;
+        let text = result
+            .content
+            .first()
+            .and_then(|c| c.raw.as_text())
+            .map(|t| t.text.clone())
+            .expect("text result");
+        assert!(text.contains("Alpha issue"));
+
+        // Now gateway B "recovers" — mount the 200 response for discovery.
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/api/v1/agent/info"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "agent_id": "test",
+                    "forges": [{"alias": "beta", "type": "gitlab"}]
+                })),
+            )
+            .mount(&mock_gw_b)
+            .await;
+
+        // Request to forge "beta" — should trigger re-discovery since gateway B
+        // was unreachable before.
+        let args_beta = serde_json::json!({
+            "forge": "beta", "owner": "org", "repo": "repo", "index": 2
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let result = client
+            .call_tool(CallToolRequestParams::new("get_issue").with_arguments(args_beta))
+            .await?;
+        let text = result
+            .content
+            .first()
+            .and_then(|c| c.raw.as_text())
+            .map(|t| t.text.clone())
+            .expect("text result");
+        assert!(text.contains("Beta issue"));
+
+        drop(client);
+        server_handle.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn multi_gateway_forge_info_aggregates() -> Result<(), Box<dyn std::error::Error>> {
+        let mock_gw_a = wiremock::MockServer::start().await;
+        let mock_gw_b = wiremock::MockServer::start().await;
+
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/api/v1/agent/info"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "agent_id": "test-a",
+                    "branch_prefix": "agent/test/",
+                    "forges": [{"alias": "alpha", "type": "forgejo"}]
+                })),
+            )
+            .mount(&mock_gw_a)
+            .await;
+
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/api/v1/agent/info"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "agent_id": "test-b",
+                    "branch_prefix": "agent/test/",
+                    "forges": [{"alias": "beta", "type": "gitlab"}]
+                })),
+            )
+            .mount(&mock_gw_b)
+            .await;
+
+        let config = test_multi_gateway_config(&[
+            ("gw-a", &mock_gw_a.uri(), "token-a"),
+            ("gw-b", &mock_gw_b.uri(), "token-b"),
+        ]);
+        let (client, server_handle) = spawn_shim_and_client(config).await?;
+
+        let result = client
+            .call_tool(CallToolRequestParams::new("forge_info"))
+            .await?;
+        let text = result
+            .content
+            .first()
+            .and_then(|c| c.raw.as_text())
+            .map(|t| t.text.clone())
+            .expect("text result");
+        let parsed: serde_json::Value = serde_json::from_str(&text)?;
+
+        // Should have merged forges list
+        let forges = parsed["forges"].as_array().expect("forges array");
+        assert_eq!(forges.len(), 2);
+        let aliases: Vec<&str> = forges.iter().filter_map(|f| f["alias"].as_str()).collect();
+        assert!(aliases.contains(&"alpha"));
+        assert!(aliases.contains(&"beta"));
+
+        // Should have gateways array
+        let gateways = parsed["gateways"].as_array().expect("gateways array");
+        assert_eq!(gateways.len(), 2);
+        assert_eq!(gateways[0]["name"], "gw-a");
+        assert_eq!(gateways[1]["name"], "gw-b");
+
+        drop(client);
+        server_handle.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn single_gateway_forge_info_preserves_flat_shape()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mock_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/api/v1/agent/info"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "agent_id": "test",
+                    "branch_prefix": "agent/test/",
+                    "forges": [{"alias": "internal", "type": "forgejo"}]
+                })),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let (client, server_handle) =
+            spawn_shim_and_client(test_config(&mock_server.uri())).await?;
+
+        let result = client
+            .call_tool(CallToolRequestParams::new("forge_info"))
+            .await?;
+        let text = result
+            .content
+            .first()
+            .and_then(|c| c.raw.as_text())
+            .map(|t| t.text.clone())
+            .expect("text result");
+        let parsed: serde_json::Value = serde_json::from_str(&text)?;
+
+        // Single gateway should preserve flat shape with gateway_url
+        assert!(parsed["gateway_url"].is_string(), "should have gateway_url");
+        assert!(
+            parsed["git_url_template"].is_string(),
+            "should have git_url_template"
+        );
+        assert!(parsed["git_auth"].is_object(), "should have git_auth");
+        // Should NOT have gateways array in single-gateway mode
+        assert!(
+            parsed["gateways"].is_null(),
+            "should not have gateways array"
+        );
+
+        drop(client);
+        server_handle.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn multi_gateway_skips_unreachable_during_discovery()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mock_gw_healthy = wiremock::MockServer::start().await;
+
+        // Healthy gateway advertises forge "healthy"
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/api/v1/agent/info"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "agent_id": "test",
+                    "forges": [{"alias": "healthy", "type": "forgejo"}]
+                })),
+            )
+            .mount(&mock_gw_healthy)
+            .await;
+
+        // Issue endpoint on healthy gateway
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(
+                "/api/v1/repos/healthy/org/repo/issues/1",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"number": 1, "title": "Healthy issue"})),
+            )
+            .mount(&mock_gw_healthy)
+            .await;
+
+        // Second gateway is unreachable (port that nothing listens on)
+        let config = test_multi_gateway_config(&[
+            ("gw-healthy", &mock_gw_healthy.uri(), "token-h"),
+            ("gw-down", "http://127.0.0.1:1", "token-d"),
+        ]);
+        let (client, server_handle) = spawn_shim_and_client(config).await?;
+
+        // Request to the healthy forge should succeed despite the other gateway being down
+        let args = serde_json::json!({
+            "forge": "healthy", "owner": "org", "repo": "repo", "index": 1
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+
+        let result = client
+            .call_tool(CallToolRequestParams::new("get_issue").with_arguments(args))
+            .await?;
+        let text = result
+            .content
+            .first()
+            .and_then(|c| c.raw.as_text())
+            .map(|t| t.text.clone())
+            .expect("text result");
+        assert!(text.contains("Healthy issue"));
+
+        drop(client);
+        server_handle.await??;
+        Ok(())
+    }
+
+    /// A gateway with a malformed URL must be skipped during discovery,
+    /// not abort routing to healthy gateways.
+    #[tokio::test]
+    async fn multi_gateway_skips_malformed_url_during_discovery()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mock_gw_healthy = wiremock::MockServer::start().await;
+
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/api/v1/agent/info"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "agent_id": "test",
+                    "forges": [{"alias": "healthy", "type": "forgejo"}]
+                })),
+            )
+            .mount(&mock_gw_healthy)
+            .await;
+
+        // "://bad" is not a valid URL — build_url will fail for this gateway.
+        let config = test_multi_gateway_config(&[
+            ("gw-healthy", &mock_gw_healthy.uri(), "token-h"),
+            ("gw-bad", "://bad", "token-b"),
+        ]);
+        let shim = McpShim::new(config);
+
+        // Discovery should succeed, routing "healthy" to gw-healthy.
+        let gw = shim.resolve_gateway("healthy").await?;
+        assert_eq!(gw.name, "gw-healthy");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn multi_gateway_forge_info_includes_unreachable_gateway()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mock_gw_healthy = wiremock::MockServer::start().await;
+
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/api/v1/agent/info"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "agent_id": "test",
+                    "branch_prefix": "agent/test/",
+                    "forges": [{"alias": "healthy", "type": "forgejo"}]
+                })),
+            )
+            .mount(&mock_gw_healthy)
+            .await;
+
+        let config = test_multi_gateway_config(&[
+            ("gw-healthy", &mock_gw_healthy.uri(), "token-h"),
+            ("gw-down", "http://127.0.0.1:1", "token-d"),
+        ]);
+        let (client, server_handle) = spawn_shim_and_client(config).await?;
+
+        let result = client
+            .call_tool(CallToolRequestParams::new("forge_info"))
+            .await?;
+        let text = result
+            .content
+            .first()
+            .and_then(|c| c.raw.as_text())
+            .map(|t| t.text.clone())
+            .expect("text result");
+        let parsed: serde_json::Value = serde_json::from_str(&text)?;
+
+        // Merged forges should only contain the healthy gateway's forge
+        let forges = parsed["forges"].as_array().expect("forges array");
+        assert_eq!(forges.len(), 1);
+        assert_eq!(forges[0]["alias"], "healthy");
+
+        // Gateways array should contain both entries
+        let gateways = parsed["gateways"].as_array().expect("gateways array");
+        assert_eq!(gateways.len(), 2);
+
+        // Healthy gateway should have forges, no error
+        assert_eq!(gateways[0]["name"], "gw-healthy");
+        assert!(
+            gateways[0]["error"].is_null(),
+            "healthy gw should have no error"
+        );
+
+        // Down gateway should have an error field
+        assert_eq!(gateways[1]["name"], "gw-down");
+        assert!(
+            gateways[1]["error"].is_string(),
+            "down gw should have error"
+        );
+
+        drop(client);
+        server_handle.await??;
+        Ok(())
+    }
+
+    /// A gateway with a malformed URL must be skipped during `forge_info`,
+    /// not abort the entire response.
+    #[tokio::test]
+    async fn multi_gateway_forge_info_skips_malformed_url() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mock_gw_healthy = wiremock::MockServer::start().await;
+
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/api/v1/agent/info"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "agent_id": "test",
+                    "branch_prefix": "agent/test/",
+                    "forges": [{"alias": "healthy", "type": "forgejo"}]
+                })),
+            )
+            .mount(&mock_gw_healthy)
+            .await;
+
+        // "://bad" is not a valid URL — build_url will fail for this gateway.
+        let config = test_multi_gateway_config(&[
+            ("gw-healthy", &mock_gw_healthy.uri(), "token-h"),
+            ("gw-bad", "://bad", "token-b"),
+        ]);
+        let (client, server_handle) = spawn_shim_and_client(config).await?;
+
+        let result = client
+            .call_tool(CallToolRequestParams::new("forge_info"))
+            .await?;
+        let text = result
+            .content
+            .first()
+            .and_then(|c| c.raw.as_text())
+            .map(|t| t.text.clone())
+            .expect("text result");
+        let parsed: serde_json::Value = serde_json::from_str(&text)?;
+
+        // Merged forges should only contain the healthy gateway's forge
+        let forges = parsed["forges"].as_array().expect("forges array");
+        assert_eq!(forges.len(), 1);
+        assert_eq!(forges[0]["alias"], "healthy");
+
+        // Gateways array should contain both entries
+        let gateways = parsed["gateways"].as_array().expect("gateways array");
+        assert_eq!(gateways.len(), 2);
+
+        // Healthy gateway should have forges, no error
+        assert_eq!(gateways[0]["name"], "gw-healthy");
+        assert!(
+            gateways[0]["error"].is_null(),
+            "healthy gw should have no error"
+        );
+
+        // Malformed gateway should have an error field
+        assert_eq!(gateways[1]["name"], "gw-bad");
+        assert!(
+            gateways[1]["error"].is_string(),
+            "malformed gw should have error"
+        );
+
+        drop(client);
+        server_handle.await??;
+        Ok(())
+    }
+
+    /// When two gateways advertise the same forge alias, `forge_info` must
+    /// include an `ambiguous_aliases` field so the caller can see the problem
+    /// before tool routing fails.
+    #[tokio::test]
+    async fn multi_gateway_forge_info_surfaces_ambiguous_aliases()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mock_gw_a = wiremock::MockServer::start().await;
+        let mock_gw_b = wiremock::MockServer::start().await;
+
+        // Both gateways advertise forge "shared"
+        for mock in [&mock_gw_a, &mock_gw_b] {
+            wiremock::Mock::given(wiremock::matchers::method("GET"))
+                .and(wiremock::matchers::path("/api/v1/agent/info"))
+                .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({
+                        "agent_id": "test",
+                        "branch_prefix": "agent/test/",
+                        "forges": [{"alias": "shared", "type": "forgejo"}]
+                    }),
+                ))
+                .mount(mock)
+                .await;
+        }
+
+        let config = test_multi_gateway_config(&[
+            ("gw-a", &mock_gw_a.uri(), "token-a"),
+            ("gw-b", &mock_gw_b.uri(), "token-b"),
+        ]);
+        let (client, server_handle) = spawn_shim_and_client(config).await?;
+
+        let result = client
+            .call_tool(CallToolRequestParams::new("forge_info"))
+            .await?;
+        let text = result
+            .content
+            .first()
+            .and_then(|c| c.raw.as_text())
+            .map(|t| t.text.clone())
+            .expect("text result");
+        let parsed: serde_json::Value = serde_json::from_str(&text)?;
+
+        let ambiguous = parsed["ambiguous_aliases"]
+            .as_array()
+            .expect("ambiguous_aliases array");
+        assert_eq!(ambiguous.len(), 1);
+        let msg = ambiguous[0].as_str().unwrap();
+        assert!(
+            msg.contains("shared"),
+            "ambiguity message should mention the alias: {msg}"
+        );
+        assert!(
+            msg.contains("gw-a") && msg.contains("gw-b"),
+            "ambiguity message should mention both gateways: {msg}"
+        );
+
+        drop(client);
+        server_handle.await??;
+        Ok(())
+    }
+
+    /// When a forge alias moves between gateways, `resolve_gateway` must
+    /// pick up the change immediately (no stale cached routing).
+    #[tokio::test]
+    async fn multi_gateway_picks_up_topology_change() -> Result<(), Box<dyn std::error::Error>> {
+        let mock_gw_a = wiremock::MockServer::start().await;
+        let mock_gw_b = wiremock::MockServer::start().await;
+
+        // Initial topology: gw-a has "alpha", gw-b has "beta".
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/api/v1/agent/info"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "agent_id": "test-a",
+                    "forges": [{"alias": "alpha", "type": "forgejo"}]
+                })),
+            )
+            .up_to_n_times(1)
+            .mount(&mock_gw_a)
+            .await;
+
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/api/v1/agent/info"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "agent_id": "test-b",
+                    "forges": [{"alias": "beta", "type": "gitlab"}]
+                })),
+            )
+            .up_to_n_times(1)
+            .mount(&mock_gw_b)
+            .await;
+
+        let config = test_multi_gateway_config(&[
+            ("gw-a", &mock_gw_a.uri(), "token-a"),
+            ("gw-b", &mock_gw_b.uri(), "token-b"),
+        ]);
+        let shim = McpShim::new(config);
+
+        // First resolve discovers "alpha" on gw-a.
+        let gw = shim.resolve_gateway("alpha").await?;
+        assert_eq!(gw.name, "gw-a");
+
+        // Change topology: gw-a no longer has "alpha", gw-b now has "alpha".
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/api/v1/agent/info"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "agent_id": "test-a",
+                    "forges": []
+                })),
+            )
+            .mount(&mock_gw_a)
+            .await;
+
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/api/v1/agent/info"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "agent_id": "test-b",
+                    "forges": [{"alias": "alpha", "type": "forgejo"}, {"alias": "beta", "type": "gitlab"}]
+                })),
+            )
+            .mount(&mock_gw_b)
+            .await;
+
+        // Next resolve should immediately discover "alpha" moved to gw-b.
+        let gw = shim.resolve_gateway("alpha").await?;
+        assert_eq!(gw.name, "gw-b");
+
         Ok(())
     }
 }
