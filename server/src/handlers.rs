@@ -2017,6 +2017,7 @@ mod tests {
                 ChangeRequestCommentDetail {
                     author: "reviewer".to_string(),
                     body: "looks good".to_string(),
+                    commit_id: None,
                     created_at: "2026-03-18T10:00:00Z".to_string(),
                     id: 1,
                     kind: "comment".to_string(),
@@ -2025,6 +2026,7 @@ mod tests {
                 ChangeRequestCommentDetail {
                     author: "reviewer".to_string(),
                     body: "approved".to_string(),
+                    commit_id: Some("abc123".to_string()),
                     created_at: "2026-03-18T11:00:00Z".to_string(),
                     id: 2,
                     kind: "review".to_string(),
@@ -2974,9 +2976,11 @@ mod tests {
         assert_eq!(arr[0]["author"], "reviewer");
         assert_eq!(arr[0]["body"], "looks good");
         assert!(arr[0].get("dismissed").is_none());
+        assert!(arr[0]["commit_id"].is_null());
         assert_eq!(arr[0]["kind"], "comment");
         assert!(arr[0]["review_state"].is_null());
         assert_eq!(arr[1]["body"], "approved");
+        assert_eq!(arr[1]["commit_id"], "abc123");
         assert!(arr[1].get("dismissed").is_none());
         assert_eq!(arr[1]["kind"], "review");
         assert_eq!(arr[1]["review_state"], "APPROVED");

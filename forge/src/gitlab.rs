@@ -700,6 +700,7 @@ impl crate::ForgeAdapter for GitLabAdapter {
             result.push(ChangeRequestCommentDetail {
                 author: note.author.username,
                 body: note.body,
+                commit_id: None,
                 created_at: note.created_at,
                 id: note.id,
                 kind: "comment".to_string(),
@@ -712,6 +713,7 @@ impl crate::ForgeAdapter for GitLabAdapter {
             result.push(ChangeRequestCommentDetail {
                 author: approver.user.username,
                 body: String::new(),
+                commit_id: None,
                 created_at: String::new(),
                 id: 0,
                 kind: "review".to_string(),

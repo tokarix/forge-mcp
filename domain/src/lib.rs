@@ -178,6 +178,8 @@ pub struct ChangeRequestComment {
 pub struct ChangeRequestCommentDetail {
     pub author: String,
     pub body: String,
+    /// For reviews: the commit SHA the review was submitted against. None for general comments.
+    pub commit_id: Option<String>,
     pub created_at: String,
     pub id: u64,
     /// "comment" for general comments, "review" for formal reviews.

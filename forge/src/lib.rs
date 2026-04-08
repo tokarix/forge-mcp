@@ -596,6 +596,7 @@ struct ForgejoIssueComment {
 #[derive(Debug, Deserialize)]
 struct ForgejoPullReview {
     body: Option<String>,
+    commit_id: Option<String>,
     #[serde(default)]
     dismissed: bool,
     id: u64,
@@ -1212,6 +1213,7 @@ impl ForgeAdapter for ForgejoAdapter {
             result.push(ChangeRequestCommentDetail {
                 author: c.user.login,
                 body: c.body,
+                commit_id: None,
                 created_at: c.created_at,
                 id: c.id,
                 kind: "comment".to_string(),
@@ -1231,6 +1233,7 @@ impl ForgeAdapter for ForgejoAdapter {
             result.push(ChangeRequestCommentDetail {
                 author: r.user.login,
                 body: r.body.unwrap_or_default(),
+                commit_id: r.commit_id,
                 created_at: submitted_at,
                 id: r.id,
                 kind: "review".to_string(),
@@ -2431,6 +2434,7 @@ mod tests {
                 {
                     "id": 20,
                     "body": "approved",
+                    "commit_id": "abc123def456",
                     "state": "APPROVED",
                     "submitted_at": "2026-03-18T11:00:00Z",
                     "user": { "login": "carol" }
@@ -2438,6 +2442,7 @@ mod tests {
                 {
                     "id": 25,
                     "body": "needs work",
+                    "commit_id": "def789abc012",
                     "dismissed": true,
                     "state": "REQUEST_CHANGES",
                     "submitted_at": "2026-03-18T11:30:00Z",
@@ -2468,22 +2473,26 @@ mod tests {
         assert_eq!(result[0].author, "bob");
         assert_eq!(result[0].created_at, "2026-03-18T10:00:00Z");
         assert_eq!(result[0].kind, "comment");
+        assert!(result[0].commit_id.is_none());
         assert!(result[0].review_state.is_none());
 
         assert_eq!(result[1].author, "carol");
         assert_eq!(result[1].created_at, "2026-03-18T11:00:00Z");
         assert_eq!(result[1].kind, "review");
+        assert_eq!(result[1].commit_id.as_deref(), Some("abc123def456"));
         assert_eq!(result[1].review_state.as_deref(), Some("APPROVED"));
 
         // Dismissed review should have review_state DISMISSED
         assert_eq!(result[2].author, "eve");
         assert_eq!(result[2].created_at, "2026-03-18T11:30:00Z");
         assert_eq!(result[2].kind, "review");
+        assert_eq!(result[2].commit_id.as_deref(), Some("def789abc012"));
         assert_eq!(result[2].review_state.as_deref(), Some("DISMISSED"));
 
         assert_eq!(result[3].author, "alice");
         assert_eq!(result[3].created_at, "2026-03-18T12:00:00Z");
         assert_eq!(result[3].kind, "comment");
+        assert!(result[3].commit_id.is_none());
     }
 
     fn sign_payload(secret: &str, body: &[u8]) -> String {
