@@ -94,6 +94,22 @@ pub enum TransportError {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct AddIssueDependencyTool {
+    /// Index of the issue that this issue depends on (the blocking issue).
+    #[serde(deserialize_with = "deserialize_u64_lenient")]
+    pub dependency: u64,
+    /// Forge alias -- use `forge_info` to discover available aliases.
+    pub forge: String,
+    /// Issue index number.
+    #[serde(deserialize_with = "deserialize_u64_lenient")]
+    pub index: u64,
+    /// Repository owner or organization.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct AddIssueLabelTool {
     /// Forge alias -- use `forge_info` to discover available aliases.
     pub forge: String,
@@ -369,6 +385,19 @@ pub struct GetIssueCommentsTool {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct GetIssueDependenciesTool {
+    /// Forge alias -- use `forge_info` to discover available aliases.
+    pub forge: String,
+    /// Issue index number.
+    #[serde(deserialize_with = "deserialize_u64_lenient")]
+    pub index: u64,
+    /// Repository owner or organization.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct ListChangeRequestsTool {
     /// Forge alias -- use `forge_info` to discover available aliases.
     pub forge: String,
@@ -457,6 +486,22 @@ pub struct ReadRepositoryFileTool {
     pub owner: String,
     /// Repository-relative file path.
     pub path: String,
+    /// Repository name.
+    pub repo: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RemoveIssueDependencyTool {
+    /// Index of the dependency issue to remove.
+    #[serde(deserialize_with = "deserialize_u64_lenient")]
+    pub dependency: u64,
+    /// Forge alias -- use `forge_info` to discover available aliases.
+    pub forge: String,
+    /// Issue index number.
+    #[serde(deserialize_with = "deserialize_u64_lenient")]
+    pub index: u64,
+    /// Repository owner or organization.
+    pub owner: String,
     /// Repository name.
     pub repo: String,
 }
@@ -1212,6 +1257,34 @@ async fn sleep_with_peer_check(peer: &rmcp::service::Peer<RoleServer>, duration:
 
 #[tool_router]
 impl McpShim {
+    /// Mark an issue as depending on another issue (blocked-by relationship).
+    #[tool(
+        name = "add_issue_dependency",
+        description = "Mark an issue as depending on another issue. The issue at `index` will be blocked by the issue at `dependency`."
+    )]
+    async fn add_issue_dependency(
+        &self,
+        Parameters(request): Parameters<AddIssueDependencyTool>,
+    ) -> Result<String, McpError> {
+        let gw = self.resolve_gateway(&request.forge).await?;
+        let url = Self::build_url(
+            &gw.url,
+            &[
+                "api",
+                "v1",
+                "repos",
+                &request.forge,
+                &request.owner,
+                &request.repo,
+                "issues",
+                &request.index.to_string(),
+                "dependencies",
+            ],
+        )?;
+        let body = serde_json::json!({"dependency": request.dependency});
+        self.gateway_post(url, &gw.token, &body).await
+    }
+
     /// Add a label to an issue, creating the label if it does not exist.
     #[tool(
         name = "add_issue_label",
@@ -1627,6 +1700,33 @@ impl McpShim {
         self.gateway_get(url, &gw.token).await
     }
 
+    /// Get the dependency relationships for an issue.
+    #[tool(
+        name = "get_issue_dependencies",
+        description = "Get the dependency relationships for an issue. Returns issues that this issue depends on (blocks it) and issues that it blocks."
+    )]
+    async fn get_issue_dependencies(
+        &self,
+        Parameters(request): Parameters<GetIssueDependenciesTool>,
+    ) -> Result<String, McpError> {
+        let gw = self.resolve_gateway(&request.forge).await?;
+        let url = Self::build_url(
+            &gw.url,
+            &[
+                "api",
+                "v1",
+                "repos",
+                &request.forge,
+                &request.owner,
+                &request.repo,
+                "issues",
+                &request.index.to_string(),
+                "dependencies",
+            ],
+        )?;
+        self.gateway_get(url, &gw.token).await
+    }
+
     /// List change requests for a repository.
     #[tool(
         name = "list_change_requests",
@@ -1857,6 +1957,34 @@ impl McpShim {
             .as_str()
             .map(ToString::to_string)
             .ok_or_else(|| McpError::internal_error("missing content field".to_string(), None))
+    }
+
+    /// Remove a dependency relationship from an issue.
+    #[tool(
+        name = "remove_issue_dependency",
+        description = "Remove a dependency relationship from an issue. The issue at `index` will no longer be blocked by the issue at `dependency`."
+    )]
+    async fn remove_issue_dependency(
+        &self,
+        Parameters(request): Parameters<RemoveIssueDependencyTool>,
+    ) -> Result<String, McpError> {
+        let gw = self.resolve_gateway(&request.forge).await?;
+        let url = Self::build_url(
+            &gw.url,
+            &[
+                "api",
+                "v1",
+                "repos",
+                &request.forge,
+                &request.owner,
+                &request.repo,
+                "issues",
+                &request.index.to_string(),
+                "dependencies",
+                &request.dependency.to_string(),
+            ],
+        )?;
+        self.gateway_delete(url, &gw.token).await
     }
 
     /// Remove a label from an issue.

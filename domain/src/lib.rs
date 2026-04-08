@@ -305,6 +305,14 @@ pub struct Issue {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct IssueDependencies {
+    /// Issues that this issue blocks (they depend on this issue).
+    pub blocks: Vec<Issue>,
+    /// Issues that this issue depends on (they block this issue).
+    pub depends_on: Vec<Issue>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct IssueComment {
     pub author: String,
     pub body: String,
@@ -629,6 +637,14 @@ pub enum WebhookEvent {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AddIssueDependencyRequest {
+    pub agent: AgentIdentity,
+    pub dependency: u64,
+    pub index: u64,
+    pub repository: RepositoryRef,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AddIssueLabelRequest {
     pub agent: AgentIdentity,
     pub index: u64,
@@ -730,6 +746,13 @@ pub struct GetIssueCommentsRequest {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GetIssueDependenciesRequest {
+    pub agent: AgentIdentity,
+    pub index: u64,
+    pub repository: RepositoryRef,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GetIssueRequest {
     pub agent: AgentIdentity,
     pub index: u64,
@@ -780,6 +803,14 @@ pub struct RebaseBranchRequest {
 pub struct RebaseBranchResponse {
     pub branch: String,
     pub commit_sha: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemoveIssueDependencyRequest {
+    pub agent: AgentIdentity,
+    pub dependency: u64,
+    pub index: u64,
+    pub repository: RepositoryRef,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -956,6 +987,17 @@ pub trait RepositoryReadService: Send + Sync {
         request: GetIssueCommentsRequest,
     ) -> Result<Vec<IssueComment>, ServiceError>;
 
+    /// Retrieves the dependency relationships for an issue.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the upstream forge request fails or audit
+    /// recording fails.
+    async fn get_issue_dependencies(
+        &self,
+        request: GetIssueDependenciesRequest,
+    ) -> Result<IssueDependencies, ServiceError>;
+
     /// Lists issues, optionally filtered by state.
     ///
     /// # Errors
@@ -978,6 +1020,20 @@ pub trait RepositoryReadService: Send + Sync {
 
 #[async_trait]
 pub trait RepositoryWriteService: Send + Sync {
+    /// Adds a dependency on another issue (marks this issue as blocked by the
+    /// dependency).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the upstream forge request fails or audit
+    /// recording fails.
+    async fn add_issue_dependency(
+        &self,
+        request: AddIssueDependencyRequest,
+        authorized: policy::AuthorizedWrite,
+        credential: &ForgeCredential,
+    ) -> Result<Issue, ServiceError>;
+
     /// Adds a label to an issue, creating the label on the repo if it does
     /// not already exist.
     ///
@@ -1135,6 +1191,19 @@ pub trait RepositoryWriteService: Send + Sync {
         authorized: policy::AuthorizedWrite,
         credential: &ForgeCredential,
     ) -> Result<ChangeRequestReview, ServiceError>;
+
+    /// Removes a dependency relationship from an issue.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the upstream forge request fails or audit
+    /// recording fails.
+    async fn remove_issue_dependency(
+        &self,
+        request: RemoveIssueDependencyRequest,
+        authorized: policy::AuthorizedWrite,
+        credential: &ForgeCredential,
+    ) -> Result<Issue, ServiceError>;
 
     /// Removes a label from an issue.
     ///

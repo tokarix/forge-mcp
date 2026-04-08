@@ -368,6 +368,18 @@ struct GitLabApprover {
 
 #[async_trait]
 impl crate::ForgeAdapter for GitLabAdapter {
+    async fn add_issue_dependency(
+        &self,
+        _repository: &RepositoryRef,
+        _index: u64,
+        _dependency: u64,
+        _credential: &ForgeCredential,
+    ) -> Result<domain::Issue, ForgeError> {
+        Err(ForgeError::Unsupported(
+            "issue dependencies are not supported on GitLab".to_string(),
+        ))
+    }
+
     async fn add_issue_label(
         &self,
         repository: &RepositoryRef,
@@ -870,6 +882,17 @@ impl crate::ForgeAdapter for GitLabAdapter {
             .collect())
     }
 
+    async fn get_issue_dependencies(
+        &self,
+        _repository: &RepositoryRef,
+        _index: u64,
+        _credential: &ForgeCredential,
+    ) -> Result<domain::IssueDependencies, ForgeError> {
+        Err(ForgeError::Unsupported(
+            "issue dependencies are not supported on GitLab".to_string(),
+        ))
+    }
+
     async fn list_change_requests(
         &self,
         repository: &RepositoryRef,
@@ -921,6 +944,18 @@ impl crate::ForgeAdapter for GitLabAdapter {
         let response = Self::check_response(request.send().await?).await?;
         let issues: Vec<GitLabIssue> = response.json().await?;
         Ok(issues.into_iter().map(GitLabIssue::into_issue).collect())
+    }
+
+    async fn remove_issue_dependency(
+        &self,
+        _repository: &RepositoryRef,
+        _index: u64,
+        _dependency: u64,
+        _credential: &ForgeCredential,
+    ) -> Result<domain::Issue, ForgeError> {
+        Err(ForgeError::Unsupported(
+            "issue dependencies are not supported on GitLab".to_string(),
+        ))
     }
 
     async fn remove_issue_label(

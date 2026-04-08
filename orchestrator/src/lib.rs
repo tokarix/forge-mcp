@@ -5,15 +5,17 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use audit::{AuditRecord, AuditSink};
 use domain::{
-    AddIssueLabelRequest, AssignIssueRequest, ChangeRequest, ChangeRequestComment,
-    ChangeRequestCommentDetail, ChangeRequestDiff, ChangeRequestReview, CloseChangeRequestRequest,
-    CloseIssueRequest, CombinedCommitStatus, CommentOnChangeRequestRequest, CommentOnIssueRequest,
-    CreateIssueRequest, ForgeCredential, GetChangeRequestChecksRequest,
-    GetChangeRequestCommentsRequest, GetChangeRequestDiffRequest, GetChangeRequestRequest,
-    GetIssueCommentsRequest, GetIssueRequest, Issue, IssueComment, ListChangeRequestsRequest,
-    ListIssuesRequest, ReadRepositoryFileRequest, ReadRepositoryFileResponse, RebaseBranchRequest,
-    RebaseBranchResponse, RemoveIssueLabelRequest, RepositoryReadService, ScheduleAutoMergeRequest,
-    ServiceError, SubmitChangeRequestReviewRequest, UpdateChangeRequestRequest, UpdateIssueRequest,
+    AddIssueDependencyRequest, AddIssueLabelRequest, AssignIssueRequest, ChangeRequest,
+    ChangeRequestComment, ChangeRequestCommentDetail, ChangeRequestDiff, ChangeRequestReview,
+    CloseChangeRequestRequest, CloseIssueRequest, CombinedCommitStatus,
+    CommentOnChangeRequestRequest, CommentOnIssueRequest, CreateIssueRequest, ForgeCredential,
+    GetChangeRequestChecksRequest, GetChangeRequestCommentsRequest, GetChangeRequestDiffRequest,
+    GetChangeRequestRequest, GetIssueCommentsRequest, GetIssueDependenciesRequest, GetIssueRequest,
+    Issue, IssueComment, IssueDependencies, ListChangeRequestsRequest, ListIssuesRequest,
+    ReadRepositoryFileRequest, ReadRepositoryFileResponse, RebaseBranchRequest,
+    RebaseBranchResponse, RemoveIssueDependencyRequest, RemoveIssueLabelRequest,
+    RepositoryReadService, ScheduleAutoMergeRequest, ServiceError,
+    SubmitChangeRequestReviewRequest, UpdateChangeRequestRequest, UpdateIssueRequest,
     validate_repository_path,
 };
 use forge::ForgeAdapter;
@@ -281,6 +283,30 @@ where
             .map_err(|e| ServiceError::Upstream(e.to_string()))
     }
 
+    async fn get_issue_dependencies(
+        &self,
+        request: GetIssueDependenciesRequest,
+    ) -> Result<IssueDependencies, ServiceError> {
+        self.audit_sink
+            .record(AuditRecord {
+                agent: request.agent,
+                action: "get_issue_dependencies".to_string(),
+                repository: request.repository.clone(),
+                target: request.index.to_string(),
+            })
+            .await
+            .map_err(|e| ServiceError::Audit(e.to_string()))?;
+
+        self.adapter
+            .get_issue_dependencies(
+                &request.repository,
+                request.index,
+                &ForgeCredential { token: None },
+            )
+            .await
+            .map_err(|e| ServiceError::Upstream(e.to_string()))
+    }
+
     async fn list_issues(&self, request: ListIssuesRequest) -> Result<Vec<Issue>, ServiceError> {
         self.audit_sink
             .record(AuditRecord {
@@ -450,6 +476,33 @@ where
     A: ForgeAdapter + 'static,
     S: AuditSink + 'static,
 {
+    async fn add_issue_dependency(
+        &self,
+        request: AddIssueDependencyRequest,
+        _authorized: domain::policy::AuthorizedWrite,
+        credential: &ForgeCredential,
+    ) -> Result<Issue, ServiceError> {
+        self.audit_sink
+            .record(AuditRecord {
+                agent: request.agent,
+                action: "add_issue_dependency".to_string(),
+                repository: request.repository.clone(),
+                target: format!("#{} depends on #{}", request.index, request.dependency),
+            })
+            .await
+            .map_err(|e| ServiceError::Audit(e.to_string()))?;
+
+        self.adapter
+            .add_issue_dependency(
+                &request.repository,
+                request.index,
+                request.dependency,
+                credential,
+            )
+            .await
+            .map_err(|e| ServiceError::Upstream(e.to_string()))
+    }
+
     async fn add_issue_label(
         &self,
         request: AddIssueLabelRequest,
@@ -1028,6 +1081,36 @@ where
         })
     }
 
+    async fn remove_issue_dependency(
+        &self,
+        request: RemoveIssueDependencyRequest,
+        _authorized: domain::policy::AuthorizedWrite,
+        credential: &ForgeCredential,
+    ) -> Result<Issue, ServiceError> {
+        self.audit_sink
+            .record(AuditRecord {
+                agent: request.agent,
+                action: "remove_issue_dependency".to_string(),
+                repository: request.repository.clone(),
+                target: format!(
+                    "#{} no longer depends on #{}",
+                    request.index, request.dependency
+                ),
+            })
+            .await
+            .map_err(|e| ServiceError::Audit(e.to_string()))?;
+
+        self.adapter
+            .remove_issue_dependency(
+                &request.repository,
+                request.index,
+                request.dependency,
+                credential,
+            )
+            .await
+            .map_err(|e| ServiceError::Upstream(e.to_string()))
+    }
+
     async fn remove_issue_label(
         &self,
         request: RemoveIssueLabelRequest,
@@ -1344,6 +1427,15 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ForgeAdapter for FakeForgeAdapter {
+        async fn add_issue_dependency(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            unimplemented!()
+        }
         async fn add_issue_label(
             &self,
             _: &RepositoryRef,
@@ -1430,12 +1522,29 @@ mod tests {
         ) -> Result<Vec<domain::IssueComment>, ForgeError> {
             unimplemented!()
         }
+        async fn get_issue_dependencies(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<domain::IssueDependencies, ForgeError> {
+            unimplemented!()
+        }
         async fn list_issues(
             &self,
             _: &RepositoryRef,
             _: Option<&str>,
             _: &ForgeCredential,
         ) -> Result<Vec<domain::Issue>, ForgeError> {
+            unimplemented!()
+        }
+        async fn remove_issue_dependency(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
             unimplemented!()
         }
         async fn remove_issue_label(
@@ -1602,6 +1711,15 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ForgeAdapter for FailingForgeAdapter {
+        async fn add_issue_dependency(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            unimplemented!()
+        }
         async fn add_issue_label(
             &self,
             _: &RepositoryRef,
@@ -1688,12 +1806,29 @@ mod tests {
         ) -> Result<Vec<domain::IssueComment>, ForgeError> {
             unimplemented!()
         }
+        async fn get_issue_dependencies(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<domain::IssueDependencies, ForgeError> {
+            unimplemented!()
+        }
         async fn list_issues(
             &self,
             _: &RepositoryRef,
             _: Option<&str>,
             _: &ForgeCredential,
         ) -> Result<Vec<domain::Issue>, ForgeError> {
+            unimplemented!()
+        }
+        async fn remove_issue_dependency(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
             unimplemented!()
         }
         async fn remove_issue_label(
@@ -1966,6 +2101,15 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ForgeAdapter for ChecksTestForgeAdapter {
+        async fn add_issue_dependency(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            unimplemented!()
+        }
         async fn add_issue_label(
             &self,
             _: &RepositoryRef,
@@ -2128,6 +2272,14 @@ mod tests {
         ) -> Result<Vec<domain::IssueComment>, ForgeError> {
             unimplemented!()
         }
+        async fn get_issue_dependencies(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<domain::IssueDependencies, ForgeError> {
+            unimplemented!()
+        }
         async fn get_repository_merge_settings(
             &self,
             _: &RepositoryRef,
@@ -2156,6 +2308,15 @@ mod tests {
             _: &str,
             _: Option<&str>,
         ) -> Result<domain::ReadRepositoryFileResponse, ForgeError> {
+            unimplemented!()
+        }
+        async fn remove_issue_dependency(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
             unimplemented!()
         }
         async fn remove_issue_label(
@@ -2282,6 +2443,15 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ForgeAdapter for WriteTestForgeAdapter {
+        async fn add_issue_dependency(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            unimplemented!()
+        }
         async fn add_issue_label(
             &self,
             repository: &RepositoryRef,
@@ -2390,12 +2560,29 @@ mod tests {
         ) -> Result<Vec<domain::IssueComment>, ForgeError> {
             unimplemented!()
         }
+        async fn get_issue_dependencies(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<domain::IssueDependencies, ForgeError> {
+            unimplemented!()
+        }
         async fn list_issues(
             &self,
             _: &RepositoryRef,
             _: Option<&str>,
             _: &ForgeCredential,
         ) -> Result<Vec<domain::Issue>, ForgeError> {
+            unimplemented!()
+        }
+        async fn remove_issue_dependency(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
             unimplemented!()
         }
         async fn remove_issue_label(
@@ -3004,6 +3191,15 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
 
     #[async_trait::async_trait]
     impl ForgeAdapter for CloseTestForgeAdapter {
+        async fn add_issue_dependency(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            unimplemented!()
+        }
         async fn add_issue_label(
             &self,
             _: &RepositoryRef,
@@ -3090,12 +3286,29 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
         ) -> Result<Vec<domain::IssueComment>, ForgeError> {
             unimplemented!()
         }
+        async fn get_issue_dependencies(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<domain::IssueDependencies, ForgeError> {
+            unimplemented!()
+        }
         async fn list_issues(
             &self,
             _: &RepositoryRef,
             _: Option<&str>,
             _: &ForgeCredential,
         ) -> Result<Vec<domain::Issue>, ForgeError> {
+            unimplemented!()
+        }
+        async fn remove_issue_dependency(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
             unimplemented!()
         }
         async fn remove_issue_label(
@@ -3500,6 +3713,15 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
 
     #[async_trait::async_trait]
     impl ForgeAdapter for CredentialCapturingAdapter {
+        async fn add_issue_dependency(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            unimplemented!()
+        }
         async fn add_issue_label(
             &self,
             _: &RepositoryRef,
@@ -3586,12 +3808,29 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
         ) -> Result<Vec<domain::IssueComment>, ForgeError> {
             unimplemented!()
         }
+        async fn get_issue_dependencies(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<domain::IssueDependencies, ForgeError> {
+            unimplemented!()
+        }
         async fn list_issues(
             &self,
             _: &RepositoryRef,
             _: Option<&str>,
             _: &ForgeCredential,
         ) -> Result<Vec<domain::Issue>, ForgeError> {
+            unimplemented!()
+        }
+        async fn remove_issue_dependency(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
             unimplemented!()
         }
         async fn remove_issue_label(
@@ -3833,6 +4072,15 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
 
     #[async_trait::async_trait]
     impl ForgeAdapter for AutoMergeTestForgeAdapter {
+        async fn add_issue_dependency(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            unimplemented!()
+        }
         async fn add_issue_label(
             &self,
             _: &RepositoryRef,
@@ -3923,12 +4171,29 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
         ) -> Result<Vec<domain::IssueComment>, ForgeError> {
             unimplemented!()
         }
+        async fn get_issue_dependencies(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<domain::IssueDependencies, ForgeError> {
+            unimplemented!()
+        }
         async fn list_issues(
             &self,
             _: &RepositoryRef,
             _: Option<&str>,
             _: &ForgeCredential,
         ) -> Result<Vec<domain::Issue>, ForgeError> {
+            unimplemented!()
+        }
+        async fn remove_issue_dependency(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
             unimplemented!()
         }
         async fn remove_issue_label(

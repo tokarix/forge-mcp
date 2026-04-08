@@ -423,6 +423,15 @@ mod tests {
 
     #[async_trait::async_trait]
     impl forge::ForgeAdapter for FakeForgeAdapter {
+        async fn add_issue_dependency(
+            &self,
+            _: &domain::RepositoryRef,
+            _: u64,
+            _: u64,
+            _: &domain::ForgeCredential,
+        ) -> Result<domain::Issue, forge::ForgeError> {
+            unimplemented!()
+        }
         async fn add_issue_label(
             &self,
             _: &domain::RepositoryRef,
@@ -494,12 +503,29 @@ mod tests {
         ) -> Result<Vec<domain::IssueComment>, forge::ForgeError> {
             unimplemented!()
         }
+        async fn get_issue_dependencies(
+            &self,
+            _: &domain::RepositoryRef,
+            _: u64,
+            _: &domain::ForgeCredential,
+        ) -> Result<domain::IssueDependencies, forge::ForgeError> {
+            unimplemented!()
+        }
         async fn list_issues(
             &self,
             _: &domain::RepositoryRef,
             _: Option<&str>,
             _: &domain::ForgeCredential,
         ) -> Result<Vec<domain::Issue>, forge::ForgeError> {
+            unimplemented!()
+        }
+        async fn remove_issue_dependency(
+            &self,
+            _: &domain::RepositoryRef,
+            _: u64,
+            _: u64,
+            _: &domain::ForgeCredential,
+        ) -> Result<domain::Issue, forge::ForgeError> {
             unimplemented!()
         }
         async fn remove_issue_label(
@@ -675,6 +701,12 @@ mod tests {
         ) -> Result<Vec<domain::IssueComment>, ServiceError> {
             todo!()
         }
+        async fn get_issue_dependencies(
+            &self,
+            _: domain::GetIssueDependenciesRequest,
+        ) -> Result<domain::IssueDependencies, ServiceError> {
+            todo!()
+        }
         async fn list_issues(
             &self,
             _: domain::ListIssuesRequest,
@@ -746,6 +778,14 @@ mod tests {
 
     #[async_trait::async_trait]
     impl domain::RepositoryWriteService for FakeWriteService {
+        async fn add_issue_dependency(
+            &self,
+            _: domain::AddIssueDependencyRequest,
+            _: domain::policy::AuthorizedWrite,
+            _: &domain::ForgeCredential,
+        ) -> Result<domain::Issue, domain::ServiceError> {
+            unimplemented!()
+        }
         async fn add_issue_label(
             &self,
             _: domain::AddIssueLabelRequest,
@@ -852,6 +892,14 @@ mod tests {
             unimplemented!()
         }
 
+        async fn remove_issue_dependency(
+            &self,
+            _: domain::RemoveIssueDependencyRequest,
+            _: domain::policy::AuthorizedWrite,
+            _: &domain::ForgeCredential,
+        ) -> Result<domain::Issue, domain::ServiceError> {
+            unimplemented!()
+        }
         async fn remove_issue_label(
             &self,
             _: domain::RemoveIssueLabelRequest,

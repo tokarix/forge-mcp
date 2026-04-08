@@ -24,11 +24,11 @@ use domain::{
 
 use crate::api::AgentEventsQuery;
 use crate::api::{
-    AddIssueLabelBody, CommentBody, CommentOnIssueBody, CommitPatchBody, CommitPatchResult,
-    ContentsPath, ContentsQuery, ContentsResult, CreateIssueBody, ErrorBody, IssueLabelPath,
-    IssuePath, ListIssuesQuery, ListPullsQuery, OpenPullBody, PullPath, RebaseBranchBody,
-    RebaseBranchResult, RebaseOperationBody, RepoPath, ScheduleAutoMergeBody, SubmitReviewBody,
-    UpdateChangeRequestBody, UpdateIssueBody,
+    AddIssueDependencyBody, AddIssueLabelBody, CommentBody, CommentOnIssueBody, CommitPatchBody,
+    CommitPatchResult, ContentsPath, ContentsQuery, ContentsResult, CreateIssueBody, ErrorBody,
+    IssueDependencyPath, IssueLabelPath, IssuePath, ListIssuesQuery, ListPullsQuery, OpenPullBody,
+    PullPath, RebaseBranchBody, RebaseBranchResult, RebaseOperationBody, RepoPath,
+    ScheduleAutoMergeBody, SubmitReviewBody, UpdateChangeRequestBody, UpdateIssueBody,
 };
 use crate::auth::{AgentRegistry, extract_bearer_token};
 use tokio_stream::StreamExt;
@@ -1301,6 +1301,51 @@ pub async fn get_issue_comments(
 }
 
 #[utoipa::path(
+    get,
+    path = "/api/v1/repos/{forge}/{owner}/{repo}/issues/{index}/dependencies",
+    params(
+        ("forge" = String, Path, description = "Forge alias"),
+        ("owner" = String, Path, description = "Repository owner"),
+        ("repo" = String, Path, description = "Repository name"),
+        ("index" = u64, Path, description = "Issue index"),
+    ),
+    responses(
+        (status = 200, description = "Issue dependencies"),
+        (status = 401, description = "Unauthorized", body = ErrorBody),
+    ),
+    security(("bearer" = []))
+)]
+/// GET /api/v1/repos/{forge}/{owner}/{repo}/issues/{index}/dependencies
+pub async fn get_issue_dependencies(
+    State(state): State<AppState>,
+    Path(path): Path<IssuePath>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let forge = resolve_forge(&state.forge_registry, &path.forge)?;
+    let agent = resolve_agent(
+        &headers,
+        &state.agent_registry,
+        &path.forge,
+        &path.owner,
+        &path.repo,
+    )?;
+
+    let result = forge
+        .read_service
+        .get_issue_dependencies(domain::GetIssueDependenciesRequest {
+            agent: agent.identity.clone(),
+            index: path.index,
+            repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
+        })
+        .await
+        .map_err(map_service_error)?;
+
+    Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(
+        serde_json::to_value(&result).expect("serializable"),
+    ))
+}
+
+#[utoipa::path(
     post,
     path = "/api/v1/repos/{forge}/{owner}/{repo}/issues",
     params(
@@ -1522,6 +1567,62 @@ pub async fn update_issue(
 
 #[utoipa::path(
     post,
+    path = "/api/v1/repos/{forge}/{owner}/{repo}/issues/{index}/dependencies",
+    params(
+        ("forge" = String, Path, description = "Forge alias"),
+        ("owner" = String, Path, description = "Repository owner"),
+        ("repo" = String, Path, description = "Repository name"),
+        ("index" = u64, Path, description = "Issue index"),
+    ),
+    request_body = AddIssueDependencyBody,
+    responses(
+        (status = 200, description = "Dependency added"),
+        (status = 401, description = "Unauthorized", body = ErrorBody),
+    ),
+    security(("bearer" = []))
+)]
+/// POST /api/v1/repos/{forge}/{owner}/{repo}/issues/{index}/dependencies
+pub async fn add_issue_dependency(
+    State(state): State<AppState>,
+    Path(path): Path<IssuePath>,
+    headers: HeaderMap,
+    Json(body): Json<AddIssueDependencyBody>,
+) -> impl IntoResponse {
+    let forge = resolve_forge(&state.forge_registry, &path.forge)?;
+    let agent = resolve_agent(
+        &headers,
+        &state.agent_registry,
+        &path.forge,
+        &path.owner,
+        &path.repo,
+    )?;
+    let credential = resolve_credential(agent, &path.forge, forge);
+    let authorized = domain::policy::AuthorizedWrite {
+        policy: agent.policy.clone(),
+    };
+
+    let result = forge
+        .write_service
+        .add_issue_dependency(
+            domain::AddIssueDependencyRequest {
+                agent: agent.identity.clone(),
+                dependency: body.dependency,
+                index: path.index,
+                repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
+            },
+            authorized,
+            &credential,
+        )
+        .await
+        .map_err(map_service_error)?;
+
+    Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(
+        serde_json::to_value(&result).expect("serializable"),
+    ))
+}
+
+#[utoipa::path(
+    post,
     path = "/api/v1/repos/{forge}/{owner}/{repo}/issues/{index}/labels",
     params(
         ("forge" = String, Path, description = "Forge alias"),
@@ -1563,6 +1664,61 @@ pub async fn add_issue_label(
                 agent: agent.identity.clone(),
                 index: path.index,
                 label: body.label,
+                repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
+            },
+            authorized,
+            &credential,
+        )
+        .await
+        .map_err(map_service_error)?;
+
+    Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(
+        serde_json::to_value(&result).expect("serializable"),
+    ))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/v1/repos/{forge}/{owner}/{repo}/issues/{index}/dependencies/{dependency}",
+    params(
+        ("forge" = String, Path, description = "Forge alias"),
+        ("owner" = String, Path, description = "Repository owner"),
+        ("repo" = String, Path, description = "Repository name"),
+        ("index" = u64, Path, description = "Issue index"),
+        ("dependency" = u64, Path, description = "Dependency issue index"),
+    ),
+    responses(
+        (status = 200, description = "Dependency removed"),
+        (status = 401, description = "Unauthorized", body = ErrorBody),
+    ),
+    security(("bearer" = []))
+)]
+/// DELETE /api/v1/repos/{forge}/{owner}/{repo}/issues/{index}/dependencies/{dependency}
+pub async fn remove_issue_dependency(
+    State(state): State<AppState>,
+    Path(path): Path<IssueDependencyPath>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let forge = resolve_forge(&state.forge_registry, &path.forge)?;
+    let agent = resolve_agent(
+        &headers,
+        &state.agent_registry,
+        &path.forge,
+        &path.owner,
+        &path.repo,
+    )?;
+    let credential = resolve_credential(agent, &path.forge, forge);
+    let authorized = domain::policy::AuthorizedWrite {
+        policy: agent.policy.clone(),
+    };
+
+    let result = forge
+        .write_service
+        .remove_issue_dependency(
+            domain::RemoveIssueDependencyRequest {
+                agent: agent.identity.clone(),
+                dependency: path.dependency,
+                index: path.index,
                 repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
             },
             authorized,
@@ -1738,6 +1894,15 @@ mod tests {
 
     #[async_trait::async_trait]
     impl forge::ForgeAdapter for FakeForgeAdapter {
+        async fn add_issue_dependency(
+            &self,
+            _: &domain::RepositoryRef,
+            _: u64,
+            _: u64,
+            _: &domain::ForgeCredential,
+        ) -> Result<domain::Issue, forge::ForgeError> {
+            unimplemented!()
+        }
         async fn add_issue_label(
             &self,
             _: &domain::RepositoryRef,
@@ -1809,12 +1974,29 @@ mod tests {
         ) -> Result<Vec<domain::IssueComment>, forge::ForgeError> {
             unimplemented!()
         }
+        async fn get_issue_dependencies(
+            &self,
+            _: &domain::RepositoryRef,
+            _: u64,
+            _: &domain::ForgeCredential,
+        ) -> Result<domain::IssueDependencies, forge::ForgeError> {
+            unimplemented!()
+        }
         async fn list_issues(
             &self,
             _: &domain::RepositoryRef,
             _: Option<&str>,
             _: &domain::ForgeCredential,
         ) -> Result<Vec<domain::Issue>, forge::ForgeError> {
+            unimplemented!()
+        }
+        async fn remove_issue_dependency(
+            &self,
+            _: &domain::RepositoryRef,
+            _: u64,
+            _: u64,
+            _: &domain::ForgeCredential,
+        ) -> Result<domain::Issue, forge::ForgeError> {
             unimplemented!()
         }
         async fn remove_issue_label(
@@ -1990,6 +2172,12 @@ mod tests {
         ) -> Result<Vec<domain::IssueComment>, ServiceError> {
             todo!()
         }
+        async fn get_issue_dependencies(
+            &self,
+            _: domain::GetIssueDependenciesRequest,
+        ) -> Result<domain::IssueDependencies, ServiceError> {
+            todo!()
+        }
         async fn list_issues(
             &self,
             _: domain::ListIssuesRequest,
@@ -2080,6 +2268,14 @@ mod tests {
 
     #[async_trait::async_trait]
     impl domain::RepositoryWriteService for FakeWriteService {
+        async fn add_issue_dependency(
+            &self,
+            _: domain::AddIssueDependencyRequest,
+            _: domain::policy::AuthorizedWrite,
+            _: &domain::ForgeCredential,
+        ) -> Result<domain::Issue, ServiceError> {
+            todo!()
+        }
         async fn add_issue_label(
             &self,
             request: domain::AddIssueLabelRequest,
@@ -2218,6 +2414,14 @@ mod tests {
             unimplemented!()
         }
 
+        async fn remove_issue_dependency(
+            &self,
+            _: domain::RemoveIssueDependencyRequest,
+            _: domain::policy::AuthorizedWrite,
+            _: &domain::ForgeCredential,
+        ) -> Result<domain::Issue, ServiceError> {
+            todo!()
+        }
         async fn remove_issue_label(
             &self,
             request: domain::RemoveIssueLabelRequest,

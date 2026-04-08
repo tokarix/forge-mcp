@@ -42,6 +42,8 @@ pub enum ForgeError {
     },
     #[error("unexpected upstream status {status}: {body}")]
     UnexpectedStatus { status: StatusCode, body: String },
+    #[error("operation not supported: {0}")]
+    Unsupported(String),
     #[error("invalid response payload: {0}")]
     InvalidPayload(String),
 }
@@ -58,6 +60,15 @@ pub enum ForgeWebhookError {
 
 #[async_trait]
 pub trait ForgeAdapter: Send + Sync {
+    /// Adds a dependency on another issue.
+    async fn add_issue_dependency(
+        &self,
+        repository: &RepositoryRef,
+        index: u64,
+        dependency: u64,
+        credential: &ForgeCredential,
+    ) -> Result<domain::Issue, ForgeError>;
+
     /// Adds a label to an issue, creating the label on the repo if it does
     /// not already exist.
     async fn add_issue_label(
@@ -216,6 +227,14 @@ pub trait ForgeAdapter: Send + Sync {
         credential: &ForgeCredential,
     ) -> Result<Vec<domain::IssueComment>, ForgeError>;
 
+    /// Gets the dependency relationships for an issue.
+    async fn get_issue_dependencies(
+        &self,
+        repository: &RepositoryRef,
+        index: u64,
+        credential: &ForgeCredential,
+    ) -> Result<domain::IssueDependencies, ForgeError>;
+
     /// Lists change requests for a repository.
     async fn list_change_requests(
         &self,
@@ -242,6 +261,15 @@ pub trait ForgeAdapter: Send + Sync {
         delete_branch_after_merge: Option<bool>,
         credential: &ForgeCredential,
     ) -> Result<(), ForgeError>;
+
+    /// Removes a dependency relationship from an issue.
+    async fn remove_issue_dependency(
+        &self,
+        repository: &RepositoryRef,
+        index: u64,
+        dependency: u64,
+        credential: &ForgeCredential,
+    ) -> Result<domain::Issue, ForgeError>;
 
     /// Removes a label from an issue.
     async fn remove_issue_label(
@@ -400,6 +428,30 @@ impl ForgejoAdapter {
             "unexpected upstream status",
         );
         Err(ForgeError::UnexpectedStatus { status, body })
+    }
+
+    /// Fetches the raw Forgejo issue response (including internal `id`).
+    async fn fetch_issue_raw(
+        &self,
+        repository: &RepositoryRef,
+        index: u64,
+        credential: &ForgeCredential,
+    ) -> Result<ForgejoIssueResponse, ForgeError> {
+        let url = format!(
+            "{}/api/v1/repos/{}/{}/issues/{index}",
+            self.config.base_url.trim_end_matches('/'),
+            repository.owner,
+            repository.name,
+        );
+
+        let effective_token = credential.token.as_deref().or(self.config.token.as_deref());
+        let mut request = self.client.get(&url);
+        if let Some(token) = effective_token {
+            request = request.bearer_auth(token);
+        }
+
+        let response = Self::check_response(request.send().await?).await?;
+        Ok(response.json().await?)
     }
 
     async fn get_repository_merge_settings_response(
@@ -610,6 +662,8 @@ struct ForgejoIssueResponse {
     assignees: Option<Vec<ForgejoCommentUser>>,
     body: Option<String>,
     html_url: String,
+    /// Forgejo internal database ID (not the visible issue number).
+    id: u64,
     labels: Option<Vec<ForgejoLabelResponse>>,
     number: u64,
     state: String,
@@ -818,6 +872,40 @@ struct ForgejoWebhookReview {
 
 #[async_trait]
 impl ForgeAdapter for ForgejoAdapter {
+    async fn add_issue_dependency(
+        &self,
+        repository: &RepositoryRef,
+        index: u64,
+        dependency: u64,
+        credential: &ForgeCredential,
+    ) -> Result<domain::Issue, ForgeError> {
+        // Forgejo's dependency API expects the internal database ID, not the
+        // visible issue number.  Fetch the dependency issue first.
+        let dep_issue = self
+            .fetch_issue_raw(repository, dependency, credential)
+            .await?;
+
+        let url = format!(
+            "{}/api/v1/repos/{}/{}/issues/{index}/dependencies",
+            self.config.base_url.trim_end_matches('/'),
+            repository.owner,
+            repository.name,
+        );
+
+        let effective_token = credential.token.as_deref().or(self.config.token.as_deref());
+        let mut request = self
+            .client
+            .post(&url)
+            .json(&serde_json::json!({"dependsOn": dep_issue.id}));
+        if let Some(token) = effective_token {
+            request = request.bearer_auth(token);
+        }
+
+        Self::check_response(request.send().await?).await?;
+
+        self.get_issue(repository, index, credential).await
+    }
+
     async fn add_issue_label(
         &self,
         repository: &RepositoryRef,
@@ -1323,6 +1411,51 @@ impl ForgeAdapter for ForgejoAdapter {
             .collect())
     }
 
+    async fn get_issue_dependencies(
+        &self,
+        repository: &RepositoryRef,
+        index: u64,
+        credential: &ForgeCredential,
+    ) -> Result<domain::IssueDependencies, ForgeError> {
+        let base = self.config.base_url.trim_end_matches('/');
+        let effective_token = credential.token.as_deref().or(self.config.token.as_deref());
+
+        // Fetch issues that this issue depends on.
+        let deps_url = format!(
+            "{base}/api/v1/repos/{}/{}/issues/{index}/dependencies",
+            repository.owner, repository.name,
+        );
+        let mut request = self.client.get(&deps_url);
+        if let Some(token) = effective_token {
+            request = request.bearer_auth(token);
+        }
+        let response = Self::check_response(request.send().await?).await?;
+        let depends_on: Vec<ForgejoIssueResponse> = response.json().await?;
+
+        // Fetch issues that are blocked by this issue.
+        let blocks_url = format!(
+            "{base}/api/v1/repos/{}/{}/issues/{index}/blocks",
+            repository.owner, repository.name,
+        );
+        let mut request = self.client.get(&blocks_url);
+        if let Some(token) = effective_token {
+            request = request.bearer_auth(token);
+        }
+        let response = Self::check_response(request.send().await?).await?;
+        let blocks: Vec<ForgejoIssueResponse> = response.json().await?;
+
+        Ok(domain::IssueDependencies {
+            blocks: blocks
+                .into_iter()
+                .map(ForgejoIssueResponse::into_issue)
+                .collect(),
+            depends_on: depends_on
+                .into_iter()
+                .map(ForgejoIssueResponse::into_issue)
+                .collect(),
+        })
+    }
+
     async fn get_change_request_diff(
         &self,
         repository: &RepositoryRef,
@@ -1433,6 +1566,40 @@ impl ForgeAdapter for ForgejoAdapter {
             .into_iter()
             .map(ForgejoIssueResponse::into_issue)
             .collect())
+    }
+
+    async fn remove_issue_dependency(
+        &self,
+        repository: &RepositoryRef,
+        index: u64,
+        dependency: u64,
+        credential: &ForgeCredential,
+    ) -> Result<domain::Issue, ForgeError> {
+        // Forgejo's dependency API expects the internal database ID, not the
+        // visible issue number.  Fetch the dependency issue first.
+        let dep_issue = self
+            .fetch_issue_raw(repository, dependency, credential)
+            .await?;
+
+        let url = format!(
+            "{}/api/v1/repos/{}/{}/issues/{index}/dependencies",
+            self.config.base_url.trim_end_matches('/'),
+            repository.owner,
+            repository.name,
+        );
+
+        let effective_token = credential.token.as_deref().or(self.config.token.as_deref());
+        let mut request = self
+            .client
+            .delete(&url)
+            .json(&serde_json::json!({"dependsOn": dep_issue.id}));
+        if let Some(token) = effective_token {
+            request = request.bearer_auth(token);
+        }
+
+        Self::check_response(request.send().await?).await?;
+
+        self.get_issue(repository, index, credential).await
     }
 
     async fn remove_issue_label(
@@ -2989,6 +3156,7 @@ mod tests {
         Mock::given(method("POST"))
             .and(path_regex(r"/api/v1/repos/.+/.+/issues$"))
             .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": 100,
                 "number": 42,
                 "title": "Bug report",
                 "body": "Something is broken",
@@ -3055,6 +3223,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path_regex(r"/api/v1/repos/.+/.+/issues/\d+$"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": 101,
                 "number": 1,
                 "title": "Test issue",
                 "body": "",
@@ -3112,6 +3281,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path_regex(r"/api/v1/repos/.+/.+/issues/\d+$"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": 102,
                 "number": 2,
                 "title": "Test",
                 "body": "",
@@ -3165,6 +3335,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path_regex(r"/api/v1/repos/.+/.+/issues/\d+$"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": 103,
                 "number": 1,
                 "title": "Test",
                 "body": "",

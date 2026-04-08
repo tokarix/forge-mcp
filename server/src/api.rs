@@ -3,6 +3,12 @@
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+/// POST /api/v1/repos/{forge}/{owner}/{repo}/issues/{index}/dependencies
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct AddIssueDependencyBody {
+    pub dependency: u64,
+}
+
 /// POST /api/v1/repos/{forge}/{owner}/{repo}/issues/{index}/labels
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct AddIssueLabelBody {
@@ -135,6 +141,16 @@ pub struct IssueLabelPath {
     pub forge: String,
     pub index: u64,
     pub label: String,
+    pub owner: String,
+    pub repo: String,
+}
+
+/// Path parameters for issue dependency endpoints.
+#[derive(Debug, Deserialize)]
+pub struct IssueDependencyPath {
+    pub dependency: u64,
+    pub forge: String,
+    pub index: u64,
     pub owner: String,
     pub repo: String,
 }
