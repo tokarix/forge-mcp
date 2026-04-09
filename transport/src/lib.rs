@@ -422,6 +422,17 @@ pub struct ListIssuesTool {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct ListRepositoriesTool {
+    /// Forge alias -- use `forge_info` to discover available aliases.
+    pub forge: String,
+    /// Optional owner or organization filter. Required when the agent's
+    /// access is scoped to a specific owner (e.g. `alias/owner/*`).
+    pub owner: Option<String>,
+    /// Optional search query to filter repositories by name.
+    pub query: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct OpenChangeRequestTool {
     /// Base branch for the change request.
     pub base_branch: String,
@@ -1776,6 +1787,26 @@ impl McpShim {
         )?;
         if let Some(state) = &request.state {
             url.query_pairs_mut().append_pair("state", state);
+        }
+        self.gateway_get(url, &gw.token).await
+    }
+
+    /// List repositories on a forge, optionally filtered by owner and/or query.
+    #[tool(
+        name = "list_repositories",
+        description = "List repositories available on a forge instance. Use `owner` to restrict results to a specific organization or user namespace, and `query` to search by name."
+    )]
+    async fn list_repositories(
+        &self,
+        Parameters(request): Parameters<ListRepositoriesTool>,
+    ) -> Result<String, McpError> {
+        let gw = self.resolve_gateway(&request.forge).await?;
+        let mut url = Self::build_url(&gw.url, &["api", "v1", "repos", &request.forge])?;
+        if let Some(owner) = &request.owner {
+            url.query_pairs_mut().append_pair("owner", owner);
+        }
+        if let Some(query) = &request.query {
+            url.query_pairs_mut().append_pair("q", query);
         }
         self.gateway_get(url, &gw.token).await
     }

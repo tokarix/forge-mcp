@@ -84,6 +84,15 @@ pub struct ReadRepositoryFileResponse {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct Repository {
+    pub description: String,
+    pub full_name: String,
+    pub name: String,
+    pub owner: String,
+    pub url: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ChangeRequest {
     pub base_branch: String,
     pub body: String,
@@ -771,6 +780,14 @@ pub struct ListIssuesRequest {
     pub agent: AgentIdentity,
     pub repository: RepositoryRef,
     pub state: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ListRepositoriesRequest {
+    pub agent: AgentIdentity,
+    pub forge_alias: String,
+    pub owner: Option<String>,
+    pub query: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

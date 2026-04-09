@@ -168,6 +168,76 @@ impl GitLabAdapter {
         let label: GitLabLabelResponse = response.json().await?;
         Ok(label.id)
     }
+
+    /// Lists projects belonging to a GitLab group, with pagination.
+    async fn list_gitlab_group_projects(
+        &self,
+        group_id: u64,
+        query: Option<&str>,
+        token: Option<&str>,
+    ) -> Result<Vec<domain::Repository>, crate::ForgeError> {
+        const PAGE_SIZE: usize = 100;
+        let mut all_repos = Vec::new();
+        let mut page: u32 = 1;
+        loop {
+            let mut url = format!(
+                "{}/groups/{group_id}/projects?include_subgroups=true&with_shared=false&per_page={PAGE_SIZE}&page={page}",
+                self.api_base(),
+            );
+            if let Some(q) = query {
+                let _ = write!(url, "&search={}", urlencoding::encode(q));
+            }
+            let request = Self::authenticate(self.client.get(&url), token);
+            let response = Self::check_response(request.send().await?).await?;
+            let projects: Vec<GitLabProjectListEntry> = response.json().await?;
+            let count = projects.len();
+            all_repos.extend(
+                projects
+                    .into_iter()
+                    .map(GitLabProjectListEntry::into_repository),
+            );
+            if count < PAGE_SIZE {
+                break;
+            }
+            page += 1;
+        }
+        Ok(all_repos)
+    }
+
+    /// Lists projects belonging to a GitLab user, with pagination.
+    async fn list_gitlab_user_projects(
+        &self,
+        encoded_user: &str,
+        query: Option<&str>,
+        token: Option<&str>,
+    ) -> Result<Vec<domain::Repository>, crate::ForgeError> {
+        const PAGE_SIZE: usize = 100;
+        let mut all_repos = Vec::new();
+        let mut page: u32 = 1;
+        loop {
+            let mut url = format!(
+                "{}/users/{encoded_user}/projects?per_page={PAGE_SIZE}&page={page}",
+                self.api_base(),
+            );
+            if let Some(q) = query {
+                let _ = write!(url, "&search={}", urlencoding::encode(q));
+            }
+            let request = Self::authenticate(self.client.get(&url), token);
+            let response = Self::check_response(request.send().await?).await?;
+            let projects: Vec<GitLabProjectListEntry> = response.json().await?;
+            let count = projects.len();
+            all_repos.extend(
+                projects
+                    .into_iter()
+                    .map(GitLabProjectListEntry::into_repository),
+            );
+            if count < PAGE_SIZE {
+                break;
+            }
+            page += 1;
+        }
+        Ok(all_repos)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -330,6 +400,39 @@ impl GitLabProjectResponse {
             allowed_styles: self.allowed_merge_styles(),
             default_delete_branch_after_merge: self.remove_source_branch_after_merge,
             default_merge_style: self.default_merge_style(),
+        }
+    }
+}
+
+/// A project entry from GitLab's project listing endpoints.
+#[derive(Debug, Deserialize)]
+struct GitLabProjectListEntry {
+    description: Option<String>,
+    name: String,
+    namespace: Option<GitLabNamespace>,
+    path_with_namespace: String,
+    web_url: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitLabNamespace {
+    full_path: String,
+}
+
+/// GitLab group lookup response.
+#[derive(Debug, Deserialize)]
+struct GitLabGroupResponse {
+    id: u64,
+}
+
+impl GitLabProjectListEntry {
+    fn into_repository(self) -> domain::Repository {
+        domain::Repository {
+            description: self.description.unwrap_or_default(),
+            full_name: self.path_with_namespace.clone(),
+            name: self.name,
+            owner: self.namespace.map(|n| n.full_path).unwrap_or_default(),
+            url: self.web_url,
         }
     }
 }
@@ -940,6 +1043,71 @@ impl crate::ForgeAdapter for GitLabAdapter {
         let response = Self::check_response(request.send().await?).await?;
         let issues: Vec<GitLabIssue> = response.json().await?;
         Ok(issues.into_iter().map(GitLabIssue::into_issue).collect())
+    }
+
+    async fn list_repositories(
+        &self,
+        owner: Option<&str>,
+        query: Option<&str>,
+        credential: &ForgeCredential,
+    ) -> Result<Vec<domain::Repository>, ForgeError> {
+        const PAGE_SIZE: usize = 100;
+        let token = self.effective_token(credential);
+
+        if let Some(owner_name) = owner {
+            // Try group first, fall back to user only on 404.
+            let encoded = urlencoding::encode(owner_name);
+            let group_url = format!("{}/groups/{encoded}", self.api_base());
+            let group_req = Self::authenticate(self.client.get(&group_url), token);
+            let group_resp = group_req.send().await?;
+
+            let status = group_resp.status();
+            if status.is_success() {
+                let group: GitLabGroupResponse = group_resp.json().await?;
+                return self
+                    .list_gitlab_group_projects(group.id, query, token)
+                    .await;
+            } else if status == StatusCode::NOT_FOUND {
+                // Not a group — try user projects.
+                let encoded_user = urlencoding::encode(owner_name);
+                return self
+                    .list_gitlab_user_projects(&encoded_user, query, token)
+                    .await;
+            }
+            // Surface permission errors and server failures instead of
+            // silently falling back to the user endpoint.
+            Self::check_response(group_resp).await?;
+            return Err(ForgeError::InvalidPayload(format!(
+                "unexpected success response for group '{owner_name}'"
+            )));
+        }
+
+        // No owner filter — list all accessible projects.
+        let mut all_repos = Vec::new();
+        let mut page: u32 = 1;
+        loop {
+            let mut url = format!(
+                "{}/projects?membership=true&per_page={PAGE_SIZE}&page={page}",
+                self.api_base(),
+            );
+            if let Some(q) = query {
+                let _ = write!(url, "&search={}", urlencoding::encode(q));
+            }
+            let request = Self::authenticate(self.client.get(&url), token);
+            let response = Self::check_response(request.send().await?).await?;
+            let projects: Vec<GitLabProjectListEntry> = response.json().await?;
+            let count = projects.len();
+            all_repos.extend(
+                projects
+                    .into_iter()
+                    .map(GitLabProjectListEntry::into_repository),
+            );
+            if count < PAGE_SIZE {
+                break;
+            }
+            page += 1;
+        }
+        Ok(all_repos)
     }
 
     async fn remove_issue_dependency(

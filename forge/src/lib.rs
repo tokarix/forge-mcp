@@ -252,6 +252,15 @@ pub trait ForgeAdapter: Send + Sync {
         credential: &ForgeCredential,
     ) -> Result<Vec<domain::Issue>, ForgeError>;
 
+    /// Lists repositories on the forge, optionally filtered by owner and/or
+    /// search query.
+    async fn list_repositories(
+        &self,
+        owner: Option<&str>,
+        query: Option<&str>,
+        credential: &ForgeCredential,
+    ) -> Result<Vec<domain::Repository>, ForgeError>;
+
     /// Schedules a pull request for automatic merge when all branch
     /// protection requirements are met.
     async fn schedule_auto_merge(
@@ -760,6 +769,46 @@ impl ForgejoRepoResponse {
             allowed_styles: self.allowed_merge_styles(),
             default_delete_branch_after_merge: self.default_delete_branch_after_merge,
             default_merge_style: self.normalized_default_merge_style(),
+        }
+    }
+}
+
+/// Forgejo repo search result wrapper from `GET /api/v1/repos/search`.
+#[derive(Debug, Deserialize)]
+struct ForgejoRepoSearchResponse {
+    data: Vec<ForgejoRepoSearchEntry>,
+    ok: bool,
+}
+
+/// A single repository in a Forgejo search result.
+#[derive(Debug, Deserialize)]
+struct ForgejoRepoSearchEntry {
+    description: Option<String>,
+    full_name: String,
+    html_url: String,
+    name: String,
+    owner: Option<ForgejoRepoSearchOwner>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ForgejoRepoSearchOwner {
+    login: String,
+}
+
+/// Forgejo user lookup response from `GET /api/v1/users/{username}`.
+#[derive(Debug, Deserialize)]
+struct ForgejoUserResponse {
+    id: u64,
+}
+
+impl ForgejoRepoSearchEntry {
+    fn into_repository(self) -> domain::Repository {
+        domain::Repository {
+            description: self.description.unwrap_or_default(),
+            full_name: self.full_name,
+            name: self.name,
+            owner: self.owner.map(|o| o.login).unwrap_or_default(),
+            url: self.html_url,
         }
     }
 }
@@ -1570,6 +1619,97 @@ impl ForgeAdapter for ForgejoAdapter {
             .into_iter()
             .map(ForgejoIssueResponse::into_issue)
             .collect())
+    }
+
+    async fn list_repositories(
+        &self,
+        owner: Option<&str>,
+        query: Option<&str>,
+        credential: &ForgeCredential,
+    ) -> Result<Vec<domain::Repository>, ForgeError> {
+        const PAGE_SIZE: usize = 50;
+
+        // If owner is specified, resolve to UID for server-side filtering.
+        // Try /users/{owner} first, then fall back to /orgs/{owner} so that
+        // organization-owned namespaces are also supported.
+        let uid = if let Some(owner_name) = owner {
+            let base = self.config.base_url.trim_end_matches('/');
+            let effective_token = credential.token.as_deref().or(self.config.token.as_deref());
+
+            // Try user endpoint first.
+            let user_url = format!("{base}/api/v1/users/{owner_name}");
+            let mut req = self.client.get(&user_url);
+            if let Some(token) = effective_token {
+                req = req.bearer_auth(token);
+            }
+            let resp = req.send().await?;
+
+            if resp.status() == StatusCode::NOT_FOUND {
+                // Not a user — try organization endpoint.
+                let org_url = format!("{base}/api/v1/orgs/{owner_name}");
+                let mut req = self.client.get(&org_url);
+                if let Some(token) = effective_token {
+                    req = req.bearer_auth(token);
+                }
+                let resp = req.send().await?;
+                if resp.status() == StatusCode::NOT_FOUND {
+                    return Ok(Vec::new());
+                }
+                let resp = Self::check_response(resp).await?;
+                let org: ForgejoUserResponse = resp.json().await?;
+                Some(org.id)
+            } else {
+                let resp = Self::check_response(resp).await?;
+                let user: ForgejoUserResponse = resp.json().await?;
+                Some(user.id)
+            }
+        } else {
+            None
+        };
+
+        let mut all_repos = Vec::new();
+        let mut page: u32 = 1;
+        loop {
+            let mut url = format!(
+                "{}/api/v1/repos/search?limit={PAGE_SIZE}&page={page}",
+                self.config.base_url.trim_end_matches('/'),
+            );
+            if let Some(uid) = uid {
+                let _ = write!(url, "&uid={uid}&exclusive=true");
+            }
+            if let Some(q) = query {
+                let _ = write!(url, "&q={}", urlencoding::encode(q));
+            }
+
+            let effective_token = credential.token.as_deref().or(self.config.token.as_deref());
+            let mut req = self.client.get(&url);
+            if let Some(token) = effective_token {
+                req = req.bearer_auth(token);
+            }
+
+            let resp = Self::check_response(req.send().await?).await?;
+            let search: ForgejoRepoSearchResponse = resp.json().await?;
+            if !search.ok {
+                return Err(ForgeError::InvalidPayload(
+                    "Forgejo repo search returned ok=false".to_string(),
+                ));
+            }
+
+            let count = search.data.len();
+            all_repos.extend(
+                search
+                    .data
+                    .into_iter()
+                    .map(ForgejoRepoSearchEntry::into_repository),
+            );
+
+            if count < PAGE_SIZE {
+                break;
+            }
+            page += 1;
+        }
+
+        Ok(all_repos)
     }
 
     async fn remove_issue_dependency(

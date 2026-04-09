@@ -180,6 +180,19 @@ pub struct ListIssuesQuery {
     pub state: Option<String>,
 }
 
+/// Path parameters for forge-scoped endpoints (no owner/repo).
+#[derive(Debug, Deserialize)]
+pub struct ForgePath {
+    pub forge: String,
+}
+
+/// Query parameters for listing repositories.
+#[derive(Debug, Deserialize)]
+pub struct ListRepositoriesQuery {
+    pub owner: Option<String>,
+    pub q: Option<String>,
+}
+
 /// Request body for commenting on an issue.
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct CommentOnIssueBody {

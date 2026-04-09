@@ -1535,6 +1535,14 @@ mod tests {
         ) -> Result<Vec<domain::Issue>, ForgeError> {
             unimplemented!()
         }
+        async fn list_repositories(
+            &self,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: &ForgeCredential,
+        ) -> Result<Vec<domain::Repository>, ForgeError> {
+            unimplemented!()
+        }
         async fn remove_issue_dependency(
             &self,
             _: &RepositoryRef,
@@ -1820,6 +1828,14 @@ mod tests {
             _: Option<&str>,
             _: &ForgeCredential,
         ) -> Result<Vec<domain::Issue>, ForgeError> {
+            unimplemented!()
+        }
+        async fn list_repositories(
+            &self,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: &ForgeCredential,
+        ) -> Result<Vec<domain::Repository>, ForgeError> {
             unimplemented!()
         }
         async fn remove_issue_dependency(
@@ -2310,6 +2326,14 @@ mod tests {
         ) -> Result<Vec<domain::Issue>, ForgeError> {
             unimplemented!()
         }
+        async fn list_repositories(
+            &self,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: &ForgeCredential,
+        ) -> Result<Vec<domain::Repository>, ForgeError> {
+            unimplemented!()
+        }
         async fn read_repository_file(
             &self,
             _: &RepositoryRef,
@@ -2592,6 +2616,14 @@ mod tests {
             _: Option<&str>,
             _: &ForgeCredential,
         ) -> Result<Vec<domain::Issue>, ForgeError> {
+            unimplemented!()
+        }
+        async fn list_repositories(
+            &self,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: &ForgeCredential,
+        ) -> Result<Vec<domain::Repository>, ForgeError> {
             unimplemented!()
         }
         async fn remove_issue_dependency(
@@ -3341,6 +3373,14 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
         ) -> Result<Vec<domain::Issue>, ForgeError> {
             unimplemented!()
         }
+        async fn list_repositories(
+            &self,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: &ForgeCredential,
+        ) -> Result<Vec<domain::Repository>, ForgeError> {
+            unimplemented!()
+        }
         async fn remove_issue_dependency(
             &self,
             _: &RepositoryRef,
@@ -3879,6 +3919,14 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
         ) -> Result<Vec<domain::Issue>, ForgeError> {
             unimplemented!()
         }
+        async fn list_repositories(
+            &self,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: &ForgeCredential,
+        ) -> Result<Vec<domain::Repository>, ForgeError> {
+            unimplemented!()
+        }
         async fn remove_issue_dependency(
             &self,
             _: &RepositoryRef,
@@ -4247,6 +4295,14 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             _: Option<&str>,
             _: &ForgeCredential,
         ) -> Result<Vec<domain::Issue>, ForgeError> {
+            unimplemented!()
+        }
+        async fn list_repositories(
+            &self,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: &ForgeCredential,
+        ) -> Result<Vec<domain::Repository>, ForgeError> {
             unimplemented!()
         }
         async fn remove_issue_dependency(

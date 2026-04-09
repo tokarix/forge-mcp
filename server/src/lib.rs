@@ -35,6 +35,7 @@ use utoipa_scalar::{Scalar, Servable};
         handlers::get_pull_diff,
         handlers::list_issues,
         handlers::list_pulls,
+        handlers::list_repositories,
         handlers::post_patches,
         handlers::post_pulls,
         handlers::post_rebase,
@@ -98,6 +99,7 @@ pub fn build_router(state: AppState, enable_docs: bool) -> Router {
             "/api/v1/forges/{forge}/webhook",
             post(handlers::post_webhook),
         )
+        .route("/api/v1/repos/{forge}", get(handlers::list_repositories))
         .route(
             "/api/v1/repos/{forge}/{owner}/{repo}/contents/{*path}",
             get(handlers::get_contents),

@@ -523,6 +523,14 @@ mod tests {
         ) -> Result<Vec<domain::Issue>, forge::ForgeError> {
             unimplemented!()
         }
+        async fn list_repositories(
+            &self,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: &domain::ForgeCredential,
+        ) -> Result<Vec<domain::Repository>, forge::ForgeError> {
+            unimplemented!()
+        }
         async fn remove_issue_dependency(
             &self,
             _: &domain::RepositoryRef,

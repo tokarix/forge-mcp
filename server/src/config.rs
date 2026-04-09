@@ -134,6 +134,44 @@ impl AgentPolicyConfig {
         AllowedForges::Specific(aliases)
     }
 
+    /// Returns whether the agent can list repositories on the given forge,
+    /// optionally restricted to an owner filter.
+    ///
+    /// Authorization rules:
+    /// - `"*"` or `"alias/*"` — allowed with any (or no) owner filter
+    /// - `"alias/owner/*"` — allowed only when `owner_filter` matches the
+    ///   pattern's namespace
+    /// - Exact repo patterns — never sufficient for listing
+    #[must_use]
+    pub fn can_list_repositories(&self, forge_alias: &str, owner_filter: Option<&str>) -> bool {
+        self.allowed_repos.iter().any(|pattern| {
+            if pattern == "*" {
+                return true;
+            }
+            let Some((alias, rest)) = pattern.split_once('/') else {
+                return false;
+            };
+            if alias != forge_alias {
+                return false;
+            }
+            if rest == "*" {
+                return true;
+            }
+            let Some((namespace, repo_pattern)) = rest.rsplit_once('/') else {
+                return false;
+            };
+            // Only wildcard repo patterns grant listing rights.
+            if repo_pattern != "*" {
+                return false;
+            }
+            // Namespace wildcard: owner filter must match the namespace.
+            match owner_filter {
+                Some(owner) => namespace == owner,
+                None => false,
+            }
+        })
+    }
+
     /// Returns whether the agent is allowed to access the given repo.
     ///
     /// Patterns use `forge/namespace/repo` paths with wildcard support:
@@ -810,6 +848,79 @@ allowed_repos = ["gl/group/subgroup/repo", "gl/group/subgroup/*"]
 "#;
         let config = parse_config(toml_str).expect("should parse");
         assert!(validate_config(&config).is_ok());
+    }
+
+    #[test]
+    fn can_list_repos_global_wildcard() {
+        let policy = AgentPolicyConfig {
+            allowed_repos: vec!["*".to_string()],
+            branch_prefix: None,
+            protected_paths: vec![],
+        };
+        assert!(policy.can_list_repositories("any-forge", None));
+        assert!(policy.can_list_repositories("any-forge", Some("any-owner")));
+    }
+
+    #[test]
+    fn can_list_repos_forge_wildcard() {
+        let policy = AgentPolicyConfig {
+            allowed_repos: vec!["internal/*".to_string()],
+            branch_prefix: None,
+            protected_paths: vec![],
+        };
+        assert!(policy.can_list_repositories("internal", None));
+        assert!(policy.can_list_repositories("internal", Some("any-owner")));
+        assert!(!policy.can_list_repositories("other", None));
+    }
+
+    #[test]
+    fn can_list_repos_owner_wildcard_requires_owner_filter() {
+        let policy = AgentPolicyConfig {
+            allowed_repos: vec!["internal/org/*".to_string()],
+            branch_prefix: None,
+            protected_paths: vec![],
+        };
+        // Must provide matching owner filter.
+        assert!(policy.can_list_repositories("internal", Some("org")));
+        // Without owner filter, denied.
+        assert!(!policy.can_list_repositories("internal", None));
+        // Wrong owner, denied.
+        assert!(!policy.can_list_repositories("internal", Some("other-org")));
+        // Wrong forge, denied.
+        assert!(!policy.can_list_repositories("other", Some("org")));
+    }
+
+    #[test]
+    fn can_list_repos_exact_match_denied() {
+        let policy = AgentPolicyConfig {
+            allowed_repos: vec!["internal/org/repo".to_string()],
+            branch_prefix: None,
+            protected_paths: vec![],
+        };
+        assert!(!policy.can_list_repositories("internal", None));
+        assert!(!policy.can_list_repositories("internal", Some("org")));
+    }
+
+    #[test]
+    fn can_list_repos_empty_denied() {
+        let policy = AgentPolicyConfig {
+            allowed_repos: vec![],
+            branch_prefix: None,
+            protected_paths: vec![],
+        };
+        assert!(!policy.can_list_repositories("any", None));
+    }
+
+    #[test]
+    fn can_list_repos_nested_namespace_wildcard() {
+        let policy = AgentPolicyConfig {
+            allowed_repos: vec!["gl/group/subgroup/*".to_string()],
+            branch_prefix: None,
+            protected_paths: vec![],
+        };
+        assert!(policy.can_list_repositories("gl", Some("group/subgroup")));
+        assert!(!policy.can_list_repositories("gl", Some("group")));
+        assert!(!policy.can_list_repositories("gl", None));
     }
 
     #[test]

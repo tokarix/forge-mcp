@@ -26,9 +26,10 @@ use crate::api::AgentEventsQuery;
 use crate::api::{
     AddIssueDependencyBody, AddIssueLabelBody, CommentBody, CommentOnIssueBody, CommitPatchBody,
     CommitPatchResult, ContentsPath, ContentsQuery, ContentsResult, CreateIssueBody, ErrorBody,
-    IssueDependencyPath, IssueLabelPath, IssuePath, ListIssuesQuery, ListPullsQuery, OpenPullBody,
-    PullPath, RebaseBranchBody, RebaseBranchResult, RebaseOperationBody, RepoPath,
-    ScheduleAutoMergeBody, SubmitReviewBody, UpdateChangeRequestBody, UpdateIssueBody,
+    ForgePath, IssueDependencyPath, IssueLabelPath, IssuePath, ListIssuesQuery, ListPullsQuery,
+    ListRepositoriesQuery, OpenPullBody, PullPath, RebaseBranchBody, RebaseBranchResult,
+    RebaseOperationBody, RepoPath, ScheduleAutoMergeBody, SubmitReviewBody,
+    UpdateChangeRequestBody, UpdateIssueBody,
 };
 use crate::auth::{AgentRegistry, extract_bearer_token};
 use tokio_stream::StreamExt;
@@ -1190,6 +1191,82 @@ pub async fn submit_pull_review(
 
 #[utoipa::path(
     get,
+    path = "/api/v1/repos/{forge}",
+    params(
+        ("forge" = String, Path, description = "Forge alias"),
+        ("owner" = Option<String>, Query, description = "Optional owner/namespace filter"),
+        ("q" = Option<String>, Query, description = "Optional search query"),
+    ),
+    responses(
+        (status = 200, description = "List of repositories"),
+        (status = 401, description = "Unauthorized", body = ErrorBody),
+        (status = 403, description = "Forbidden", body = ErrorBody),
+    ),
+    security(("bearer" = []))
+)]
+/// GET /api/v1/repos/{forge}
+pub async fn list_repositories(
+    State(state): State<AppState>,
+    Path(path): Path<ForgePath>,
+    Query(query): Query<ListRepositoriesQuery>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let forge = resolve_forge(&state.forge_registry, &path.forge)?;
+    let agent = resolve_authenticated_agent(&headers, &state.agent_registry)?;
+
+    // Check listing authorization (supports owner-scoped wildcards).
+    if !agent
+        .policy_config
+        .can_list_repositories(&path.forge, query.owner.as_deref())
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorBody {
+                error: format!(
+                    "agent '{}' is not authorized to list repositories on forge '{}'{}",
+                    agent.identity.agent_id,
+                    path.forge,
+                    query
+                        .owner
+                        .as_deref()
+                        .map(|o| format!(" with owner filter '{o}'"))
+                        .unwrap_or_default(),
+                ),
+            }),
+        ));
+    }
+
+    let credential = resolve_credential(agent, &path.forge, forge);
+
+    // Audit
+    state
+        .audit_sink
+        .record(audit::AuditRecord {
+            action: "list_repositories".to_string(),
+            agent: agent.identity.clone(),
+            repository: RepositoryRef {
+                alias: path.forge.clone(),
+                forge: forge.forge_kind.clone(),
+                host: forge.base_url.clone(),
+                name: String::new(),
+                owner: query.owner.clone().unwrap_or_default(),
+            },
+            target: query.owner.as_deref().unwrap_or("*").to_string(),
+        })
+        .await
+        .map_err(|e| map_service_error(ServiceError::Audit(e.to_string())))?;
+
+    let result = forge
+        .adapter
+        .list_repositories(query.owner.as_deref(), query.q.as_deref(), &credential)
+        .await
+        .map_err(|e| map_service_error(ServiceError::Upstream(e.to_string())))?;
+
+    Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(to_json_value(&result)?))
+}
+
+#[utoipa::path(
+    get,
     path = "/api/v1/repos/{forge}/{owner}/{repo}/issues",
     params(
         ("forge" = String, Path, description = "Forge alias"),
@@ -2010,6 +2087,14 @@ mod tests {
             _: Option<&str>,
             _: &domain::ForgeCredential,
         ) -> Result<Vec<domain::Issue>, forge::ForgeError> {
+            unimplemented!()
+        }
+        async fn list_repositories(
+            &self,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: &domain::ForgeCredential,
+        ) -> Result<Vec<domain::Repository>, forge::ForgeError> {
             unimplemented!()
         }
         async fn remove_issue_dependency(
