@@ -934,6 +934,7 @@ pub trait RepositoryReadService: Send + Sync {
     async fn get_change_request_diff(
         &self,
         request: GetChangeRequestDiffRequest,
+        credential: &ForgeCredential,
     ) -> Result<ChangeRequestDiff, ServiceError>;
 
     /// Retrieves a single change request by index.
@@ -969,6 +970,7 @@ pub trait RepositoryReadService: Send + Sync {
     async fn list_change_requests(
         &self,
         request: ListChangeRequestsRequest,
+        credential: &ForgeCredential,
     ) -> Result<Vec<ChangeRequest>, ServiceError>;
 
     /// Retrieves a single issue by index.
@@ -1028,6 +1030,7 @@ pub trait RepositoryReadService: Send + Sync {
     async fn read_repository_file(
         &self,
         request: ReadRepositoryFileRequest,
+        credential: &ForgeCredential,
     ) -> Result<ReadRepositoryFileResponse, ServiceError>;
 }
 

@@ -385,14 +385,19 @@ pub async fn get_contents(
         &path.repo,
     )?;
 
+    let credential = resolve_credential(agent, &path.forge, forge);
+
     let result = forge
         .read_service
-        .read_repository_file(ReadRepositoryFileRequest {
-            agent: agent.identity.clone(),
-            git_ref: query.git_ref.clone(),
-            path: path.path.clone(),
-            repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
-        })
+        .read_repository_file(
+            ReadRepositoryFileRequest {
+                agent: agent.identity.clone(),
+                git_ref: query.git_ref.clone(),
+                path: path.path.clone(),
+                repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
+            },
+            &credential,
+        )
         .await
         .map_err(map_service_error)?;
 
@@ -433,13 +438,18 @@ pub async fn get_pull_diff(
         &path.repo,
     )?;
 
+    let credential = resolve_credential(agent, &path.forge, forge);
+
     let result = forge
         .read_service
-        .get_change_request_diff(domain::GetChangeRequestDiffRequest {
-            agent: agent.identity.clone(),
-            index: path.index,
-            repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
-        })
+        .get_change_request_diff(
+            domain::GetChangeRequestDiffRequest {
+                agent: agent.identity.clone(),
+                index: path.index,
+                repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
+            },
+            &credential,
+        )
         .await
         .map_err(map_service_error)?;
 
@@ -573,6 +583,8 @@ pub async fn list_pulls(
         &path.repo,
     )?;
 
+    let credential = resolve_credential(agent, &path.forge, forge);
+
     let state_filter = query.state.as_deref().map(|s| match s {
         "closed" => domain::ChangeRequestState::Closed,
         "merged" => domain::ChangeRequestState::Merged,
@@ -581,11 +593,14 @@ pub async fn list_pulls(
 
     let result = forge
         .read_service
-        .list_change_requests(ListChangeRequestsRequest {
-            agent: agent.identity.clone(),
-            repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
-            state: state_filter,
-        })
+        .list_change_requests(
+            ListChangeRequestsRequest {
+                agent: agent.identity.clone(),
+                repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
+                state: state_filter,
+            },
+            &credential,
+        )
         .await
         .map_err(map_service_error)?;
 
@@ -2087,6 +2102,7 @@ mod tests {
             &self,
             _: &domain::RepositoryRef,
             _: u64,
+            _: &domain::ForgeCredential,
         ) -> Result<String, forge::ForgeError> {
             unimplemented!()
         }
@@ -2108,6 +2124,7 @@ mod tests {
             &self,
             _: &domain::RepositoryRef,
             _: Option<&domain::ChangeRequestState>,
+            _: &domain::ForgeCredential,
         ) -> Result<Vec<domain::ChangeRequest>, forge::ForgeError> {
             unimplemented!()
         }
@@ -2116,6 +2133,7 @@ mod tests {
             _: &domain::RepositoryRef,
             _: &str,
             _: Option<&str>,
+            _: &domain::ForgeCredential,
         ) -> Result<domain::ReadRepositoryFileResponse, forge::ForgeError> {
             unimplemented!()
         }
@@ -2199,6 +2217,7 @@ mod tests {
         async fn read_repository_file(
             &self,
             request: ReadRepositoryFileRequest,
+            _credential: &domain::ForgeCredential,
         ) -> Result<ReadRepositoryFileResponse, ServiceError> {
             Ok(ReadRepositoryFileResponse {
                 content: "file-content".to_string(),
@@ -2246,6 +2265,7 @@ mod tests {
         async fn get_change_request_diff(
             &self,
             _request: domain::GetChangeRequestDiffRequest,
+            _credential: &domain::ForgeCredential,
         ) -> Result<domain::ChangeRequestDiff, ServiceError> {
             unimplemented!()
         }
@@ -2253,6 +2273,7 @@ mod tests {
         async fn list_change_requests(
             &self,
             _request: ListChangeRequestsRequest,
+            _credential: &domain::ForgeCredential,
         ) -> Result<Vec<ChangeRequest>, ServiceError> {
             Ok(vec![])
         }

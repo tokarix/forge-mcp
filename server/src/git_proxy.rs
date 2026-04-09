@@ -613,6 +613,7 @@ mod tests {
             &self,
             _: &domain::RepositoryRef,
             _: u64,
+            _: &domain::ForgeCredential,
         ) -> Result<String, forge::ForgeError> {
             unimplemented!()
         }
@@ -634,6 +635,7 @@ mod tests {
             &self,
             _: &domain::RepositoryRef,
             _: Option<&domain::ChangeRequestState>,
+            _: &domain::ForgeCredential,
         ) -> Result<Vec<domain::ChangeRequest>, forge::ForgeError> {
             unimplemented!()
         }
@@ -642,6 +644,7 @@ mod tests {
             _: &domain::RepositoryRef,
             _: &str,
             _: Option<&str>,
+            _: &domain::ForgeCredential,
         ) -> Result<domain::ReadRepositoryFileResponse, forge::ForgeError> {
             unimplemented!()
         }
@@ -725,6 +728,7 @@ mod tests {
         async fn read_repository_file(
             &self,
             request: domain::ReadRepositoryFileRequest,
+            _credential: &domain::ForgeCredential,
         ) -> Result<ReadRepositoryFileResponse, ServiceError> {
             Ok(ReadRepositoryFileResponse {
                 content: "file-content".to_string(),
@@ -753,6 +757,7 @@ mod tests {
         async fn get_change_request_diff(
             &self,
             _request: domain::GetChangeRequestDiffRequest,
+            _credential: &domain::ForgeCredential,
         ) -> Result<domain::ChangeRequestDiff, ServiceError> {
             unimplemented!()
         }
@@ -760,6 +765,7 @@ mod tests {
         async fn list_change_requests(
             &self,
             _request: ListChangeRequestsRequest,
+            _credential: &domain::ForgeCredential,
         ) -> Result<Vec<ChangeRequest>, ServiceError> {
             Ok(vec![])
         }

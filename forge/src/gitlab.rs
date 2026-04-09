@@ -758,6 +758,7 @@ impl crate::ForgeAdapter for GitLabAdapter {
         &self,
         repository: &RepositoryRef,
         index: u64,
+        credential: &ForgeCredential,
     ) -> Result<String, ForgeError> {
         // GitLab provides a .diff endpoint for merge requests since v13.
         let url = format!(
@@ -766,10 +767,8 @@ impl crate::ForgeAdapter for GitLabAdapter {
             Self::project_path(repository),
             index,
         );
-        let mut request = self.client.get(&url);
-        if let Some(token) = &self.config.token {
-            request = request.header("PRIVATE-TOKEN", token);
-        }
+        let token = self.effective_token(credential);
+        let request = Self::authenticate(self.client.get(&url), token);
         let response = Self::check_response(request.send().await?).await?;
         response
             .text()
@@ -895,6 +894,7 @@ impl crate::ForgeAdapter for GitLabAdapter {
         &self,
         repository: &RepositoryRef,
         state: Option<&ChangeRequestState>,
+        credential: &ForgeCredential,
     ) -> Result<Vec<ChangeRequest>, ForgeError> {
         let url = format!(
             "{}/projects/{}/merge_requests",
@@ -906,12 +906,10 @@ impl crate::ForgeAdapter for GitLabAdapter {
             ChangeRequestState::Merged => "merged",
             ChangeRequestState::Open => "opened",
         });
-        let mut request = self.client.get(&url);
+        let token = self.effective_token(credential);
+        let mut request = Self::authenticate(self.client.get(&url), token);
         if let Some(state_str) = state_str {
             request = request.query(&[("state", state_str)]);
-        }
-        if let Some(token) = &self.config.token {
-            request = request.header("PRIVATE-TOKEN", token);
         }
         let response = Self::check_response(request.send().await?).await?;
         let mrs: Vec<GitLabMergeRequest> = response.json().await?;
@@ -1049,6 +1047,7 @@ impl crate::ForgeAdapter for GitLabAdapter {
         repository: &RepositoryRef,
         path: &str,
         git_ref: Option<&str>,
+        credential: &ForgeCredential,
     ) -> Result<ReadRepositoryFileResponse, ForgeError> {
         let encoded_path = urlencoding::encode(path.trim_start_matches('/'));
         let url = format!(
@@ -1057,10 +1056,8 @@ impl crate::ForgeAdapter for GitLabAdapter {
             Self::project_path(repository),
             encoded_path,
         );
-        let mut request = self.client.get(&url);
-        if let Some(token) = &self.config.token {
-            request = request.header("PRIVATE-TOKEN", token);
-        }
+        let token = self.effective_token(credential);
+        let mut request = Self::authenticate(self.client.get(&url), token);
         if let Some(reference) = git_ref {
             request = request.query(&[("ref", reference)]);
         } else {

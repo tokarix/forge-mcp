@@ -187,6 +187,7 @@ pub trait ForgeAdapter: Send + Sync {
         &self,
         repository: &RepositoryRef,
         index: u64,
+        credential: &ForgeCredential,
     ) -> Result<String, ForgeError>;
 
     /// Returns the combined CI/check status for the given commit SHA.
@@ -240,6 +241,7 @@ pub trait ForgeAdapter: Send + Sync {
         &self,
         repository: &RepositoryRef,
         state: Option<&ChangeRequestState>,
+        credential: &ForgeCredential,
     ) -> Result<Vec<ChangeRequest>, ForgeError>;
 
     /// Lists issues for a repository.
@@ -291,6 +293,7 @@ pub trait ForgeAdapter: Send + Sync {
         repository: &RepositoryRef,
         path: &str,
         git_ref: Option<&str>,
+        credential: &ForgeCredential,
     ) -> Result<ReadRepositoryFileResponse, ForgeError>;
 
     /// Submits a formal review on a change request.
@@ -1457,6 +1460,7 @@ impl ForgeAdapter for ForgejoAdapter {
         &self,
         repository: &RepositoryRef,
         index: u64,
+        credential: &ForgeCredential,
     ) -> Result<String, ForgeError> {
         let url = format!(
             "{}/api/v1/repos/{}/{}/pulls/{index}.diff",
@@ -1465,8 +1469,9 @@ impl ForgeAdapter for ForgejoAdapter {
             repository.name,
         );
 
+        let effective_token = credential.token.as_deref().or(self.config.token.as_deref());
         let mut request = self.client.get(&url);
-        if let Some(token) = &self.config.token {
+        if let Some(token) = effective_token {
             request = request.bearer_auth(token);
         }
 
@@ -1504,6 +1509,7 @@ impl ForgeAdapter for ForgejoAdapter {
         &self,
         repository: &RepositoryRef,
         state: Option<&ChangeRequestState>,
+        credential: &ForgeCredential,
     ) -> Result<Vec<ChangeRequest>, ForgeError> {
         let url = format!(
             "{}/api/v1/repos/{}/{}/pulls",
@@ -1517,11 +1523,12 @@ impl ForgeAdapter for ForgejoAdapter {
             ChangeRequestState::Open => "open",
         });
 
+        let effective_token = credential.token.as_deref().or(self.config.token.as_deref());
         let mut request = self.client.get(&url);
         if let Some(state_str) = state_str {
             request = request.query(&[("state", state_str)]);
         }
-        if let Some(token) = &self.config.token {
+        if let Some(token) = effective_token {
             request = request.bearer_auth(token);
         }
 
@@ -1719,6 +1726,7 @@ impl ForgeAdapter for ForgejoAdapter {
         repository: &RepositoryRef,
         path: &str,
         git_ref: Option<&str>,
+        credential: &ForgeCredential,
     ) -> Result<ReadRepositoryFileResponse, ForgeError> {
         let encoded_path = path.trim_start_matches('/').replace('/', "%2F");
         let url = format!(
@@ -1729,8 +1737,9 @@ impl ForgeAdapter for ForgejoAdapter {
             encoded_path
         );
 
+        let effective_token = credential.token.as_deref().or(self.config.token.as_deref());
         let mut request = self.client.get(url);
-        if let Some(token) = &self.config.token {
+        if let Some(token) = effective_token {
             request = request.bearer_auth(token);
         }
         if let Some(reference) = git_ref {

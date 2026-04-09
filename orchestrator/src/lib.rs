@@ -138,6 +138,7 @@ where
     async fn get_change_request_diff(
         &self,
         request: GetChangeRequestDiffRequest,
+        credential: &ForgeCredential,
     ) -> Result<ChangeRequestDiff, ServiceError> {
         self.audit_sink
             .record(AuditRecord {
@@ -151,7 +152,7 @@ where
 
         let patch = self
             .adapter
-            .get_change_request_diff(&request.repository, request.index)
+            .get_change_request_diff(&request.repository, request.index, credential)
             .await
             .map_err(|e| ServiceError::Upstream(e.to_string()))?;
 
@@ -185,6 +186,7 @@ where
     async fn list_change_requests(
         &self,
         request: ListChangeRequestsRequest,
+        credential: &ForgeCredential,
     ) -> Result<Vec<ChangeRequest>, ServiceError> {
         self.audit_sink
             .record(AuditRecord {
@@ -200,7 +202,7 @@ where
             .map_err(|e| ServiceError::Audit(e.to_string()))?;
 
         self.adapter
-            .list_change_requests(&request.repository, request.state.as_ref())
+            .list_change_requests(&request.repository, request.state.as_ref(), credential)
             .await
             .map_err(|e| ServiceError::Upstream(e.to_string()))
     }
@@ -208,6 +210,7 @@ where
     async fn read_repository_file(
         &self,
         request: ReadRepositoryFileRequest,
+        credential: &ForgeCredential,
     ) -> Result<ReadRepositoryFileResponse, ServiceError> {
         validate_repository_path(&request.path).map_err(ServiceError::Validation)?;
 
@@ -226,6 +229,7 @@ where
                 &request.repository,
                 &request.path,
                 request.git_ref.as_deref(),
+                credential,
             )
             .await
             .map_err(|e| ServiceError::Upstream(e.to_string()))
@@ -1612,6 +1616,7 @@ mod tests {
             &self,
             _: &RepositoryRef,
             _: u64,
+            _: &ForgeCredential,
         ) -> Result<String, ForgeError> {
             unimplemented!()
         }
@@ -1636,6 +1641,7 @@ mod tests {
             &self,
             _repository: &RepositoryRef,
             _state: Option<&ChangeRequestState>,
+            _credential: &ForgeCredential,
         ) -> Result<Vec<ChangeRequest>, ForgeError> {
             unimplemented!()
         }
@@ -1645,6 +1651,7 @@ mod tests {
             repository: &RepositoryRef,
             path: &str,
             git_ref: Option<&str>,
+            _credential: &ForgeCredential,
         ) -> Result<domain::ReadRepositoryFileResponse, ForgeError> {
             Ok(domain::ReadRepositoryFileResponse {
                 repository: repository.clone(),
@@ -1896,6 +1903,7 @@ mod tests {
             &self,
             _: &RepositoryRef,
             _: u64,
+            _: &ForgeCredential,
         ) -> Result<String, ForgeError> {
             unimplemented!()
         }
@@ -1920,6 +1928,7 @@ mod tests {
             &self,
             _repository: &RepositoryRef,
             _state: Option<&ChangeRequestState>,
+            _credential: &ForgeCredential,
         ) -> Result<Vec<ChangeRequest>, ForgeError> {
             unimplemented!()
         }
@@ -1929,6 +1938,7 @@ mod tests {
             _repository: &RepositoryRef,
             _path: &str,
             _git_ref: Option<&str>,
+            _credential: &ForgeCredential,
         ) -> Result<domain::ReadRepositoryFileResponse, ForgeError> {
             Err(ForgeError::InvalidPayload("test error".to_string()))
         }
@@ -1995,7 +2005,7 @@ mod tests {
         let orchestrator = ReadOrchestrator::new(adapter, Arc::clone(&audit));
 
         let response = orchestrator
-            .read_repository_file(test_request("README.md"))
+            .read_repository_file(test_request("README.md"), &ForgeCredential { token: None })
             .await
             .expect("read should succeed");
 
@@ -2010,7 +2020,7 @@ mod tests {
         let orchestrator = ReadOrchestrator::new(adapter, Arc::clone(&audit));
 
         let err = orchestrator
-            .read_repository_file(test_request(""))
+            .read_repository_file(test_request(""), &ForgeCredential { token: None })
             .await
             .expect_err("empty path should fail");
 
@@ -2025,7 +2035,10 @@ mod tests {
         let orchestrator = ReadOrchestrator::new(adapter, Arc::clone(&audit));
 
         let err = orchestrator
-            .read_repository_file(test_request("../../../etc/passwd"))
+            .read_repository_file(
+                test_request("../../../etc/passwd"),
+                &ForgeCredential { token: None },
+            )
             .await
             .expect_err("traversal should fail");
 
@@ -2040,7 +2053,7 @@ mod tests {
         let orchestrator = ReadOrchestrator::new(adapter, Arc::clone(&audit));
 
         let err = orchestrator
-            .read_repository_file(test_request("README.md"))
+            .read_repository_file(test_request("README.md"), &ForgeCredential { token: None })
             .await
             .expect_err("forge failure should propagate");
 
@@ -2056,7 +2069,7 @@ mod tests {
         let orchestrator = ReadOrchestrator::new(adapter, audit);
 
         let err = orchestrator
-            .read_repository_file(test_request("README.md"))
+            .read_repository_file(test_request("README.md"), &ForgeCredential { token: None })
             .await
             .expect_err("audit failure should propagate");
 
@@ -2239,6 +2252,7 @@ mod tests {
             &self,
             _: &RepositoryRef,
             _: u64,
+            _: &ForgeCredential,
         ) -> Result<String, ForgeError> {
             unimplemented!()
         }
@@ -2284,6 +2298,7 @@ mod tests {
             &self,
             _: &RepositoryRef,
             _: Option<&ChangeRequestState>,
+            _: &ForgeCredential,
         ) -> Result<Vec<ChangeRequest>, ForgeError> {
             unimplemented!()
         }
@@ -2300,6 +2315,7 @@ mod tests {
             _: &RepositoryRef,
             _: &str,
             _: Option<&str>,
+            _: &ForgeCredential,
         ) -> Result<domain::ReadRepositoryFileResponse, ForgeError> {
             unimplemented!()
         }
@@ -2716,6 +2732,7 @@ mod tests {
             &self,
             _: &RepositoryRef,
             _: u64,
+            _: &ForgeCredential,
         ) -> Result<String, ForgeError> {
             unimplemented!()
         }
@@ -2740,6 +2757,7 @@ mod tests {
             &self,
             _repository: &RepositoryRef,
             _state: Option<&ChangeRequestState>,
+            _credential: &ForgeCredential,
         ) -> Result<Vec<ChangeRequest>, ForgeError> {
             unimplemented!()
         }
@@ -2749,6 +2767,7 @@ mod tests {
             _repository: &RepositoryRef,
             _path: &str,
             _git_ref: Option<&str>,
+            _credential: &ForgeCredential,
         ) -> Result<domain::ReadRepositoryFileResponse, ForgeError> {
             unimplemented!()
         }
@@ -3430,6 +3449,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             &self,
             _: &RepositoryRef,
             _: u64,
+            _: &ForgeCredential,
         ) -> Result<String, ForgeError> {
             unimplemented!()
         }
@@ -3454,6 +3474,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             &self,
             _repository: &RepositoryRef,
             _state: Option<&ChangeRequestState>,
+            _credential: &ForgeCredential,
         ) -> Result<Vec<ChangeRequest>, ForgeError> {
             unimplemented!()
         }
@@ -3463,6 +3484,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             _repository: &RepositoryRef,
             _path: &str,
             _git_ref: Option<&str>,
+            _credential: &ForgeCredential,
         ) -> Result<domain::ReadRepositoryFileResponse, ForgeError> {
             unimplemented!()
         }
@@ -3947,6 +3969,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             &self,
             _: &RepositoryRef,
             _: u64,
+            _: &ForgeCredential,
         ) -> Result<String, ForgeError> {
             unimplemented!()
         }
@@ -3971,6 +3994,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             &self,
             _: &RepositoryRef,
             _: Option<&ChangeRequestState>,
+            _: &ForgeCredential,
         ) -> Result<Vec<ChangeRequest>, ForgeError> {
             unimplemented!()
         }
@@ -3980,6 +4004,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             _: &RepositoryRef,
             _: &str,
             _: Option<&str>,
+            _: &ForgeCredential,
         ) -> Result<domain::ReadRepositoryFileResponse, ForgeError> {
             unimplemented!()
         }
@@ -4317,6 +4342,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             &self,
             _: &RepositoryRef,
             _: u64,
+            _: &ForgeCredential,
         ) -> Result<String, ForgeError> {
             unimplemented!()
         }
@@ -4345,6 +4371,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             &self,
             _: &RepositoryRef,
             _: Option<&ChangeRequestState>,
+            _: &ForgeCredential,
         ) -> Result<Vec<ChangeRequest>, ForgeError> {
             unimplemented!()
         }
@@ -4354,6 +4381,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             _: &RepositoryRef,
             _: &str,
             _: Option<&str>,
+            _: &ForgeCredential,
         ) -> Result<domain::ReadRepositoryFileResponse, ForgeError> {
             unimplemented!()
         }
