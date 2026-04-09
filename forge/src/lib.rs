@@ -1827,6 +1827,14 @@ impl ForgeAdapter for ForgejoAdapter {
             {
                 return Ok(());
             }
+            // Forgejo may also return 500 when the duplicate-key DB constraint
+            // fires (UQE_pull_auto_merge_pull_id). Treat this as a no-op too.
+            if status == reqwest::StatusCode::INTERNAL_SERVER_ERROR
+                && (body.contains("UQE_pull_auto_merge_pull_id") || body.contains("duplicate key"))
+            {
+                tracing::debug!("schedule_auto_merge: ignoring 500 duplicate-key response",);
+                return Ok(());
+            }
             if status.is_redirection() {
                 let location = "<unknown>".to_string();
                 tracing::warn!(
@@ -2527,6 +2535,52 @@ mod tests {
         match err {
             ForgeError::UnexpectedStatus { status, .. } => {
                 assert_eq!(status, reqwest::StatusCode::CONFLICT);
+            }
+            other => panic!("expected UnexpectedStatus, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn schedule_auto_merge_succeeds_on_duplicate_key_500() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path_regex(r"/api/v1/repos/.+/pulls/\d+/merge"))
+            .respond_with(ResponseTemplate::new(500).set_body_string(
+                "duplicate key value violates unique constraint \"UQE_pull_auto_merge_pull_id\"",
+            ))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let result = adapter
+            .schedule_auto_merge(&test_repo(), 42, "rebase", "abc123sha", None, &cred)
+            .await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn schedule_auto_merge_errors_on_unrelated_500() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path_regex(r"/api/v1/repos/.+/pulls/\d+/merge"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("internal server error"))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let result = adapter
+            .schedule_auto_merge(&test_repo(), 42, "rebase", "abc123sha", None, &cred)
+            .await;
+
+        let err = result.expect_err("should fail with unexpected status");
+        match err {
+            ForgeError::UnexpectedStatus { status, .. } => {
+                assert_eq!(status, reqwest::StatusCode::INTERNAL_SERVER_ERROR);
             }
             other => panic!("expected UnexpectedStatus, got {other:?}"),
         }
