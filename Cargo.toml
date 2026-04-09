@@ -11,7 +11,12 @@ members = [
 resolver = "2"
 
 [workspace.lints.clippy]
+expect_used = { level = "deny", priority = 1 }
+panic = { level = "deny", priority = 1 }
 pedantic = { level = "deny", priority = -1 }
+todo = { level = "deny", priority = 1 }
+unimplemented = { level = "deny", priority = 1 }
+unwrap_used = { level = "deny", priority = 1 }
 
 [workspace.package]
 edition = "2024"
