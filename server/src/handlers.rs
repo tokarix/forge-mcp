@@ -150,7 +150,7 @@ fn resolve_agent<'a>(
 ///
 /// Prefers the agent's per-forge identity token, falls back to the forge's
 /// configured token.
-fn resolve_credential(
+pub(crate) fn resolve_credential(
     agent: &crate::auth::ResolvedAgent,
     forge_alias: &str,
     forge: &crate::registry::ForgeInstance,

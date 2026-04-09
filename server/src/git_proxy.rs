@@ -15,7 +15,7 @@ use serde::Deserialize;
 
 use crate::api::ErrorBody;
 use crate::auth::{ResolvedAgent, extract_token};
-use crate::handlers::AppState;
+use crate::handlers::{AppState, resolve_credential};
 use crate::registry::ForgeInstance;
 
 #[derive(Debug, Deserialize)]
@@ -215,9 +215,12 @@ pub async fn info_refs(
         Err(e) => return error_response(StatusCode::BAD_REQUEST, &e),
     };
 
-    // Proxy request — use HTTP Basic auth for git smart HTTP transport
+    // Proxy request — use HTTP Basic auth for git smart HTTP transport.
+    // Resolve credential: prefer agent's per-forge identity, fall back to
+    // forge-level token (same precedence as MCP tool handlers).
+    let credential = resolve_credential(agent, &path.forge, forge);
     let mut upstream_req = forge.client.get(upstream_url);
-    if let Some(ref token) = forge.token {
+    if let Some(ref token) = credential.token {
         upstream_req = upstream_req.basic_auth(&forge.git_auth_user, Some(token));
     }
 
@@ -282,8 +285,11 @@ pub async fn upload_pack(
     let reqwest_body = reqwest::Body::wrap_stream(body_stream);
 
     // Use HTTP Basic auth for git smart HTTP transport.
+    // Resolve credential: prefer agent's per-forge identity, fall back to
+    // forge-level token (same precedence as MCP tool handlers).
     // Forward Content-Encoding so Forgejo can decompress gzip request bodies
     // that git clients send for large fetches.
+    let credential = resolve_credential(agent, &path.forge, forge);
     let mut upstream_req = forge
         .client
         .post(upstream_url)
@@ -292,7 +298,7 @@ pub async fn upload_pack(
     if let Some(encoding) = headers.get("content-encoding") {
         upstream_req = upstream_req.header("content-encoding", encoding);
     }
-    if let Some(ref token) = forge.token {
+    if let Some(ref token) = credential.token {
         upstream_req = upstream_req.basic_auth(&forge.git_auth_user, Some(token));
     }
 
@@ -1224,5 +1230,129 @@ mod tests {
             .expect("request should succeed");
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// Build test state where the agent has a per-forge identity credential.
+    fn test_state_with_forge_identity(base_url: &str) -> (AppState, Arc<audit::InMemoryAuditSink>) {
+        let mut forge_identity = std::collections::HashMap::new();
+        forge_identity.insert(
+            "test-forge".to_string(),
+            crate::config::ForgeIdentityConfig {
+                token: "agent-forge-token".to_string(),
+            },
+        );
+
+        let configs = vec![crate::config::AgentConfig {
+            agent_id: "codex".to_string(),
+            forge_identity,
+            policy: AgentPolicyConfig {
+                allowed_repos: vec!["test-forge/*".to_string()],
+                branch_prefix: Some("agent/".to_string()),
+                protected_paths: vec![],
+            },
+            session_id: "default".to_string(),
+            token: "test-token".to_string(),
+        }];
+
+        let audit_sink = Arc::new(audit::InMemoryAuditSink::new());
+        let mut forges = std::collections::HashMap::new();
+        forges.insert("test-forge".to_string(), test_forge_instance(base_url));
+
+        let state = AppState {
+            agent_registry: AgentRegistry::from_configs(&configs),
+            audit_sink: Arc::clone(&audit_sink) as Arc<dyn audit::AuditSink>,
+            auto_merge_service: Arc::new(crate::auto_merge::AutoMergeService::new(
+                crate::events::EventBus::new(),
+                Arc::new(crate::registry::ForgeRegistry::new(
+                    std::collections::HashMap::new(),
+                )),
+            )),
+            event_bus: crate::events::EventBus::new(),
+            forge_registry: Arc::new(crate::registry::ForgeRegistry::new(forges)),
+        };
+        (state, audit_sink)
+    }
+
+    #[tokio::test]
+    async fn info_refs_prefers_agent_forge_identity_credential() {
+        let mock_server = MockServer::start().await;
+
+        // Only match requests using the agent's forge_identity token,
+        // not the forge-level "upstream-token".
+        Mock::given(method("GET"))
+            .and(path_regex(r"/org/repo\.git/info/refs"))
+            .and(query_param("service", "git-upload-pack"))
+            .and(wiremock::matchers::header(
+                "authorization",
+                // Basic base64(":agent-forge-token")
+                "Basic OmFnZW50LWZvcmdlLXRva2Vu",
+            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_bytes(b"001e# service=git-upload-pack\n" as &[u8])
+                    .insert_header(
+                        "content-type",
+                        "application/x-git-upload-pack-advertisement",
+                    ),
+            )
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let (state, _) = test_state_with_forge_identity(&mock_server.uri());
+        let app = git_proxy_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/git/test-forge/org/repo.git/info/refs?service=git-upload-pack")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn upload_pack_prefers_agent_forge_identity_credential() {
+        let mock_server = MockServer::start().await;
+
+        // Only match requests using the agent's forge_identity token.
+        Mock::given(method("POST"))
+            .and(path_regex(r"/org/repo\.git/git-upload-pack"))
+            .and(wiremock::matchers::header(
+                "authorization",
+                // Basic base64(":agent-forge-token")
+                "Basic OmFnZW50LWZvcmdlLXRva2Vu",
+            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_bytes(b"0008NAK\n" as &[u8])
+                    .insert_header("content-type", "application/x-git-upload-pack-result"),
+            )
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let (state, _) = test_state_with_forge_identity(&mock_server.uri());
+        let app = git_proxy_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/git/test-forge/org/repo.git/git-upload-pack")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/x-git-upload-pack-request")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
     }
 }
