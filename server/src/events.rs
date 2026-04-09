@@ -244,6 +244,7 @@ impl EventBusState {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use tokio::time::{Duration, timeout};
 

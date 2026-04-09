@@ -197,6 +197,7 @@ fn parse_diff_header(header: &str) -> Result<(String, String), DiffError> {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use std::fmt::Write;
 

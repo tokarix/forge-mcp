@@ -76,12 +76,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|| "forge-mcp.toml".to_string());
 
     let config_str = std::fs::read_to_string(&config_path)
-        .unwrap_or_else(|e| panic!("failed to read config file {config_path}: {e}"));
+        .map_err(|e| format!("failed to read config file {config_path}: {e}"))?;
 
     let config = parse_config(&config_str)
-        .unwrap_or_else(|e| panic!("failed to parse config file {config_path}: {e}"));
+        .map_err(|e| format!("failed to parse config file {config_path}: {e}"))?;
 
-    validate_config(&config).unwrap_or_else(|e| panic!("invalid configuration: {e}"));
+    validate_config(&config).map_err(|e| format!("invalid configuration: {e}"))?;
 
     tracing::info!(version = %server_version(), listen = %config.server.listen, "forge-mcp starting");
 
@@ -95,7 +95,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let adapter = Arc::new(ForgejoAdapter::new(ForgejoConfig {
                     base_url: forge_config.base_url.clone(),
                     token: forge_config.token.clone(),
-                }));
+                })?);
                 build_forge_instance(
                     adapter,
                     &audit_sink,
@@ -108,7 +108,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let adapter = Arc::new(GitLabAdapter::new(GitLabConfig {
                     base_url: forge_config.base_url.clone(),
                     token: forge_config.token.clone(),
-                }));
+                })?);
                 build_forge_instance(
                     adapter,
                     &audit_sink,
@@ -117,10 +117,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ForgeKind::GitLab,
                 )
             }
-            other => panic!(
-                "unsupported forge type '{other}' for alias '{}'",
-                forge_config.alias
-            ),
+            other => {
+                return Err(format!(
+                    "unsupported forge type '{other}' for alias '{}'",
+                    forge_config.alias
+                )
+                .into());
+            }
         };
 
         forges.insert(forge_config.alias.clone(), instance);

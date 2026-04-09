@@ -1246,6 +1246,7 @@ pub trait RepositoryWriteService: Send + Sync {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::validate_repository_path;
     use super::{ChangeRequest, ChangeRequestEventAction, ChangeRequestState, ForgeCredential};

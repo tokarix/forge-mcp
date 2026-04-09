@@ -35,20 +35,18 @@ pub struct GitLabAdapter {
 }
 
 impl GitLabAdapter {
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if the HTTP client cannot be built.
-    #[must_use]
-    pub fn new(config: GitLabConfig) -> Self {
+    /// Returns an error if the HTTP client cannot be built.
+    pub fn new(config: GitLabConfig) -> Result<Self, crate::ForgeError> {
         crate::install_ring_provider();
 
-        Self {
+        Ok(Self {
             client: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .expect("failed to build HTTP client"),
+                .build()?,
             config,
-        }
+        })
     }
 
     /// Returns the API v4 base URL with trailing slash stripped.
@@ -1608,6 +1606,7 @@ fn aggregate_status_states(statuses: &[domain::CommitStatus]) -> domain::CommitS
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 
@@ -1621,6 +1620,7 @@ mod tests {
             base_url: base_url.to_string(),
             token: Some("test-token".to_string()),
         })
+        .expect("build gitlab adapter")
     }
 
     fn test_repo() -> RepositoryRef {
@@ -1725,7 +1725,8 @@ mod tests {
     #[test]
     fn webhook_token_missing() {
         let headers: Vec<(String, String)> = vec![];
-        let err = verify_gitlab_token(&headers, "secret").unwrap_err();
+        let err =
+            verify_gitlab_token(&headers, "secret").expect_err("should fail with missing header");
         matches!(err, ForgeWebhookError::MissingHeader(_));
     }
 
@@ -1747,7 +1748,7 @@ mod tests {
                 "path_with_namespace": "group/subgroup/repo"
             }
         });
-        let body = serde_json::to_vec(&payload).unwrap();
+        let body = serde_json::to_vec(&payload).expect("serialize json");
         let result = parse_gitlab_merge_request_event(
             &body,
             "delivery-1".to_string(),
@@ -1755,7 +1756,7 @@ mod tests {
             domain::ForgeKind::GitLab,
             "https://gitlab.example",
         )
-        .unwrap();
+        .expect("parse merge request event");
         let event = result.expect("should produce an event");
         match event {
             domain::WebhookEvent::ChangeRequest(cr) => {
@@ -1783,7 +1784,7 @@ mod tests {
                 "path_with_namespace": "org/repo"
             }
         });
-        let body = serde_json::to_vec(&payload).unwrap();
+        let body = serde_json::to_vec(&payload).expect("serialize json");
         let result = parse_gitlab_issue_event(
             &body,
             "delivery-2".to_string(),
@@ -1791,7 +1792,7 @@ mod tests {
             domain::ForgeKind::GitLab,
             "https://gitlab.example",
         )
-        .unwrap();
+        .expect("parse issue event");
         let event = result.expect("should produce an event");
         match event {
             domain::WebhookEvent::Issue(ie) => {
@@ -1818,7 +1819,7 @@ mod tests {
                 "path_with_namespace": "org/repo"
             }
         });
-        let body = serde_json::to_vec(&payload).unwrap();
+        let body = serde_json::to_vec(&payload).expect("serialize json");
         let result = parse_gitlab_note_event(
             &body,
             "delivery-3".to_string(),
@@ -1826,7 +1827,7 @@ mod tests {
             domain::ForgeKind::GitLab,
             "https://gitlab.example",
         )
-        .unwrap();
+        .expect("parse note event");
         let event = result.expect("should produce an event");
         match event {
             domain::WebhookEvent::IssueComment(ic) => {
@@ -1858,7 +1859,7 @@ mod tests {
                 "path_with_namespace": "org/repo"
             }
         });
-        let body = serde_json::to_vec(&payload).unwrap();
+        let body = serde_json::to_vec(&payload).expect("serialize json");
         let result = parse_gitlab_note_event(
             &body,
             "delivery-4".to_string(),
@@ -1866,7 +1867,7 @@ mod tests {
             domain::ForgeKind::GitLab,
             "https://gitlab.example",
         )
-        .unwrap();
+        .expect("parse note event");
         let event = result.expect("should produce an event");
         match event {
             domain::WebhookEvent::PullRequestReview(pr) => {
@@ -2000,7 +2001,10 @@ mod tests {
 
         let adapter = test_adapter(&mock.uri());
         let cred = ForgeCredential { token: None };
-        let issue = adapter.get_issue(&test_repo(), 1, &cred).await.unwrap();
+        let issue = adapter
+            .get_issue(&test_repo(), 1, &cred)
+            .await
+            .expect("get issue");
         assert_eq!(issue.index, 1);
         assert_eq!(issue.title, "Test issue");
         assert_eq!(issue.labels, vec!["bug"]);
@@ -2029,7 +2033,7 @@ mod tests {
                 &cred,
             )
             .await
-            .unwrap();
+            .expect("create commit status");
     }
 
     #[tokio::test]
@@ -2060,7 +2064,7 @@ mod tests {
         let cr = adapter
             .get_change_request(&test_repo(), 5, &cred)
             .await
-            .unwrap();
+            .expect("get change request");
         assert_eq!(cr.index, 5);
         assert_eq!(cr.state, ChangeRequestState::Open);
         assert_eq!(cr.head_sha.as_deref(), Some("head111"));
@@ -2072,7 +2076,8 @@ mod tests {
         let adapter = GitLabAdapter::new(GitLabConfig {
             base_url: "https://gitlab.example".to_string(),
             token: None,
-        });
+        })
+        .expect("build gitlab adapter");
 
         let payload = serde_json::json!({
             "object_attributes": {
@@ -2103,13 +2108,13 @@ mod tests {
         let result = adapter
             .verify_and_parse_webhook_event(
                 &headers,
-                &serde_json::to_vec(&payload).unwrap(),
+                &serde_json::to_vec(&payload).expect("serialize json"),
                 "gl",
                 domain::ForgeKind::GitLab,
                 "https://gitlab.example",
                 "test-secret",
             )
-            .unwrap();
+            .expect("parse webhook event");
 
         let event = result.expect("should produce an event");
         match event {

@@ -43,12 +43,12 @@ impl InMemoryAuditSink {
 
     /// Returns all recorded audit entries.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if the internal mutex is poisoned.
-    #[must_use]
-    pub fn records(&self) -> Vec<AuditRecord> {
-        self.records.lock().expect("audit mutex poisoned").clone()
+    /// Returns an error if the internal mutex is poisoned.
+    pub fn records(&self) -> Result<Vec<AuditRecord>, AuditError> {
+        let guard = self.records.lock().map_err(|_| AuditError::Unavailable)?;
+        Ok(guard.clone())
     }
 }
 

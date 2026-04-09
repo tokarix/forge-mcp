@@ -524,6 +524,7 @@ fn run_git_with_stdin(
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -531,11 +532,16 @@ mod tests {
     fn auth_header_encodes_correctly() {
         let header = auth_header("test-token");
         assert!(header.starts_with("Authorization: Basic "));
-        let encoded = header.strip_prefix("Authorization: Basic ").unwrap();
+        let encoded = header
+            .strip_prefix("Authorization: Basic ")
+            .expect("strip prefix");
         let decoded = base64::engine::general_purpose::STANDARD
             .decode(encoded)
-            .unwrap();
-        assert_eq!(String::from_utf8(decoded).unwrap(), "forge-mcp:test-token");
+            .expect("base64 decode");
+        assert_eq!(
+            String::from_utf8(decoded).expect("utf8 decode"),
+            "forge-mcp:test-token"
+        );
     }
 
     #[test]
@@ -543,26 +549,26 @@ mod tests {
         let empty_env = Vec::new();
 
         // Create a bare "remote" repo
-        let remote_dir = TempDir::new().unwrap();
+        let remote_dir = TempDir::new().expect("temp dir");
         run_git(
             remote_dir.path(),
             &["init", "--bare", "remote.git"],
             &empty_env,
         )
-        .unwrap();
+        .expect("run command");
         let remote_path = remote_dir.path().join("remote.git");
 
         // Create initial commit in a working copy
-        let init_dir = TempDir::new().unwrap();
+        let init_dir = TempDir::new().expect("temp dir");
         let init_path = init_dir.path().join("work");
         run_git(
             init_dir.path(),
-            &["clone", remote_path.to_str().unwrap(), "work"],
+            &["clone", remote_path.to_str().expect("path to str"), "work"],
             &empty_env,
         )
-        .unwrap();
-        std::fs::write(init_path.join("README.md"), "# Hello\n").unwrap();
-        run_git(&init_path, &["add", "README.md"], &empty_env).unwrap();
+        .expect("run command");
+        std::fs::write(init_path.join("README.md"), "# Hello\n").expect("write file");
+        run_git(&init_path, &["add", "README.md"], &empty_env).expect("run command");
         run_git(
             &init_path,
             &[
@@ -576,13 +582,13 @@ mod tests {
             ],
             &empty_env,
         )
-        .unwrap();
+        .expect("run command");
         run_git(
             &init_path,
             &["push", "-u", "origin", "HEAD:main"],
             &empty_env,
         )
-        .unwrap();
+        .expect("run command");
 
         // Now test our workspace — clone from base_branch "main"
         let workspace = GitWorkspace::clone_repo(
@@ -591,9 +597,11 @@ mod tests {
             None,
             true,
         )
-        .unwrap();
+        .expect("clone repo");
 
-        workspace.create_branch("agent/test-branch").unwrap();
+        workspace
+            .create_branch("agent/test-branch")
+            .expect("create branch");
 
         let patch = "\
 diff --git a/README.md b/README.md
@@ -604,42 +612,44 @@ index 7e59600..1234567 100644
  # Hello
 +World
 ";
-        workspace.apply_patch(patch).unwrap();
+        workspace.apply_patch(patch).expect("apply patch");
 
         let result = workspace
             .commit("test: add world", "Test Agent", "agent@test")
-            .unwrap();
+            .expect("commit");
         assert!(!result.commit_sha.is_empty());
 
-        workspace.push_branch("agent/test-branch").unwrap();
+        workspace
+            .push_branch("agent/test-branch")
+            .expect("push branch");
 
         // Verify the branch exists on the remote
-        let branches = run_git(&remote_path, &["branch"], &empty_env).unwrap();
+        let branches = run_git(&remote_path, &["branch"], &empty_env).expect("run command");
         assert!(branches.contains("agent/test-branch"));
     }
 
     /// Helper: create a bare remote with an initial commit on "main".
     fn setup_remote_with_initial_commit() -> (TempDir, PathBuf) {
         let empty_env = Vec::new();
-        let remote_dir = TempDir::new().unwrap();
+        let remote_dir = TempDir::new().expect("temp dir");
         run_git(
             remote_dir.path(),
             &["init", "--bare", "remote.git"],
             &empty_env,
         )
-        .unwrap();
+        .expect("run command");
         let remote_path = remote_dir.path().join("remote.git");
 
-        let init_dir = TempDir::new().unwrap();
+        let init_dir = TempDir::new().expect("temp dir");
         let init_path = init_dir.path().join("work");
         run_git(
             init_dir.path(),
-            &["clone", remote_path.to_str().unwrap(), "work"],
+            &["clone", remote_path.to_str().expect("path to str"), "work"],
             &empty_env,
         )
-        .unwrap();
-        std::fs::write(init_path.join("README.md"), "# Hello\n").unwrap();
-        run_git(&init_path, &["add", "README.md"], &empty_env).unwrap();
+        .expect("run command");
+        std::fs::write(init_path.join("README.md"), "# Hello\n").expect("write file");
+        run_git(&init_path, &["add", "README.md"], &empty_env).expect("run command");
         run_git(
             &init_path,
             &[
@@ -653,13 +663,13 @@ index 7e59600..1234567 100644
             ],
             &empty_env,
         )
-        .unwrap();
+        .expect("run command");
         run_git(
             &init_path,
             &["push", "-u", "origin", "HEAD:main"],
             &empty_env,
         )
-        .unwrap();
+        .expect("run command");
 
         (remote_dir, remote_path)
     }
@@ -671,16 +681,16 @@ index 7e59600..1234567 100644
         content: &str,
         message: &str,
     ) -> String {
-        std::fs::write(workspace.repo_path.join(filename), content).unwrap();
+        std::fs::write(workspace.repo_path.join(filename), content).expect("write file");
         run_git(
             &workspace.repo_path,
             &["add", filename],
             &workspace.auth_env,
         )
-        .unwrap();
+        .expect("run command");
         workspace
             .commit(message, "Test", "test@test")
-            .unwrap()
+            .expect("commit")
             .commit_sha
     }
 
@@ -690,23 +700,24 @@ index 7e59600..1234567 100644
         let remote_url = format!("file://{}", remote_path.display());
 
         // Clone, create branch, add 3 commits
-        let ws = GitWorkspace::clone_repo(&remote_url, "main", None, false).unwrap();
-        ws.create_branch("agent/test-rebase").unwrap();
+        let ws = GitWorkspace::clone_repo(&remote_url, "main", None, false).expect("clone repo");
+        ws.create_branch("agent/test-rebase")
+            .expect("create branch");
 
         let sha1 = add_commit(&ws, "file1.txt", "content1", "commit 1");
         let sha2 = add_commit(&ws, "file2.txt", "content2", "commit 2");
         let sha3 = add_commit(&ws, "file3.txt", "content3", "commit 3");
 
-        ws.push_branch("agent/test-rebase").unwrap();
+        ws.push_branch("agent/test-rebase").expect("push branch");
 
         // Capture tree before rebase
-        let tree_before = ws.rev_parse("HEAD^{tree}").unwrap();
+        let tree_before = ws.rev_parse("HEAD^{tree}").expect("rev parse");
 
         // Compute merge base
-        let mb = ws.merge_base("HEAD", "origin/main").unwrap();
+        let mb = ws.merge_base("HEAD", "origin/main").expect("merge base");
 
         // Verify we have 3 commits
-        let commits = ws.list_commits_in_range(&mb).unwrap();
+        let commits = ws.list_commits_in_range(&mb).expect("list commits");
         assert_eq!(commits.len(), 3);
         assert_eq!(commits[0], sha1);
         assert_eq!(commits[1], sha2);
@@ -722,14 +733,14 @@ index 7e59600..1234567 100644
             "Test Committer",
             "committer@test",
         )
-        .unwrap();
+        .expect("rebase interactive");
 
         // Tree should be identical
-        let tree_after = ws.rev_parse("HEAD^{tree}").unwrap();
+        let tree_after = ws.rev_parse("HEAD^{tree}").expect("rev parse");
         assert_eq!(tree_before, tree_after);
 
         // Should now have 2 commits
-        let commits_after = ws.list_commits_in_range(&mb).unwrap();
+        let commits_after = ws.list_commits_in_range(&mb).expect("list commits");
         assert_eq!(commits_after.len(), 2);
     }
 
@@ -738,18 +749,18 @@ index 7e59600..1234567 100644
         let (_remote_dir, remote_path) = setup_remote_with_initial_commit();
         let remote_url = format!("file://{}", remote_path.display());
 
-        let ws = GitWorkspace::clone_repo(&remote_url, "main", None, false).unwrap();
-        ws.create_branch("agent/test-drop").unwrap();
+        let ws = GitWorkspace::clone_repo(&remote_url, "main", None, false).expect("clone repo");
+        ws.create_branch("agent/test-drop").expect("create branch");
 
         add_commit(&ws, "file1.txt", "content1", "commit 1");
         let sha2 = add_commit(&ws, "file2.txt", "content2", "commit 2");
         add_commit(&ws, "file3.txt", "content3", "commit 3");
 
-        ws.push_branch("agent/test-drop").unwrap();
+        ws.push_branch("agent/test-drop").expect("push branch");
 
-        let mb = ws.merge_base("HEAD", "origin/main").unwrap();
+        let mb = ws.merge_base("HEAD", "origin/main").expect("merge base");
 
-        let commits = ws.list_commits_in_range(&mb).unwrap();
+        let commits = ws.list_commits_in_range(&mb).expect("list commits");
         assert_eq!(commits.len(), 3);
 
         // Drop commit 2
@@ -761,10 +772,10 @@ index 7e59600..1234567 100644
             "Test Committer",
             "committer@test",
         )
-        .unwrap();
+        .expect("rebase interactive");
 
         // Should now have 2 commits
-        let commits_after = ws.list_commits_in_range(&mb).unwrap();
+        let commits_after = ws.list_commits_in_range(&mb).expect("list commits");
         assert_eq!(commits_after.len(), 2);
 
         // file2.txt should not exist (its commit was dropped)
@@ -780,15 +791,17 @@ index 7e59600..1234567 100644
         let (_remote_dir, remote_path) = setup_remote_with_initial_commit();
         let remote_url = format!("file://{}", remote_path.display());
 
-        let ws = GitWorkspace::clone_repo(&remote_url, "main", None, false).unwrap();
-        ws.create_branch("agent/test-drop-fixup").unwrap();
+        let ws = GitWorkspace::clone_repo(&remote_url, "main", None, false).expect("clone repo");
+        ws.create_branch("agent/test-drop-fixup")
+            .expect("create branch");
 
         let sha1 = add_commit(&ws, "file1.txt", "content1", "commit 1");
         let sha2 = add_commit(&ws, "file2.txt", "content2", "commit 2");
         let sha3 = add_commit(&ws, "file3.txt", "content3", "commit 3");
 
-        ws.push_branch("agent/test-drop-fixup").unwrap();
-        let mb = ws.merge_base("HEAD", "origin/main").unwrap();
+        ws.push_branch("agent/test-drop-fixup")
+            .expect("push branch");
+        let mb = ws.merge_base("HEAD", "origin/main").expect("merge base");
 
         // Drop commit 2, fixup commit 3 into commit 1
         ws.rebase_interactive(
@@ -805,9 +818,9 @@ index 7e59600..1234567 100644
             "Test Committer",
             "committer@test",
         )
-        .unwrap();
+        .expect("rebase interactive");
 
-        let commits_after = ws.list_commits_in_range(&mb).unwrap();
+        let commits_after = ws.list_commits_in_range(&mb).expect("list commits");
         assert_eq!(commits_after.len(), 1);
 
         // file2.txt dropped, file1.txt and file3.txt squashed into one commit
@@ -821,15 +834,16 @@ index 7e59600..1234567 100644
         let (_remote_dir, remote_path) = setup_remote_with_initial_commit();
         let remote_url = format!("file://{}", remote_path.display());
 
-        let ws = GitWorkspace::clone_repo(&remote_url, "main", None, false).unwrap();
-        ws.create_branch("agent/test-multi-fixup").unwrap();
+        let ws = GitWorkspace::clone_repo(&remote_url, "main", None, false).expect("clone repo");
+        ws.create_branch("agent/test-multi-fixup")
+            .expect("create branch");
 
         let sha1 = add_commit(&ws, "file1.txt", "content1", "commit 1");
         let sha2 = add_commit(&ws, "file2.txt", "content2", "commit 2");
         let sha3 = add_commit(&ws, "file3.txt", "content3", "commit 3");
 
-        let tree_before = ws.rev_parse("HEAD^{tree}").unwrap();
-        let mb = ws.merge_base("HEAD", "origin/main").unwrap();
+        let tree_before = ws.rev_parse("HEAD^{tree}").expect("rev parse");
+        let mb = ws.merge_base("HEAD", "origin/main").expect("merge base");
 
         // Fixup both 2 and 3 into 1 — should result in single commit
         ws.rebase_interactive(
@@ -847,12 +861,12 @@ index 7e59600..1234567 100644
             "Test Committer",
             "committer@test",
         )
-        .unwrap();
+        .expect("rebase interactive");
 
-        let tree_after = ws.rev_parse("HEAD^{tree}").unwrap();
+        let tree_after = ws.rev_parse("HEAD^{tree}").expect("rev parse");
         assert_eq!(tree_before, tree_after);
 
-        let commits_after = ws.list_commits_in_range(&mb).unwrap();
+        let commits_after = ws.list_commits_in_range(&mb).expect("list commits");
         assert_eq!(commits_after.len(), 1);
     }
 
@@ -863,16 +877,18 @@ index 7e59600..1234567 100644
         let empty_env: Vec<(String, String)> = vec![];
 
         // Clone and create a branch with commits
-        let ws = GitWorkspace::clone_repo(&remote_url, "main", None, false).unwrap();
-        ws.create_branch("agent/test-rebase-onto").unwrap();
+        let ws = GitWorkspace::clone_repo(&remote_url, "main", None, false).expect("clone repo");
+        ws.create_branch("agent/test-rebase-onto")
+            .expect("create branch");
 
         add_commit(&ws, "branch1.txt", "branch content 1", "branch commit 1");
         add_commit(&ws, "branch2.txt", "branch content 2", "branch commit 2");
 
-        ws.push_branch("agent/test-rebase-onto").unwrap();
+        ws.push_branch("agent/test-rebase-onto")
+            .expect("push branch");
 
         // Simulate main advancing: clone fresh, add a commit to main, push
-        let advance_dir = tempfile::TempDir::new().unwrap();
+        let advance_dir = tempfile::TempDir::new().expect("temp dir");
         let advance_path = advance_dir.path().join("work");
         run_git(
             advance_dir.path(),
@@ -880,14 +896,15 @@ index 7e59600..1234567 100644
                 "clone",
                 "--branch",
                 "main",
-                remote_path.to_str().unwrap(),
+                remote_path.to_str().expect("path to str"),
                 "work",
             ],
             &empty_env,
         )
-        .unwrap();
-        std::fs::write(advance_path.join("main-update.txt"), "new main content").unwrap();
-        run_git(&advance_path, &["add", "main-update.txt"], &empty_env).unwrap();
+        .expect("run command");
+        std::fs::write(advance_path.join("main-update.txt"), "new main content")
+            .expect("write file");
+        run_git(&advance_path, &["add", "main-update.txt"], &empty_env).expect("run command");
         run_git(
             &advance_path,
             &[
@@ -901,18 +918,18 @@ index 7e59600..1234567 100644
             ],
             &empty_env,
         )
-        .unwrap();
-        run_git(&advance_path, &["push", "origin", "main"], &empty_env).unwrap();
+        .expect("run command");
+        run_git(&advance_path, &["push", "origin", "main"], &empty_env).expect("run command");
 
         // Fetch latest main into our workspace
-        run_git(&ws.repo_path, &["fetch", "origin", "main"], &ws.auth_env).unwrap();
+        run_git(&ws.repo_path, &["fetch", "origin", "main"], &ws.auth_env).expect("run command");
 
         // Verify our branch doesn't have the main update yet
         assert!(!ws.repo_path.join("main-update.txt").exists());
 
         // Rebase onto updated main
         ws.rebase_onto("origin/main", "Test Committer", "committer@test")
-            .unwrap();
+            .expect("rebase onto");
 
         // Branch should now have the main update
         assert!(ws.repo_path.join("main-update.txt").exists());
@@ -921,12 +938,12 @@ index 7e59600..1234567 100644
         assert!(ws.repo_path.join("branch2.txt").exists());
 
         // Merge base should now be at the tip of origin/main
-        let mb = ws.merge_base("HEAD", "origin/main").unwrap();
-        let origin_main = ws.rev_parse("origin/main").unwrap();
+        let mb = ws.merge_base("HEAD", "origin/main").expect("merge base");
+        let origin_main = ws.rev_parse("origin/main").expect("rev parse");
         assert_eq!(mb, origin_main);
 
         // Should still have 2 branch commits
-        let commits = ws.list_commits_in_range(&mb).unwrap();
+        let commits = ws.list_commits_in_range(&mb).expect("list commits");
         assert_eq!(commits.len(), 2);
     }
 
@@ -940,19 +957,19 @@ index 7e59600..1234567 100644
             if let Some(parent) = Path::new(filename).parent()
                 && !parent.as_os_str().is_empty()
             {
-                std::fs::create_dir_all(workspace.repo_path.join(parent)).unwrap();
+                std::fs::create_dir_all(workspace.repo_path.join(parent)).expect("create dir");
             }
-            std::fs::write(workspace.repo_path.join(filename), content).unwrap();
+            std::fs::write(workspace.repo_path.join(filename), content).expect("write file");
             run_git(
                 &workspace.repo_path,
                 &["add", filename],
                 &workspace.auth_env,
             )
-            .unwrap();
+            .expect("run command");
         }
         workspace
             .commit(message, "Test", "test@test")
-            .unwrap()
+            .expect("commit")
             .commit_sha
     }
 
@@ -961,8 +978,9 @@ index 7e59600..1234567 100644
         let (_remote_dir, remote_path) = setup_remote_with_initial_commit();
         let remote_url = format!("file://{}", remote_path.display());
 
-        let ws = GitWorkspace::clone_repo(&remote_url, "main", None, false).unwrap();
-        ws.create_branch("agent/test-fixup-newfiles").unwrap();
+        let ws = GitWorkspace::clone_repo(&remote_url, "main", None, false).expect("clone repo");
+        ws.create_branch("agent/test-fixup-newfiles")
+            .expect("create branch");
 
         // Commit 1 (target): modifies existing file AND introduces new files
         // This matches the bug scenario from issue #77
@@ -992,13 +1010,14 @@ index 7e59600..1234567 100644
             "return owned values from store traits",
         );
 
-        ws.push_branch("agent/test-fixup-newfiles").unwrap();
+        ws.push_branch("agent/test-fixup-newfiles")
+            .expect("push branch");
 
         // Capture tree before rebase
-        let tree_before = ws.rev_parse("HEAD^{tree}").unwrap();
-        let mb = ws.merge_base("HEAD", "origin/main").unwrap();
+        let tree_before = ws.rev_parse("HEAD^{tree}").expect("rev parse");
+        let mb = ws.merge_base("HEAD", "origin/main").expect("merge base");
 
-        let commits = ws.list_commits_in_range(&mb).unwrap();
+        let commits = ws.list_commits_in_range(&mb).expect("list commits");
         assert_eq!(commits.len(), 2);
 
         // Fixup commit 2 into commit 1
@@ -1011,17 +1030,17 @@ index 7e59600..1234567 100644
             "Test Committer",
             "committer@test",
         )
-        .unwrap();
+        .expect("rebase interactive");
 
         // Tree should be identical after fixup
-        let tree_after = ws.rev_parse("HEAD^{tree}").unwrap();
+        let tree_after = ws.rev_parse("HEAD^{tree}").expect("rev parse");
         assert_eq!(
             tree_before, tree_after,
             "tree changed after fixup — new files likely dropped"
         );
 
         // Should now have 1 commit
-        let commits_after = ws.list_commits_in_range(&mb).unwrap();
+        let commits_after = ws.list_commits_in_range(&mb).expect("list commits");
         assert_eq!(commits_after.len(), 1);
 
         // Both new files must still exist with the fixup content
@@ -1034,7 +1053,8 @@ index 7e59600..1234567 100644
             "src/memory.rs was dropped"
         );
 
-        let store_content = std::fs::read_to_string(ws.repo_path.join("src/store.rs")).unwrap();
+        let store_content =
+            std::fs::read_to_string(ws.repo_path.join("src/store.rs")).expect("read file");
         assert!(
             store_content.contains("Vec<u8>"),
             "store.rs should have fixup content"
@@ -1046,11 +1066,12 @@ index 7e59600..1234567 100644
         let (_remote_dir, remote_path) = setup_remote_with_initial_commit();
         let remote_url = format!("file://{}", remote_path.display());
 
-        let ws = GitWorkspace::clone_repo(&remote_url, "main", None, false).unwrap();
-        ws.create_branch("agent/test-linear").unwrap();
+        let ws = GitWorkspace::clone_repo(&remote_url, "main", None, false).expect("clone repo");
+        ws.create_branch("agent/test-linear")
+            .expect("create branch");
         add_commit(&ws, "file1.txt", "c1", "commit 1");
 
-        let mb = ws.merge_base("HEAD", "origin/main").unwrap();
-        assert!(!ws.has_merge_commits(&mb).unwrap());
+        let mb = ws.merge_base("HEAD", "origin/main").expect("merge base");
+        assert!(!ws.has_merge_commits(&mb).expect("has merge commits"));
     }
 }

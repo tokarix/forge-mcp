@@ -71,12 +71,16 @@ fn auth_challenge(message: &str) -> Response {
         error: message.to_string(),
     })
     .unwrap_or_else(|_| format!("{{\"error\":\"{message}\"}}"));
-    Response::builder()
-        .status(StatusCode::UNAUTHORIZED)
-        .header("www-authenticate", "Basic realm=\"forge-mcp\"")
-        .header("content-type", "application/json")
-        .body(Body::from(body))
-        .unwrap()
+    let mut response = Response::new(Body::from(body));
+    *response.status_mut() = StatusCode::UNAUTHORIZED;
+    response.headers_mut().insert(
+        "www-authenticate",
+        HeaderValue::from_static("Basic realm=\"forge-mcp\""),
+    );
+    response
+        .headers_mut()
+        .insert("content-type", HeaderValue::from_static("application/json"));
+    response
 }
 
 fn error_response(status: StatusCode, message: &str) -> Response {
@@ -84,11 +88,12 @@ fn error_response(status: StatusCode, message: &str) -> Response {
         error: message.to_string(),
     })
     .unwrap_or_else(|_| format!("{{\"error\":\"{message}\"}}"));
-    Response::builder()
-        .status(status)
-        .header("content-type", "application/json")
-        .body(Body::from(body))
-        .unwrap()
+    let mut response = Response::new(Body::from(body));
+    *response.status_mut() = status;
+    response
+        .headers_mut()
+        .insert("content-type", HeaderValue::from_static("application/json"));
+    response
 }
 
 /// Authenticate, authorize, and resolve the forge instance for a git proxy
@@ -235,11 +240,10 @@ pub async fn info_refs(
 
     let body = Body::from_stream(upstream_resp.bytes_stream());
 
-    Response::builder()
-        .status(status.as_u16())
-        .header("content-type", content_type)
-        .body(body)
-        .unwrap()
+    let mut response = Response::new(body);
+    *response.status_mut() = status;
+    response.headers_mut().insert("content-type", content_type);
+    response
 }
 
 /// `POST /git/{forge}/{owner}/{repo}.git/git-upload-pack`
@@ -311,11 +315,10 @@ pub async fn upload_pack(
 
     let body = Body::from_stream(upstream_resp.bytes_stream());
 
-    Response::builder()
-        .status(status.as_u16())
-        .header("content-type", content_type)
-        .body(body)
-        .unwrap()
+    let mut response = Response::new(body);
+    *response.status_mut() = status;
+    response.headers_mut().insert("content-type", content_type);
+    response
 }
 
 /// `POST /git/{forge}/{owner}/{repo}.git/git-receive-pack` — always rejected
@@ -327,6 +330,7 @@ pub async fn receive_pack_rejected() -> Response {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::todo, clippy::unimplemented)]
 mod tests {
     use super::*;
 
@@ -352,8 +356,8 @@ mod tests {
 
     #[test]
     fn build_upstream_url_encodes_reserved_characters() {
-        let url =
-            build_upstream_url("https://forge.example", "org", "repo", &["info", "refs"]).unwrap();
+        let url = build_upstream_url("https://forge.example", "org", "repo", &["info", "refs"])
+            .expect("valid upstream URL");
         assert_eq!(url.as_str(), "https://forge.example/org/repo.git/info/refs");
     }
 
@@ -365,7 +369,7 @@ mod tests {
             "repo",
             &["info", "refs"],
         )
-        .unwrap();
+        .expect("valid upstream URL with path traversal");
         // The "/" and ".." within the owner are percent-encoded as a single segment,
         // not resolved as path traversal
         assert!(url.as_str().contains("org%2F..%2Fadmin"));
@@ -379,7 +383,7 @@ mod tests {
             "repo?evil=1#frag",
             &["git-upload-pack"],
         )
-        .unwrap();
+        .expect("valid upstream URL with query injection");
         // Query and fragment characters are percent-encoded within the path segment
         assert!(url.as_str().contains("%3F"));
         assert!(url.as_str().contains("%23"));
@@ -1028,23 +1032,26 @@ mod tests {
                     .uri("/git/test-forge/org/repo.git/info/refs?service=git-upload-pack")
                     .header("authorization", "Bearer test-token")
                     .body(Body::empty())
-                    .unwrap(),
+                    .expect("build request"),
             )
             .await
-            .unwrap();
+            .expect("request should succeed");
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
-            response.headers().get("content-type").unwrap(),
+            response
+                .headers()
+                .get("content-type")
+                .expect("content-type header"),
             "application/x-git-upload-pack-advertisement"
         );
 
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
-            .unwrap();
+            .expect("read response body");
         assert_eq!(body.as_ref(), b"001e# service=git-upload-pack\n");
 
-        let records = audit_sink.records();
+        let records = audit_sink.records().expect("should have audit records");
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].action, "git_read");
         assert_eq!(records[0].target, "info/refs");
@@ -1079,10 +1086,10 @@ mod tests {
                     .header("content-type", "application/x-git-upload-pack-request")
                     .header("content-encoding", "gzip")
                     .body(Body::from(b"\x1f\x8b\x08\x00" as &[u8]))
-                    .unwrap(),
+                    .expect("build request"),
             )
             .await
-            .unwrap();
+            .expect("request should succeed");
 
         assert_eq!(response.status(), StatusCode::OK);
     }
@@ -1100,10 +1107,10 @@ mod tests {
                     .uri("/git/test-forge/org/repo.git/git-receive-pack")
                     .header("authorization", "Bearer test-token")
                     .body(Body::empty())
-                    .unwrap(),
+                    .expect("build request"),
             )
             .await
-            .unwrap();
+            .expect("request should succeed");
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
@@ -1120,10 +1127,10 @@ mod tests {
                     .uri("/git/test-forge/org/repo.git/info/refs?service=git-receive-pack")
                     .header("authorization", "Bearer test-token")
                     .body(Body::empty())
-                    .unwrap(),
+                    .expect("build request"),
             )
             .await
-            .unwrap();
+            .expect("request should succeed");
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
@@ -1139,10 +1146,10 @@ mod tests {
                 Request::builder()
                     .uri("/git/test-forge/org/repo.git/info/refs?service=git-upload-pack")
                     .body(Body::empty())
-                    .unwrap(),
+                    .expect("build request"),
             )
             .await
-            .unwrap();
+            .expect("request should succeed");
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
@@ -1190,10 +1197,10 @@ mod tests {
                     .uri("/git/test-forge/org/secret-repo.git/info/refs?service=git-upload-pack")
                     .header("authorization", "Bearer test-token")
                     .body(Body::empty())
-                    .unwrap(),
+                    .expect("build request"),
             )
             .await
-            .unwrap();
+            .expect("request should succeed");
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }

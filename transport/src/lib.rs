@@ -2322,6 +2322,7 @@ pub async fn serve_stdio(config: ShimConfig) -> Result<(), TransportError> {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use std::fmt::Write;
     use std::sync::Arc;
@@ -2337,7 +2338,8 @@ mod tests {
     #[test]
     fn deserialize_add_issue_label_tool() {
         let json = r#"{"forge":"f","index":5,"label":"needs-input","owner":"o","repo":"r"}"#;
-        let tool: AddIssueLabelTool = serde_json::from_str(json).unwrap();
+        let tool: AddIssueLabelTool =
+            serde_json::from_str(json).expect("deserialize AddIssueLabelTool");
         assert_eq!(tool.forge, "f");
         assert_eq!(tool.index, 5);
         assert_eq!(tool.label, "needs-input");
@@ -2348,14 +2350,16 @@ mod tests {
     #[test]
     fn deserialize_add_issue_label_tool_string_index() {
         let json = r#"{"forge":"f","index":"5","label":"needs-input","owner":"o","repo":"r"}"#;
-        let tool: AddIssueLabelTool = serde_json::from_str(json).unwrap();
+        let tool: AddIssueLabelTool =
+            serde_json::from_str(json).expect("deserialize AddIssueLabelTool from string index");
         assert_eq!(tool.index, 5);
     }
 
     #[test]
     fn deserialize_remove_issue_label_tool() {
         let json = r#"{"forge":"f","index":3,"label":"needs-input","owner":"o","repo":"r"}"#;
-        let tool: RemoveIssueLabelTool = serde_json::from_str(json).unwrap();
+        let tool: RemoveIssueLabelTool =
+            serde_json::from_str(json).expect("deserialize RemoveIssueLabelTool");
         assert_eq!(tool.forge, "f");
         assert_eq!(tool.index, 3);
         assert_eq!(tool.label, "needs-input");
@@ -2366,14 +2370,16 @@ mod tests {
     #[test]
     fn deserialize_index_from_number() {
         let json = r#"{"forge":"f","index":5,"owner":"o","repo":"r"}"#;
-        let tool: CloseChangeRequestTool = serde_json::from_str(json).unwrap();
+        let tool: CloseChangeRequestTool =
+            serde_json::from_str(json).expect("deserialize index from number");
         assert_eq!(tool.index, 5);
     }
 
     #[test]
     fn deserialize_index_from_string() {
         let json = r#"{"forge":"f","index":"5","owner":"o","repo":"r"}"#;
-        let tool: CloseChangeRequestTool = serde_json::from_str(json).unwrap();
+        let tool: CloseChangeRequestTool =
+            serde_json::from_str(json).expect("deserialize index from string");
         assert_eq!(tool.index, 5);
     }
 
@@ -2485,7 +2491,7 @@ mod tests {
             "https://example.com",
             &["api", "v1", "repos", "org", "repo", "contents", "a?b#c"],
         )
-        .unwrap();
+        .expect("build url with reserved characters");
         let path = url.path();
         // '?' and '#' change URL semantics and must be percent-encoded in paths
         assert!(
@@ -2508,10 +2514,10 @@ mod tests {
             "https://example.com",
             &["api", "v1", "repos", "org", "repo", "contents", "file"],
         )
-        .unwrap();
+        .expect("build url for query params test");
         url.query_pairs_mut()
             .append_pair("ref", "feat/branch&evil=1");
-        let query = url.query().unwrap();
+        let query = url.query().expect("url should have query string");
         // The & in the ref value should be encoded, not treated as a separator
         assert!(
             !query.contains("evil=1"),
@@ -2524,7 +2530,8 @@ mod tests {
         let path_parts: Vec<&str> = "src/main.rs".split('/').collect();
         let mut segments: Vec<&str> = vec!["api", "v1", "repos", "org", "repo", "contents"];
         segments.extend(path_parts.iter());
-        let url = McpShim::build_url("https://example.com", &segments).unwrap();
+        let url = McpShim::build_url("https://example.com", &segments)
+            .expect("build url with nested path");
         assert_eq!(url.path(), "/api/v1/repos/org/repo/contents/src/main.rs");
     }
 
@@ -2662,7 +2669,7 @@ mod tests {
             "git_ref": "main"
         })
         .as_object()
-        .unwrap()
+        .expect("json args as object")
         .clone();
 
         let result = client
@@ -2715,7 +2722,7 @@ mod tests {
             "patch": "diff..."
         })
         .as_object()
-        .unwrap()
+        .expect("json args as object")
         .clone();
 
         let result = client
@@ -2763,7 +2770,7 @@ mod tests {
             "merge_style": "rebase"
         })
         .as_object()
-        .unwrap()
+        .expect("json args as object")
         .clone();
 
         let result = client
@@ -2782,7 +2789,7 @@ mod tests {
         let requests: Vec<_> = mock_server
             .received_requests()
             .await
-            .unwrap()
+            .expect("received requests")
             .into_iter()
             .filter(|r| r.url.path().contains("automerge"))
             .collect();
@@ -2822,7 +2829,7 @@ mod tests {
             "merge_style": "rebase"
         })
         .as_object()
-        .unwrap()
+        .expect("json args as object")
         .clone();
 
         let result = client
@@ -2840,7 +2847,7 @@ mod tests {
         let requests: Vec<_> = mock_server
             .received_requests()
             .await
-            .unwrap()
+            .expect("received requests")
             .into_iter()
             .filter(|r| r.url.path().contains("automerge"))
             .collect();
@@ -2892,7 +2899,7 @@ mod tests {
             "index": 1
         })
         .as_object()
-        .unwrap()
+        .expect("json args as object")
         .clone();
 
         let result = client
@@ -3037,7 +3044,7 @@ mod tests {
             "state": "open"
         })
         .as_object()
-        .unwrap()
+        .expect("json args as object")
         .clone();
 
         let result = client
@@ -3080,7 +3087,7 @@ mod tests {
             "index": 42
         })
         .as_object()
-        .unwrap()
+        .expect("json args as object")
         .clone();
 
         let result = client
@@ -3124,7 +3131,7 @@ mod tests {
             "body": "noted"
         })
         .as_object()
-        .unwrap()
+        .expect("json args as object")
         .clone();
 
         let result = client
@@ -3175,7 +3182,7 @@ mod tests {
             "body": "Something is broken"
         })
         .as_object()
-        .unwrap()
+        .expect("json args as object")
         .clone();
 
         let result = client
@@ -3527,7 +3534,7 @@ mod tests {
             "body": "Updated body"
         })
         .as_object()
-        .unwrap()
+        .expect("json args as object")
         .clone();
 
         let result = client
@@ -3577,7 +3584,7 @@ mod tests {
             "index": 1
         })
         .as_object()
-        .unwrap()
+        .expect("json args as object")
         .clone();
 
         let result = client
@@ -3643,7 +3650,7 @@ mod tests {
             "index": 42
         })
         .as_object()
-        .unwrap()
+        .expect("json args as object")
         .clone();
 
         let result = client
@@ -3748,7 +3755,7 @@ mod tests {
             "forge": "alpha", "owner": "org", "repo": "repo", "index": 1
         })
         .as_object()
-        .unwrap()
+        .expect("json args as object")
         .clone();
         let result = client
             .call_tool(CallToolRequestParams::new("get_issue").with_arguments(args_alpha))
@@ -3766,7 +3773,7 @@ mod tests {
             "forge": "beta", "owner": "org", "repo": "repo", "index": 2
         })
         .as_object()
-        .unwrap()
+        .expect("json args as object")
         .clone();
         let result = client
             .call_tool(CallToolRequestParams::new("get_issue").with_arguments(args_beta))
@@ -3814,7 +3821,7 @@ mod tests {
             "forge": "shared", "owner": "org", "repo": "repo", "index": 1
         })
         .as_object()
-        .unwrap()
+        .expect("json args as object")
         .clone();
 
         // MCP tool errors propagate as Err from call_tool
@@ -3871,7 +3878,7 @@ mod tests {
             "forge": "nonexistent", "owner": "org", "repo": "repo", "index": 1
         })
         .as_object()
-        .unwrap()
+        .expect("json args as object")
         .clone();
 
         // MCP tool errors propagate as Err from call_tool
@@ -3957,7 +3964,7 @@ mod tests {
             "forge": "alpha", "owner": "org", "repo": "repo", "index": 1
         })
         .as_object()
-        .unwrap()
+        .expect("json args as object")
         .clone();
         let result = client
             .call_tool(CallToolRequestParams::new("get_issue").with_arguments(args_alpha))
@@ -3988,7 +3995,7 @@ mod tests {
             "forge": "beta", "owner": "org", "repo": "repo", "index": 2
         })
         .as_object()
-        .unwrap()
+        .expect("json args as object")
         .clone();
         let result = client
             .call_tool(CallToolRequestParams::new("get_issue").with_arguments(args_beta))
@@ -4159,7 +4166,7 @@ mod tests {
             "forge": "healthy", "owner": "org", "repo": "repo", "index": 1
         })
         .as_object()
-        .unwrap()
+        .expect("json args as object")
         .clone();
 
         let result = client
@@ -4382,7 +4389,7 @@ mod tests {
             .as_array()
             .expect("ambiguous_aliases array");
         assert_eq!(ambiguous.len(), 1);
-        let msg = ambiguous[0].as_str().unwrap();
+        let msg = ambiguous[0].as_str().expect("ambiguous alias as string");
         assert!(
             msg.contains("shared"),
             "ambiguity message should mention the alias: {msg}"

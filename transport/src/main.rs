@@ -159,6 +159,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -171,7 +172,7 @@ mod tests {
             token_file: None,
             url: "https://example.com".to_string(),
         };
-        let err = resolve_gateway_token(&gw).unwrap_err();
+        let err = resolve_gateway_token(&gw).expect_err("multiple token sources should fail");
         let msg = err.to_string();
         assert!(
             msg.contains("only one of"),
@@ -188,7 +189,7 @@ mod tests {
             token_file: Some(PathBuf::from("/tmp/token")),
             url: "https://example.com".to_string(),
         };
-        let err = resolve_gateway_token(&gw).unwrap_err();
+        let err = resolve_gateway_token(&gw).expect_err("all three token sources should fail");
         let msg = err.to_string();
         assert!(
             msg.contains("found 3"),
@@ -205,7 +206,10 @@ mod tests {
             token_file: None,
             url: "https://example.com".to_string(),
         };
-        assert_eq!(resolve_gateway_token(&gw).unwrap(), "my-secret");
+        assert_eq!(
+            resolve_gateway_token(&gw).expect("resolve token"),
+            "my-secret"
+        );
     }
 
     #[test]
@@ -217,7 +221,7 @@ mod tests {
             token_file: None,
             url: "https://example.com".to_string(),
         };
-        let err = resolve_gateway_token(&gw).unwrap_err();
+        let err = resolve_gateway_token(&gw).expect_err("no token sources should fail");
         let msg = err.to_string();
         assert!(
             msg.contains("one of token, token_env, or token_file is required"),

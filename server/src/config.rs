@@ -282,6 +282,7 @@ pub fn parse_config(toml_str: &str) -> Result<ServerConfig, toml::de::Error> {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 

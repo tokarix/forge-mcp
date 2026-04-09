@@ -147,7 +147,9 @@ impl AutoMergeService {
         }
 
         // Last resort: first allowed style.
-        Ok(settings.allowed_styles.first().cloned().unwrap())
+        settings.allowed_styles.first().cloned().ok_or_else(|| {
+            ForgeError::InvalidPayload("repository has no allowed merge styles".to_string())
+        })
     }
 
     fn handle_error(&self, event: &PullRequestReviewEvent, error: &ServiceError) {
@@ -195,6 +197,7 @@ impl AutoMergeService {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use domain::RepositoryMergeSettings;
 
@@ -214,21 +217,24 @@ mod tests {
     #[tokio::test]
     async fn choose_merge_style_prefers_default_when_allowed() {
         let settings = test_merge_settings(vec!["merge", "rebase", "squash"], Some("squash"));
-        let result = AutoMergeService::choose_merge_style(&settings).unwrap();
+        let result =
+            AutoMergeService::choose_merge_style(&settings).expect("should choose merge style");
         assert_eq!(result, "squash");
     }
 
     #[tokio::test]
     async fn choose_merge_style_falls_back_when_default_not_allowed() {
         let settings = test_merge_settings(vec!["merge", "squash"], Some("rebase"));
-        let result = AutoMergeService::choose_merge_style(&settings).unwrap();
+        let result = AutoMergeService::choose_merge_style(&settings)
+            .expect("should fall back to allowed style");
         assert_eq!(result, "squash");
     }
 
     #[tokio::test]
     async fn choose_merge_style_falls_back_to_merge_last() {
         let settings = test_merge_settings(vec!["merge"], Some("rebase"));
-        let result = AutoMergeService::choose_merge_style(&settings).unwrap();
+        let result =
+            AutoMergeService::choose_merge_style(&settings).expect("should fall back to merge");
         assert_eq!(result, "merge");
     }
 
@@ -242,7 +248,8 @@ mod tests {
     #[tokio::test]
     async fn choose_merge_style_prefers_rebase_without_default() {
         let settings = test_merge_settings(vec!["merge", "rebase", "squash"], None);
-        let result = AutoMergeService::choose_merge_style(&settings).unwrap();
+        let result = AutoMergeService::choose_merge_style(&settings)
+            .expect("should prefer rebase without default");
         assert_eq!(result, "rebase");
     }
 
@@ -252,14 +259,16 @@ mod tests {
             vec!["rebase", "fast-forward-only"],
             Some("fast-forward-only"),
         );
-        let result = AutoMergeService::choose_merge_style(&settings).unwrap();
+        let result = AutoMergeService::choose_merge_style(&settings)
+            .expect("should prefer fast-forward-only default");
         assert_eq!(result, "fast-forward-only");
     }
 
     #[tokio::test]
     async fn choose_merge_style_falls_back_to_rebase_merge_when_needed() {
         let settings = test_merge_settings(vec!["rebase-merge"], None);
-        let result = AutoMergeService::choose_merge_style(&settings).unwrap();
+        let result = AutoMergeService::choose_merge_style(&settings)
+            .expect("should fall back to rebase-merge");
         assert_eq!(result, "rebase-merge");
     }
 }

@@ -129,6 +129,7 @@ pub fn evaluate(
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use crate::{AgentIdentity, ForgeKind, RepositoryRef};
 

@@ -86,6 +86,20 @@ fn resolve_authenticated_agent<'a>(
     })
 }
 
+/// Serializes a value to a `serde_json::Value`, mapping errors to 500.
+fn to_json_value<T: serde::Serialize>(
+    value: &T,
+) -> Result<serde_json::Value, (StatusCode, Json<ErrorBody>)> {
+    serde_json::to_value(value).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorBody {
+                error: format!("serialization failed: {e}"),
+            }),
+        )
+    })
+}
+
 /// Maps a `ServiceError` to an HTTP status code and error body.
 #[allow(clippy::needless_pass_by_value)]
 fn map_service_error(err: ServiceError) -> (StatusCode, Json<ErrorBody>) {
@@ -429,9 +443,7 @@ pub async fn get_pull_diff(
         .await
         .map_err(map_service_error)?;
 
-    Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(
-        serde_json::to_value(&result).expect("serializable"),
-    ))
+    Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(to_json_value(&result)?))
 }
 
 #[utoipa::path(
@@ -474,9 +486,7 @@ pub async fn get_pull(
         .await
         .map_err(map_service_error)?;
 
-    Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(
-        serde_json::to_value(&result).expect("serializable"),
-    ))
+    Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(to_json_value(&result)?))
 }
 
 #[utoipa::path(
@@ -519,9 +529,7 @@ pub async fn get_pull_checks(
         .await
         .map_err(map_service_error)?;
 
-    Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(
-        serde_json::to_value(&result).expect("serializable"),
-    ))
+    Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(to_json_value(&result)?))
 }
 
 #[utoipa::path(
@@ -571,9 +579,7 @@ pub async fn list_pulls(
         .await
         .map_err(map_service_error)?;
 
-    Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(
-        serde_json::to_value(&result).expect("serializable"),
-    ))
+    Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(to_json_value(&result)?))
 }
 
 #[utoipa::path(
@@ -829,7 +835,7 @@ pub async fn post_pulls(
 
     Ok::<_, (StatusCode, Json<ErrorBody>)>((
         StatusCode::CREATED,
-        Json(serde_json::to_value(&result.change_request).expect("serializable")),
+        Json(to_json_value(&result.change_request)?),
     ))
 }
 
@@ -882,9 +888,7 @@ pub async fn close_pull(
         .await
         .map_err(map_service_error)?;
 
-    Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(
-        serde_json::to_value(&result).expect("serializable"),
-    ))
+    Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(to_json_value(&result)?))
 }
 
 #[utoipa::path(
@@ -940,9 +944,7 @@ pub async fn update_pull(
         .await
         .map_err(map_service_error)?;
 
-    Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(
-        serde_json::to_value(&result).expect("serializable"),
-    ))
+    Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(to_json_value(&result)?))
 }
 
 #[utoipa::path(
@@ -997,10 +999,7 @@ pub async fn comment_on_pull(
         .await
         .map_err(map_service_error)?;
 
-    Ok::<_, (StatusCode, Json<ErrorBody>)>((
-        StatusCode::CREATED,
-        Json(serde_json::to_value(&result).expect("serializable")),
-    ))
+    Ok::<_, (StatusCode, Json<ErrorBody>)>((StatusCode::CREATED, Json(to_json_value(&result)?)))
 }
 
 #[utoipa::path(
@@ -1043,9 +1042,7 @@ pub async fn get_pull_comments(
         .await
         .map_err(map_service_error)?;
 
-    Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(
-        serde_json::to_value(&result).expect("serializable"),
-    ))
+    Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(to_json_value(&result)?))
 }
 
 #[utoipa::path(
@@ -1158,10 +1155,7 @@ pub async fn submit_pull_review(
         .await
         .map_err(map_service_error)?;
 
-    Ok::<_, (StatusCode, Json<ErrorBody>)>((
-        StatusCode::CREATED,
-        Json(serde_json::to_value(&result).expect("serializable")),
-    ))
+    Ok::<_, (StatusCode, Json<ErrorBody>)>((StatusCode::CREATED, Json(to_json_value(&result)?)))
 }
 
 #[utoipa::path(
@@ -1205,9 +1199,7 @@ pub async fn list_issues(
         .await
         .map_err(map_service_error)?;
 
-    Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(
-        serde_json::to_value(&result).expect("serializable"),
-    ))
+    Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(to_json_value(&result)?))
 }
 
 #[utoipa::path(
@@ -1250,9 +1242,7 @@ pub async fn get_issue(
         .await
         .map_err(map_service_error)?;
 
-    Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(
-        serde_json::to_value(&result).expect("serializable"),
-    ))
+    Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(to_json_value(&result)?))
 }
 
 #[utoipa::path(
@@ -1295,9 +1285,7 @@ pub async fn get_issue_comments(
         .await
         .map_err(map_service_error)?;
 
-    Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(
-        serde_json::to_value(&result).expect("serializable"),
-    ))
+    Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(to_json_value(&result)?))
 }
 
 #[utoipa::path(
@@ -1340,9 +1328,7 @@ pub async fn get_issue_dependencies(
         .await
         .map_err(map_service_error)?;
 
-    Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(
-        serde_json::to_value(&result).expect("serializable"),
-    ))
+    Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(to_json_value(&result)?))
 }
 
 #[utoipa::path(
@@ -1395,10 +1381,7 @@ pub async fn create_issue(
         .await
         .map_err(map_service_error)?;
 
-    Ok::<_, (StatusCode, Json<ErrorBody>)>((
-        StatusCode::CREATED,
-        Json(serde_json::to_value(&result).expect("serializable")),
-    ))
+    Ok::<_, (StatusCode, Json<ErrorBody>)>((StatusCode::CREATED, Json(to_json_value(&result)?)))
 }
 
 #[utoipa::path(
@@ -1452,9 +1435,7 @@ pub async fn comment_on_issue(
         .await
         .map_err(map_service_error)?;
 
-    Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(
-        serde_json::to_value(&result).expect("serializable"),
-    ))
+    Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(to_json_value(&result)?))
 }
 
 #[utoipa::path(
@@ -1511,9 +1492,7 @@ pub async fn update_issue(
             .await
             .map_err(map_service_error)?;
 
-        return Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(
-            serde_json::to_value(&result).expect("serializable"),
-        ));
+        return Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(to_json_value(&result)?));
     }
 
     // Handle assign
@@ -1533,7 +1512,7 @@ pub async fn update_issue(
             .await
             .map_err(map_service_error)?;
 
-        return Ok(Json(serde_json::to_value(&result).expect("serializable")));
+        return Ok(Json(to_json_value(&result)?));
     }
 
     // Handle title/body update
@@ -1554,7 +1533,7 @@ pub async fn update_issue(
             .await
             .map_err(map_service_error)?;
 
-        return Ok(Json(serde_json::to_value(&result).expect("serializable")));
+        return Ok(Json(to_json_value(&result)?));
     }
 
     Err((
@@ -1616,9 +1595,7 @@ pub async fn add_issue_dependency(
         .await
         .map_err(map_service_error)?;
 
-    Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(
-        serde_json::to_value(&result).expect("serializable"),
-    ))
+    Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(to_json_value(&result)?))
 }
 
 #[utoipa::path(
@@ -1672,9 +1649,7 @@ pub async fn add_issue_label(
         .await
         .map_err(map_service_error)?;
 
-    Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(
-        serde_json::to_value(&result).expect("serializable"),
-    ))
+    Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(to_json_value(&result)?))
 }
 
 #[utoipa::path(
@@ -1727,9 +1702,7 @@ pub async fn remove_issue_dependency(
         .await
         .map_err(map_service_error)?;
 
-    Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(
-        serde_json::to_value(&result).expect("serializable"),
-    ))
+    Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(to_json_value(&result)?))
 }
 
 #[utoipa::path(
@@ -1782,9 +1755,7 @@ pub async fn remove_issue_label(
         .await
         .map_err(map_service_error)?;
 
-    Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(
-        serde_json::to_value(&result).expect("serializable"),
-    ))
+    Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(to_json_value(&result)?))
 }
 
 /// GET /api/v1/agent/info
@@ -1857,6 +1828,7 @@ pub async fn agent_info(State(state): State<AppState>, headers: HeaderMap) -> im
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::todo, clippy::unimplemented)]
 mod tests {
     use std::{collections::HashMap, sync::Arc};
 
@@ -2653,10 +2625,10 @@ mod tests {
                 Request::builder()
                     .uri("/api/v1/docs")
                     .body(Body::empty())
-                    .unwrap(),
+                    .expect("build request"),
             )
             .await
-            .unwrap();
+            .expect("request should succeed");
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
@@ -2669,16 +2641,16 @@ mod tests {
                     .uri("/api/v1/repos/test-forge/org/repo/contents/README.md")
                     .header("authorization", "Bearer test-token")
                     .body(Body::empty())
-                    .unwrap(),
+                    .expect("build request"),
             )
             .await
-            .unwrap();
+            .expect("request should succeed");
 
         assert_eq!(response.status(), StatusCode::OK);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
-            .unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            .expect("read response body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("parse JSON response");
         assert_eq!(json["content"], "file-content");
         assert_eq!(json["path"], "README.md");
     }
@@ -2697,16 +2669,16 @@ mod tests {
                         serde_json::json!({"title": "Bug report", "body": "Something is broken"})
                             .to_string(),
                     ))
-                    .unwrap(),
+                    .expect("build request"),
             )
             .await
-            .unwrap();
+            .expect("request should succeed");
 
         assert_eq!(response.status(), StatusCode::CREATED);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
-            .unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            .expect("read response body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("parse JSON response");
         assert_eq!(json["title"], "Bug report");
         assert_eq!(json["body"], "Something is broken");
         assert_eq!(json["state"], "open");
@@ -2720,10 +2692,10 @@ mod tests {
                 Request::builder()
                     .uri("/api/v1/repos/test-forge/org/repo/contents/README.md")
                     .body(Body::empty())
-                    .unwrap(),
+                    .expect("build request"),
             )
             .await
-            .unwrap();
+            .expect("request should succeed");
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
@@ -2762,10 +2734,10 @@ mod tests {
                     .uri("/api/v1/repos/test-forge/org/secret-repo/contents/README.md")
                     .header("authorization", "Bearer test-token")
                     .body(Body::empty())
-                    .unwrap(),
+                    .expect("build request"),
             )
             .await
-            .unwrap();
+            .expect("request should succeed");
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
@@ -2779,10 +2751,10 @@ mod tests {
                     .uri("/api/v1/repos/test-forge/org/repo/contents/README.md")
                     .header("authorization", "Bearer wrong-token")
                     .body(Body::empty())
-                    .unwrap(),
+                    .expect("build request"),
             )
             .await
-            .unwrap();
+            .expect("request should succeed");
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
@@ -2803,17 +2775,19 @@ mod tests {
                     .uri("/api/v1/repos/test-forge/org/repo/patches")
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
-                    .unwrap(),
+                    .body(Body::from(
+                        serde_json::to_vec(&body).expect("serialize JSON body"),
+                    ))
+                    .expect("build request"),
             )
             .await
-            .unwrap();
+            .expect("request should succeed");
 
         assert_eq!(response.status(), StatusCode::CREATED);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
-            .unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            .expect("read response body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("parse JSON response");
         assert_eq!(json["branch"], "agent/fix");
         assert_eq!(json["commit_sha"], "abc123");
     }
@@ -2827,16 +2801,16 @@ mod tests {
                     .uri("/api/v1/repos/test-forge/org/repo/pulls")
                     .header("authorization", "Bearer test-token")
                     .body(Body::empty())
-                    .unwrap(),
+                    .expect("build request"),
             )
             .await
-            .unwrap();
+            .expect("request should succeed");
 
         assert_eq!(response.status(), StatusCode::OK);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
-            .unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            .expect("read response body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("parse JSON response");
         assert!(json.as_array().expect("should be array").is_empty());
     }
 
@@ -2856,17 +2830,19 @@ mod tests {
                     .uri("/api/v1/repos/test-forge/org/repo/pulls")
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
-                    .unwrap(),
+                    .body(Body::from(
+                        serde_json::to_vec(&body).expect("serialize JSON body"),
+                    ))
+                    .expect("build request"),
             )
             .await
-            .unwrap();
+            .expect("request should succeed");
 
         assert_eq!(response.status(), StatusCode::CREATED);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
-            .unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            .expect("read response body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("parse JSON response");
         assert_eq!(json["index"], 1);
         assert_eq!(json["state"], "Open");
     }
@@ -2880,16 +2856,16 @@ mod tests {
                     .uri("/api/v1/repos/test-forge/org/repo/pulls/1")
                     .header("authorization", "Bearer test-token")
                     .body(Body::empty())
-                    .unwrap(),
+                    .expect("build request"),
             )
             .await
-            .unwrap();
+            .expect("request should succeed");
 
         assert_eq!(response.status(), StatusCode::OK);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
-            .unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            .expect("read response body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("parse JSON response");
         assert_eq!(json["index"], 1);
     }
 
@@ -2935,21 +2911,23 @@ mod tests {
                     .uri("/api/v1/repos/test-forge/org/repo/patches")
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
-                    .unwrap(),
+                    .body(Body::from(
+                        serde_json::to_vec(&body).expect("serialize JSON body"),
+                    ))
+                    .expect("build request"),
             )
             .await
-            .unwrap();
+            .expect("request should succeed");
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
-            .unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            .expect("read response body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("parse JSON response");
         assert!(
             json["error"]
                 .as_str()
-                .unwrap()
+                .expect("error field should be a string")
                 .contains("does not start with")
         );
     }
@@ -2963,10 +2941,10 @@ mod tests {
                     .uri("/api/v1/repos/nonexistent/org/repo/contents/README.md")
                     .header("authorization", "Bearer test-token")
                     .body(Body::empty())
-                    .unwrap(),
+                    .expect("build request"),
             )
             .await
-            .unwrap();
+            .expect("request should succeed");
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
@@ -2979,18 +2957,20 @@ mod tests {
                     .uri("/api/v1/agent/info")
                     .header("authorization", "Bearer test-token")
                     .body(Body::empty())
-                    .unwrap(),
+                    .expect("build request"),
             )
             .await
-            .unwrap();
+            .expect("request should succeed");
         assert_eq!(response.status(), StatusCode::OK);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
-            .unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            .expect("read response body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("parse JSON response");
         assert_eq!(json["agent_id"], "codex");
         assert_eq!(json["branch_prefix"], "agent/");
-        let forges = json["forges"].as_array().unwrap();
+        let forges = json["forges"]
+            .as_array()
+            .expect("forges should be an array");
         assert_eq!(forges.len(), 1);
         assert_eq!(forges[0]["alias"], "test-forge");
         assert_eq!(forges[0]["type"], "forgejo");
@@ -3005,10 +2985,10 @@ mod tests {
                 Request::builder()
                     .uri("/api/v1/agent/info")
                     .body(Body::empty())
-                    .unwrap(),
+                    .expect("build request"),
             )
             .await
-            .unwrap();
+            .expect("request should succeed");
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
@@ -3052,16 +3032,18 @@ mod tests {
                     .uri("/api/v1/agent/info")
                     .header("authorization", "Bearer restricted-token")
                     .body(Body::empty())
-                    .unwrap(),
+                    .expect("build request"),
             )
             .await
-            .unwrap();
+            .expect("request should succeed");
         assert_eq!(response.status(), StatusCode::OK);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
-            .unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        let forges = json["forges"].as_array().unwrap();
+            .expect("read response body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("parse JSON response");
+        let forges = json["forges"]
+            .as_array()
+            .expect("forges should be an array");
         // Only test-forge should be visible, not other-forge
         assert_eq!(forges.len(), 1);
         assert_eq!(forges[0]["alias"], "test-forge");
@@ -3100,13 +3082,13 @@ mod tests {
                     .uri("/api/v1/agent/info")
                     .header("authorization", "Bearer test-token")
                     .body(Body::empty())
-                    .unwrap(),
+                    .expect("build request"),
             )
             .await
-            .unwrap();
+            .expect("request should succeed");
         assert_eq!(response.status(), StatusCode::OK);
 
-        let records = audit_sink.records();
+        let records = audit_sink.records().expect("should have audit records");
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].action, "agent_info");
         assert_eq!(records[0].target, "self");
@@ -3143,15 +3125,15 @@ mod tests {
                     .uri("/api/v1/agent/info")
                     .header("authorization", "Bearer noprefix-token")
                     .body(Body::empty())
-                    .unwrap(),
+                    .expect("build request"),
             )
             .await
-            .unwrap();
+            .expect("request should succeed");
         assert_eq!(response.status(), StatusCode::OK);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
-            .unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            .expect("read response body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("parse JSON response");
         assert_eq!(json["agent_id"], "noprefix");
         assert!(json.get("branch_prefix").is_none());
     }
@@ -3165,16 +3147,16 @@ mod tests {
                     .uri("/api/v1/repos/test-forge/org/repo/pulls/1/comments")
                     .header("authorization", "Bearer test-token")
                     .body(Body::empty())
-                    .unwrap(),
+                    .expect("build request"),
             )
             .await
-            .unwrap();
+            .expect("request should succeed");
 
         assert_eq!(response.status(), StatusCode::OK);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
-            .unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            .expect("read response body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("parse JSON response");
         let arr = json.as_array().expect("should be array");
         assert_eq!(arr.len(), 2);
         assert_eq!(arr[0]["author"], "reviewer");
@@ -3203,17 +3185,19 @@ mod tests {
                     .uri("/api/v1/repos/test-forge/org/repo/pulls/1")
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
-                    .unwrap(),
+                    .body(Body::from(
+                        serde_json::to_vec(&body).expect("serialize JSON body"),
+                    ))
+                    .expect("build request"),
             )
             .await
-            .unwrap();
+            .expect("request should succeed");
 
         assert_eq!(response.status(), StatusCode::OK);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
-            .unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            .expect("read response body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("parse JSON response");
         assert_eq!(json["index"], 1);
         assert_eq!(json["title"], "Updated title");
     }
@@ -3231,17 +3215,19 @@ mod tests {
                     .uri("/api/v1/repos/test-forge/org/repo/issues/1")
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
-                    .unwrap(),
+                    .body(Body::from(
+                        serde_json::to_vec(&body).expect("serialize JSON body"),
+                    ))
+                    .expect("build request"),
             )
             .await
-            .unwrap();
+            .expect("request should succeed");
 
         assert_eq!(response.status(), StatusCode::OK);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
-            .unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            .expect("read response body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("parse JSON response");
         assert_eq!(json["index"], 1);
         assert_eq!(json["title"], "Updated issue title");
     }
@@ -3257,11 +3243,13 @@ mod tests {
                     .uri("/api/v1/repos/test-forge/org/repo/issues/1")
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
-                    .unwrap(),
+                    .body(Body::from(
+                        serde_json::to_vec(&body).expect("serialize JSON body"),
+                    ))
+                    .expect("build request"),
             )
             .await
-            .unwrap();
+            .expect("request should succeed");
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }

@@ -1387,6 +1387,12 @@ where
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::panic,
+    clippy::todo,
+    clippy::unimplemented
+)]
 mod tests {
     use std::sync::{Arc, Mutex};
 
@@ -2007,7 +2013,7 @@ mod tests {
             .expect("read should succeed");
 
         assert_eq!(response.content, "hello");
-        assert_eq!(audit.records().len(), 1);
+        assert_eq!(audit.records().expect("audit records").len(), 1);
     }
 
     #[tokio::test]
@@ -2022,7 +2028,7 @@ mod tests {
             .expect_err("empty path should fail");
 
         assert!(matches!(err, ServiceError::Validation(_)));
-        assert_eq!(audit.records().len(), 0);
+        assert_eq!(audit.records().expect("audit records").len(), 0);
     }
 
     #[tokio::test]
@@ -2037,7 +2043,7 @@ mod tests {
             .expect_err("traversal should fail");
 
         assert!(matches!(err, ServiceError::Validation(_)));
-        assert_eq!(audit.records().len(), 0);
+        assert_eq!(audit.records().expect("audit records").len(), 0);
     }
 
     #[tokio::test]
@@ -2053,7 +2059,7 @@ mod tests {
 
         assert!(matches!(err, ServiceError::Upstream(_)));
         // Audit was recorded before the forge call
-        assert_eq!(audit.records().len(), 1);
+        assert_eq!(audit.records().expect("audit records").len(), 1);
     }
 
     #[tokio::test]
@@ -2407,8 +2413,11 @@ mod tests {
         assert_eq!(result.state, domain::CommitStatusState::Success);
         assert_eq!(result.total_count, 1);
         assert_eq!(result.statuses.len(), 1);
-        assert_eq!(audit.records().len(), 1);
-        assert_eq!(audit.records()[0].action, "get_change_request_checks");
+        assert_eq!(audit.records().expect("audit records").len(), 1);
+        assert_eq!(
+            audit.records().expect("audit records")[0].action,
+            "get_change_request_checks"
+        );
     }
 
     #[tokio::test]
@@ -2912,7 +2921,7 @@ Binary files /dev/null and b/image.png differ
             .expect_err("binary diff should be rejected");
 
         assert!(matches!(err, ServiceError::Validation(_)));
-        assert_eq!(audit.records().len(), 0);
+        assert_eq!(audit.records().expect("audit records").len(), 0);
     }
 
     #[tokio::test]
@@ -2934,7 +2943,7 @@ Binary files /dev/null and b/image.png differ
             .expect_err("wrong branch prefix should be rejected");
 
         assert!(matches!(err, ServiceError::PolicyDenied { .. }));
-        assert_eq!(audit.records().len(), 0);
+        assert_eq!(audit.records().expect("audit records").len(), 0);
     }
 
     #[tokio::test]
@@ -2964,7 +2973,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             .expect_err("protected path should be rejected");
 
         assert!(matches!(err, ServiceError::PolicyDenied { .. }));
-        assert_eq!(audit.records().len(), 0);
+        assert_eq!(audit.records().expect("audit records").len(), 0);
     }
 
     #[tokio::test]
@@ -3001,7 +3010,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             .expect_err("wrong branch prefix should be rejected");
 
         assert!(matches!(err, ServiceError::PolicyDenied { .. }));
-        assert_eq!(audit.records().len(), 0);
+        assert_eq!(audit.records().expect("audit records").len(), 0);
     }
 
     #[tokio::test]
@@ -3067,7 +3076,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             .expect("should succeed");
 
         assert_eq!(response.change_request.index, 1);
-        assert_eq!(audit.records().len(), 1);
+        assert_eq!(audit.records().expect("audit records").len(), 1);
     }
 
     // --- create_issue tests ---
@@ -3104,9 +3113,15 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
         assert_eq!(result.title, "Bug report");
         assert_eq!(result.body, "Something is broken");
         assert_eq!(result.state, "open");
-        assert_eq!(audit.records().len(), 1);
-        assert_eq!(audit.records()[0].action, "create_issue");
-        assert_eq!(audit.records()[0].target, "Bug report");
+        assert_eq!(audit.records().expect("audit records").len(), 1);
+        assert_eq!(
+            audit.records().expect("audit records")[0].action,
+            "create_issue"
+        );
+        assert_eq!(
+            audit.records().expect("audit records")[0].target,
+            "Bug report"
+        );
     }
 
     // --- add_issue_label / remove_issue_label tests ---
@@ -3141,9 +3156,15 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             .expect("should succeed");
 
         assert_eq!(result.labels, vec!["needs-input"]);
-        assert_eq!(audit.records().len(), 1);
-        assert_eq!(audit.records()[0].action, "add_issue_label");
-        assert_eq!(audit.records()[0].target, "#5 +label:needs-input");
+        assert_eq!(audit.records().expect("audit records").len(), 1);
+        assert_eq!(
+            audit.records().expect("audit records")[0].action,
+            "add_issue_label"
+        );
+        assert_eq!(
+            audit.records().expect("audit records")[0].target,
+            "#5 +label:needs-input"
+        );
     }
 
     #[tokio::test]
@@ -3176,9 +3197,15 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             .expect("should succeed");
 
         assert!(result.labels.is_empty());
-        assert_eq!(audit.records().len(), 1);
-        assert_eq!(audit.records()[0].action, "remove_issue_label");
-        assert_eq!(audit.records()[0].target, "#5 -label:needs-input");
+        assert_eq!(audit.records().expect("audit records").len(), 1);
+        assert_eq!(
+            audit.records().expect("audit records")[0].action,
+            "remove_issue_label"
+        );
+        assert_eq!(
+            audit.records().expect("audit records")[0].target,
+            "#5 -label:needs-input"
+        );
     }
 
     // --- close_change_request tests ---
@@ -3529,8 +3556,11 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
 
         assert_eq!(result.state, ChangeRequestState::Closed);
         assert_eq!(result.index, 42);
-        assert_eq!(audit.records().len(), 1);
-        assert_eq!(audit.records()[0].action, "close_change_request");
+        assert_eq!(audit.records().expect("audit records").len(), 1);
+        assert_eq!(
+            audit.records().expect("audit records")[0].action,
+            "close_change_request"
+        );
     }
 
     #[tokio::test]
@@ -3558,7 +3588,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             .expect_err("missing prefix should be rejected");
 
         assert!(matches!(err, ServiceError::PolicyDenied { .. }));
-        assert_eq!(audit.records().len(), 0);
+        assert_eq!(audit.records().expect("audit records").len(), 0);
     }
 
     #[tokio::test]
@@ -3579,7 +3609,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             .expect_err("wrong prefix should be rejected");
 
         assert!(matches!(err, ServiceError::PolicyDenied { .. }));
-        assert_eq!(audit.records().len(), 0);
+        assert_eq!(audit.records().expect("audit records").len(), 0);
     }
 
     // --- comment_on_change_request tests ---
@@ -3619,8 +3649,11 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
 
         assert_eq!(result.index, 42);
         assert_eq!(result.body, "Looks good");
-        assert_eq!(audit.records().len(), 1);
-        assert_eq!(audit.records()[0].action, "comment_on_change_request");
+        assert_eq!(audit.records().expect("audit records").len(), 1);
+        assert_eq!(
+            audit.records().expect("audit records")[0].action,
+            "comment_on_change_request"
+        );
     }
 
     // --- submit_change_request_review tests ---
@@ -3661,8 +3694,11 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
 
         assert_eq!(result.index, 42);
         assert_eq!(result.event, "APPROVED");
-        assert_eq!(audit.records().len(), 1);
-        assert_eq!(audit.records()[0].action, "submit_change_request_review");
+        assert_eq!(audit.records().expect("audit records").len(), 1);
+        assert_eq!(
+            audit.records().expect("audit records")[0].action,
+            "submit_change_request_review"
+        );
     }
 
     #[tokio::test]
@@ -3681,7 +3717,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             .expect_err("invalid event should be rejected");
 
         assert!(matches!(err, ServiceError::Validation(_)));
-        assert_eq!(audit.records().len(), 0);
+        assert_eq!(audit.records().expect("audit records").len(), 0);
     }
 
     // --- credential override tests ---
@@ -3704,7 +3740,11 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
         }
 
         fn captured_token(&self) -> Option<String> {
-            match &*self.captured.lock().unwrap() {
+            match &*self
+                .captured
+                .lock()
+                .expect("captured credential lock poisoned")
+            {
                 CapturedCredential::NotCalled => panic!("adapter was not called"),
                 CapturedCredential::Called(t) => t.clone(),
             }
@@ -3868,7 +3908,11 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             _: &str,
             credential: &domain::ForgeCredential,
         ) -> Result<domain::ChangeRequestComment, ForgeError> {
-            *self.captured.lock().unwrap() = CapturedCredential::Called(credential.token.clone());
+            *self
+                .captured
+                .lock()
+                .expect("captured credential lock poisoned") =
+                CapturedCredential::Called(credential.token.clone());
             Ok(domain::ChangeRequestComment {
                 body: "test".to_string(),
                 id: 1,
@@ -4426,7 +4470,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             .expect_err("invalid merge style should be rejected");
 
         assert!(matches!(err, ServiceError::Validation(_)));
-        assert_eq!(audit.records().len(), 0);
+        assert_eq!(audit.records().expect("audit records").len(), 0);
     }
 
     #[tokio::test]
@@ -4445,7 +4489,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             .expect_err("mismatched head SHA should be rejected");
 
         assert!(matches!(err, ServiceError::Validation(_)));
-        assert_eq!(audit.records().len(), 0);
+        assert_eq!(audit.records().expect("audit records").len(), 0);
     }
 
     #[tokio::test]
@@ -4470,7 +4514,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             .expect_err("missing head SHA should be rejected");
 
         assert!(matches!(err, ServiceError::Validation(_)));
-        assert_eq!(audit.records().len(), 0);
+        assert_eq!(audit.records().expect("audit records").len(), 0);
     }
 
     #[tokio::test]
@@ -4489,16 +4533,27 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             .await
             .expect("should succeed");
 
-        assert_eq!(audit.records().len(), 1);
-        assert_eq!(audit.records()[0].action, "schedule_auto_merge");
-        assert!(audit.records()[0].target.contains("squash"));
+        assert_eq!(audit.records().expect("audit records").len(), 1);
+        assert_eq!(
+            audit.records().expect("audit records")[0].action,
+            "schedule_auto_merge"
+        );
+        assert!(
+            audit.records().expect("audit records")[0]
+                .target
+                .contains("squash")
+        );
         // Full SHA must be preserved — not truncated
         assert!(
-            audit.records()[0]
+            audit.records().expect("audit records")[0]
                 .target
                 .contains(&format!("head:{full_sha}"))
         );
-        assert!(audit.records()[0].target.contains("#42"));
+        assert!(
+            audit.records().expect("audit records")[0]
+                .target
+                .contains("#42")
+        );
     }
 
     #[tokio::test]
@@ -4525,7 +4580,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             }
             other => panic!("expected Validation error, got: {other:?}"),
         }
-        assert_eq!(audit.records().len(), 0);
+        assert_eq!(audit.records().expect("audit records").len(), 0);
     }
 
     #[tokio::test]
@@ -4631,7 +4686,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             .expect_err("both None should be rejected");
 
         assert!(matches!(err, ServiceError::Validation(_)));
-        assert_eq!(audit.records().len(), 0);
+        assert_eq!(audit.records().expect("audit records").len(), 0);
     }
 
     #[tokio::test]
@@ -4657,7 +4712,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             .expect_err("missing prefix should be rejected");
 
         assert!(matches!(err, ServiceError::PolicyDenied { .. }));
-        assert_eq!(audit.records().len(), 0);
+        assert_eq!(audit.records().expect("audit records").len(), 0);
     }
 
     #[tokio::test]
@@ -4678,7 +4733,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             .expect_err("wrong prefix should be rejected");
 
         assert!(matches!(err, ServiceError::PolicyDenied { .. }));
-        assert_eq!(audit.records().len(), 0);
+        assert_eq!(audit.records().expect("audit records").len(), 0);
     }
 
     #[tokio::test]
@@ -4698,9 +4753,12 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
 
         assert_eq!(result.index, 42);
         assert_eq!(result.title, "New title");
-        assert_eq!(audit.records().len(), 1);
-        assert_eq!(audit.records()[0].action, "update_change_request");
-        assert_eq!(audit.records()[0].target, "#42");
+        assert_eq!(audit.records().expect("audit records").len(), 1);
+        assert_eq!(
+            audit.records().expect("audit records")[0].action,
+            "update_change_request"
+        );
+        assert_eq!(audit.records().expect("audit records")[0].target, "#42");
     }
 
     // --- update_issue tests ---
@@ -4743,7 +4801,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             .expect_err("both None should be rejected");
 
         assert!(matches!(err, ServiceError::Validation(_)));
-        assert_eq!(audit.records().len(), 0);
+        assert_eq!(audit.records().expect("audit records").len(), 0);
     }
 
     #[tokio::test]
@@ -4763,9 +4821,12 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
 
         assert_eq!(result.index, 7);
         assert_eq!(result.title, "New title");
-        assert_eq!(audit.records().len(), 1);
-        assert_eq!(audit.records()[0].action, "update_issue");
-        assert_eq!(audit.records()[0].target, "#7");
+        assert_eq!(audit.records().expect("audit records").len(), 1);
+        assert_eq!(
+            audit.records().expect("audit records")[0].action,
+            "update_issue"
+        );
+        assert_eq!(audit.records().expect("audit records")[0].target, "#7");
     }
 
     #[tokio::test]
@@ -4784,7 +4845,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             .expect("should succeed");
 
         assert_eq!(result.body, "Updated body");
-        assert_eq!(audit.records().len(), 1);
+        assert_eq!(audit.records().expect("audit records").len(), 1);
     }
 
     // --- rebase_branch integration tests ---
@@ -4806,20 +4867,29 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
                 args,
                 String::from_utf8_lossy(&out.stderr)
             );
-            String::from_utf8(out.stdout).unwrap().trim().to_string()
+            String::from_utf8(out.stdout)
+                .expect("git output should be valid UTF-8")
+                .trim()
+                .to_string()
         }
 
-        let remote_dir = tempfile::TempDir::new().unwrap();
+        let remote_dir = tempfile::TempDir::new().expect("failed to create remote temp dir");
         run(remote_dir.path(), &["init", "--bare", "remote.git"]);
         let remote_path = remote_dir.path().join("remote.git");
 
-        let work_dir = tempfile::TempDir::new().unwrap();
+        let work_dir = tempfile::TempDir::new().expect("failed to create work temp dir");
         let work = work_dir.path().join("work");
         run(
             work_dir.path(),
-            &["clone", remote_path.to_str().unwrap(), "work"],
+            &[
+                "clone",
+                remote_path
+                    .to_str()
+                    .expect("remote path should be valid UTF-8"),
+                "work",
+            ],
         );
-        std::fs::write(work.join("README.md"), "# Hello\n").unwrap();
+        std::fs::write(work.join("README.md"), "# Hello\n").expect("failed to write README.md");
         run(&work, &["add", "README.md"]);
         run(
             &work,
@@ -4839,7 +4909,8 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
         let mut shas = Vec::new();
         for i in 1..=3 {
             let name = format!("file{i}.txt");
-            std::fs::write(work.join(&name), format!("content{i}")).unwrap();
+            std::fs::write(work.join(&name), format!("content{i}"))
+                .expect("failed to write test file");
             run(&work, &["add", &name]);
             run(
                 &work,
@@ -4884,7 +4955,13 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             repository: RepositoryRef {
                 alias: "test".to_string(),
                 forge: domain::ForgeKind::Forgejo,
-                host: format!("file://{}", remote_path.parent().unwrap().display()),
+                host: format!(
+                    "file://{}",
+                    remote_path
+                        .parent()
+                        .expect("remote path should have parent")
+                        .display()
+                ),
                 name: "remote".to_string(),
                 owner: ".".to_string(),
             },
@@ -4907,8 +4984,11 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             .expect("rebase with drop should succeed");
 
         assert_eq!(result.branch, branch_name);
-        assert_eq!(audit.records().len(), 1);
-        assert_eq!(audit.records()[0].action, "rebase_branch");
+        assert_eq!(audit.records().expect("audit records").len(), 1);
+        assert_eq!(
+            audit.records().expect("audit records")[0].action,
+            "rebase_branch"
+        );
     }
 
     /// Set up a bare remote repo like `setup_rebase_test_repo`, but also
@@ -4928,21 +5008,30 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
                 args,
                 String::from_utf8_lossy(&out.stderr)
             );
-            String::from_utf8(out.stdout).unwrap().trim().to_string()
+            String::from_utf8(out.stdout)
+                .expect("git output should be valid UTF-8")
+                .trim()
+                .to_string()
         }
 
-        let remote_dir = tempfile::TempDir::new().unwrap();
+        let remote_dir = tempfile::TempDir::new().expect("failed to create remote temp dir");
         run(remote_dir.path(), &["init", "--bare", "remote.git"]);
         let remote_path = remote_dir.path().join("remote.git");
 
         // Initial commit on main
-        let work_dir = tempfile::TempDir::new().unwrap();
+        let work_dir = tempfile::TempDir::new().expect("failed to create work temp dir");
         let work = work_dir.path().join("work");
         run(
             work_dir.path(),
-            &["clone", remote_path.to_str().unwrap(), "work"],
+            &[
+                "clone",
+                remote_path
+                    .to_str()
+                    .expect("remote path should be valid UTF-8"),
+                "work",
+            ],
         );
-        std::fs::write(work.join("README.md"), "# Hello\n").unwrap();
+        std::fs::write(work.join("README.md"), "# Hello\n").expect("failed to write README.md");
         run(&work, &["add", "README.md"]);
         run(
             &work,
@@ -4962,7 +5051,8 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
         run(&work, &["checkout", "-b", branch]);
         for i in 1..=2 {
             let name = format!("branch{i}.txt");
-            std::fs::write(work.join(&name), format!("branch-content{i}")).unwrap();
+            std::fs::write(work.join(&name), format!("branch-content{i}"))
+                .expect("failed to write branch test file");
             run(&work, &["add", &name]);
             run(
                 &work,
@@ -4981,7 +5071,8 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
 
         // Advance main
         run(&work, &["checkout", "main"]);
-        std::fs::write(work.join("main-update.txt"), "new main content").unwrap();
+        std::fs::write(work.join("main-update.txt"), "new main content")
+            .expect("failed to write main-update.txt");
         run(&work, &["add", "main-update.txt"]);
         run(
             &work,
@@ -5021,7 +5112,13 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             repository: RepositoryRef {
                 alias: "test".to_string(),
                 forge: domain::ForgeKind::Forgejo,
-                host: format!("file://{}", remote_path.parent().unwrap().display()),
+                host: format!(
+                    "file://{}",
+                    remote_path
+                        .parent()
+                        .expect("remote path should have parent")
+                        .display()
+                ),
                 name: "remote".to_string(),
                 owner: ".".to_string(),
             },
@@ -5044,9 +5141,16 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             .expect("rebase_onto should succeed");
 
         assert_eq!(result.branch, branch_name);
-        assert_eq!(audit.records().len(), 1);
-        assert_eq!(audit.records()[0].action, "rebase_branch");
-        assert!(audit.records()[0].target.contains("rebase-onto:main"));
+        assert_eq!(audit.records().expect("audit records").len(), 1);
+        assert_eq!(
+            audit.records().expect("audit records")[0].action,
+            "rebase_branch"
+        );
+        assert!(
+            audit.records().expect("audit records")[0]
+                .target
+                .contains("rebase-onto:main")
+        );
     }
 
     #[tokio::test]

@@ -365,21 +365,18 @@ pub struct ForgejoAdapter {
 }
 
 impl ForgejoAdapter {
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if the HTTP client cannot be built (should never happen with
-    /// default settings).
-    #[must_use]
-    pub fn new(config: ForgejoConfig) -> Self {
+    /// Returns an error if the HTTP client cannot be built.
+    pub fn new(config: ForgejoConfig) -> Result<Self, ForgeError> {
         install_ring_provider();
 
-        Self {
+        Ok(Self {
             client: reqwest::Client::builder()
                 .redirect(Policy::none())
-                .build()
-                .expect("failed to build HTTP client"),
+                .build()?,
             config,
-        }
+        })
     }
 
     /// Checks the HTTP response status and returns a descriptive error for
@@ -2166,6 +2163,7 @@ fn verify_forgejo_signature(
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic)]
 mod tests {
     use std::fmt::Write as _;
 
@@ -2183,6 +2181,7 @@ mod tests {
             base_url: base_url.to_string(),
             token: Some("test-token".to_string()),
         })
+        .expect("build forgejo adapter")
     }
 
     fn test_repo() -> RepositoryRef {
@@ -2217,9 +2216,9 @@ mod tests {
                 &cred,
             )
             .await
-            .unwrap();
+            .expect("create commit status");
 
-        let requests = mock.received_requests().await.unwrap();
+        let requests = mock.received_requests().await.expect("received requests");
         assert_eq!(requests.len(), 1);
         let body: serde_json::Value =
             serde_json::from_slice(&requests[0].body).expect("valid JSON");
@@ -2250,9 +2249,9 @@ mod tests {
                 &cred,
             )
             .await
-            .unwrap();
+            .expect("create commit status");
 
-        let requests = mock.received_requests().await.unwrap();
+        let requests = mock.received_requests().await.expect("received requests");
         assert_eq!(requests.len(), 1);
     }
 
@@ -2297,9 +2296,9 @@ mod tests {
         adapter
             .schedule_auto_merge(&test_repo(), 42, "rebase", "abc123sha", Some(true), &cred)
             .await
-            .unwrap();
+            .expect("schedule auto merge");
 
-        let requests = mock.received_requests().await.unwrap();
+        let requests = mock.received_requests().await.expect("received requests");
         assert_eq!(requests.len(), 1);
         let body: serde_json::Value =
             serde_json::from_slice(&requests[0].body).expect("valid JSON");
@@ -2324,9 +2323,9 @@ mod tests {
         adapter
             .schedule_auto_merge(&test_repo(), 42, "rebase", "abc123sha", None, &cred)
             .await
-            .unwrap();
+            .expect("schedule auto merge");
 
-        let requests = mock.received_requests().await.unwrap();
+        let requests = mock.received_requests().await.expect("received requests");
         assert_eq!(requests.len(), 1);
         let body: serde_json::Value =
             serde_json::from_slice(&requests[0].body).expect("valid JSON");
@@ -2375,7 +2374,7 @@ mod tests {
             .schedule_auto_merge(&test_repo(), 42, "rebase", "abc123sha", None, &cred)
             .await;
 
-        let err = result.unwrap_err();
+        let err = result.expect_err("should fail with conflict");
         match err {
             ForgeError::UnexpectedStatus { status, .. } => {
                 assert_eq!(status, reqwest::StatusCode::CONFLICT);
@@ -2409,7 +2408,7 @@ mod tests {
         let styles = adapter
             .get_allowed_merge_styles(&test_repo(), &cred)
             .await
-            .unwrap();
+            .expect("get allowed merge styles");
 
         assert!(styles.contains(&"rebase".to_string()));
         assert!(styles.contains(&"squash".to_string()));
@@ -2443,7 +2442,7 @@ mod tests {
         let styles = adapter
             .get_allowed_merge_styles(&test_repo(), &cred)
             .await
-            .unwrap();
+            .expect("get allowed merge styles");
 
         assert_eq!(styles, vec!["rebase-merge"]);
     }
@@ -2473,7 +2472,7 @@ mod tests {
         let styles = adapter
             .get_allowed_merge_styles(&test_repo(), &cred)
             .await
-            .unwrap();
+            .expect("get allowed merge styles");
 
         assert_eq!(styles, vec!["rebase", "fast-forward-only"]);
     }
@@ -2494,7 +2493,7 @@ mod tests {
         let result = adapter
             .get_default_merge_style(&test_repo(), &cred)
             .await
-            .unwrap();
+            .expect("get default merge style");
         assert_eq!(result, Some("squash".to_string()));
     }
 
@@ -2514,7 +2513,7 @@ mod tests {
         let result = adapter
             .get_default_merge_style(&test_repo(), &cred)
             .await
-            .unwrap();
+            .expect("get default merge style");
         assert_eq!(result, None);
     }
 
@@ -2534,7 +2533,7 @@ mod tests {
         let result = adapter
             .get_default_merge_style(&test_repo(), &cred)
             .await
-            .unwrap();
+            .expect("get default merge style");
         assert_eq!(result, None);
     }
 
@@ -2561,7 +2560,7 @@ mod tests {
         let result = adapter
             .get_repository_merge_settings(&test_repo(), &cred)
             .await
-            .unwrap();
+            .expect("get repository merge settings");
         assert_eq!(
             result.allowed_styles,
             vec!["merge".to_string(), "rebase".to_string()]
@@ -2631,7 +2630,7 @@ mod tests {
         let result = adapter
             .get_change_request_comments(&test_repo(), 1, &cred)
             .await
-            .unwrap();
+            .expect("get change request comments");
 
         // PENDING review should be filtered out
         assert_eq!(result.len(), 4);
@@ -3173,7 +3172,7 @@ mod tests {
         let issue = adapter
             .create_issue(&test_repo(), "Bug report", "Something is broken", &cred)
             .await
-            .unwrap();
+            .expect("create issue");
 
         assert_eq!(issue.index, 42);
         assert_eq!(issue.title, "Bug report");
@@ -3181,7 +3180,7 @@ mod tests {
         assert_eq!(issue.state, "open");
         assert_eq!(issue.labels, vec!["bug"]);
 
-        let requests = mock.received_requests().await.unwrap();
+        let requests = mock.received_requests().await.expect("received requests");
         assert_eq!(requests.len(), 1);
         let req_body: serde_json::Value =
             serde_json::from_slice(&requests[0].body).expect("valid JSON");
@@ -3240,11 +3239,11 @@ mod tests {
         let issue = adapter
             .add_issue_label(&test_repo(), 1, "needs-input", &cred)
             .await
-            .unwrap();
+            .expect("add issue label");
 
         assert_eq!(issue.labels, vec!["needs-input"]);
 
-        let requests = mock.received_requests().await.unwrap();
+        let requests = mock.received_requests().await.expect("received requests");
         // GET labels, POST create label, POST add label, GET issue
         assert_eq!(requests.len(), 4);
         assert_eq!(requests[0].method.as_str(), "GET");
@@ -3298,11 +3297,11 @@ mod tests {
         let issue = adapter
             .add_issue_label(&test_repo(), 2, "needs-input", &cred)
             .await
-            .unwrap();
+            .expect("add issue label");
 
         assert_eq!(issue.labels, vec!["needs-input"]);
 
-        let requests = mock.received_requests().await.unwrap();
+        let requests = mock.received_requests().await.expect("received requests");
         // GET labels, POST add label, GET issue (no create — label existed)
         assert_eq!(requests.len(), 3);
         let add_body: serde_json::Value =
@@ -3352,11 +3351,11 @@ mod tests {
         let issue = adapter
             .remove_issue_label(&test_repo(), 1, "needs-input", &cred)
             .await
-            .unwrap();
+            .expect("remove issue label");
 
         assert_eq!(issue.labels, vec!["bug"]);
 
-        let requests = mock.received_requests().await.unwrap();
+        let requests = mock.received_requests().await.expect("received requests");
         // GET labels, DELETE label, GET issue
         assert_eq!(requests.len(), 3);
         assert_eq!(requests[1].method.as_str(), "DELETE");
@@ -3380,7 +3379,9 @@ mod tests {
             .await;
 
         assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
+        let err = result
+            .expect_err("should fail with label not found")
+            .to_string();
         assert!(
             err.contains("not found"),
             "expected 'not found' in error: {err}"
@@ -3414,7 +3415,7 @@ mod tests {
         let result = adapter
             .get_combined_commit_status(&test_repo(), "abc123", &cred)
             .await
-            .unwrap();
+            .expect("get combined commit status");
 
         assert_eq!(result.head_sha, "abc123");
         assert_eq!(result.state, domain::CommitStatusState::Success);
@@ -3444,7 +3445,7 @@ mod tests {
         let result = adapter
             .get_combined_commit_status(&test_repo(), "def456", &cred)
             .await
-            .unwrap();
+            .expect("get combined commit status");
 
         assert_eq!(result.head_sha, "def456");
         assert_eq!(result.state, domain::CommitStatusState::Pending);
@@ -3524,7 +3525,7 @@ mod tests {
         let cred = ForgeCredential { token: None };
         let result = adapter.get_issue(&test_repo(), 1, &cred).await;
 
-        let err = result.unwrap_err();
+        let err = result.expect_err("should fail with redirect");
         match err {
             ForgeError::Redirect { status, location } => {
                 assert_eq!(status, StatusCode::MOVED_PERMANENTLY);
@@ -3550,7 +3551,7 @@ mod tests {
         let cred = ForgeCredential { token: None };
         let result = adapter.get_issue(&test_repo(), 1, &cred).await;
 
-        let err = result.unwrap_err();
+        let err = result.expect_err("should fail with not found");
         match err {
             ForgeError::NotFound { status } => {
                 assert_eq!(status, StatusCode::NOT_FOUND);
@@ -3573,7 +3574,7 @@ mod tests {
         let cred = ForgeCredential { token: None };
         let result = adapter.get_issue(&test_repo(), 1, &cred).await;
 
-        let err = result.unwrap_err();
+        let err = result.expect_err("should fail with unexpected status");
         match err {
             ForgeError::UnexpectedStatus { status, body } => {
                 assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
@@ -3600,7 +3601,7 @@ mod tests {
         let cred = ForgeCredential { token: None };
         let result = adapter.get_issue(&test_repo(), 1, &cred).await;
 
-        let err = result.unwrap_err();
+        let err = result.expect_err("should fail with redirect");
         let msg = err.to_string();
         assert!(
             msg.contains("moved or been renamed"),
@@ -3626,7 +3627,7 @@ mod tests {
         let cred = ForgeCredential { token: None };
         let result = adapter.get_issue(&test_repo(), 1, &cred).await;
 
-        let err = result.unwrap_err();
+        let err = result.expect_err("should fail with not found");
         let msg = err.to_string();
         assert!(
             msg.contains("not found"),

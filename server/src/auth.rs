@@ -97,6 +97,7 @@ impl AgentRegistry {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::config::{AgentConfig, AgentPolicyConfig};
@@ -139,7 +140,10 @@ mod tests {
     #[test]
     fn extract_token_from_bearer() {
         let mut headers = axum::http::HeaderMap::new();
-        headers.insert("authorization", "Bearer my-token".parse().unwrap());
+        headers.insert(
+            "authorization",
+            "Bearer my-token".parse().expect("valid header value"),
+        );
         assert_eq!(extract_token(&headers).as_deref(), Some("my-token"));
     }
 
@@ -149,7 +153,12 @@ mod tests {
         // Git sends Basic auth with user:password — password is the agent token
         let encoded = base64::engine::general_purpose::STANDARD.encode("git:my-token");
         let mut headers = axum::http::HeaderMap::new();
-        headers.insert("authorization", format!("Basic {encoded}").parse().unwrap());
+        headers.insert(
+            "authorization",
+            format!("Basic {encoded}")
+                .parse()
+                .expect("valid header value"),
+        );
         assert_eq!(extract_token(&headers).as_deref(), Some("my-token"));
     }
 
@@ -158,7 +167,12 @@ mod tests {
         use base64::Engine;
         let encoded = base64::engine::general_purpose::STANDARD.encode("git:");
         let mut headers = axum::http::HeaderMap::new();
-        headers.insert("authorization", format!("Basic {encoded}").parse().unwrap());
+        headers.insert(
+            "authorization",
+            format!("Basic {encoded}")
+                .parse()
+                .expect("valid header value"),
+        );
         assert!(extract_token(&headers).is_none());
     }
 
