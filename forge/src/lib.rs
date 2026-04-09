@@ -1835,6 +1835,13 @@ impl ForgeAdapter for ForgejoAdapter {
                 tracing::debug!("schedule_auto_merge: ignoring 500 duplicate-key response",);
                 return Ok(());
             }
+            // Forgejo returns 405 when the PR is already merged or closed.
+            // Nothing left to schedule, so treat as success.
+            if status == reqwest::StatusCode::METHOD_NOT_ALLOWED
+                && body.contains("already been merged")
+            {
+                return Ok(());
+            }
             if status.is_redirection() {
                 let location = "<unknown>".to_string();
                 tracing::warn!(
@@ -2581,6 +2588,54 @@ mod tests {
         match err {
             ForgeError::UnexpectedStatus { status, .. } => {
                 assert_eq!(status, reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+            }
+            other => panic!("expected UnexpectedStatus, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn schedule_auto_merge_succeeds_on_already_merged_405() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path_regex(r"/api/v1/repos/.+/pulls/\d+/merge"))
+            .respond_with(ResponseTemplate::new(405).set_body_json(serde_json::json!({
+                "message": "pull request has already been merged"
+            })))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let result = adapter
+            .schedule_auto_merge(&test_repo(), 42, "rebase", "abc123sha", None, &cred)
+            .await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn schedule_auto_merge_errors_on_unrelated_405() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path_regex(r"/api/v1/repos/.+/pulls/\d+/merge"))
+            .respond_with(ResponseTemplate::new(405).set_body_json(serde_json::json!({
+                "message": "method not allowed"
+            })))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let result = adapter
+            .schedule_auto_merge(&test_repo(), 42, "rebase", "abc123sha", None, &cred)
+            .await;
+
+        let err = result.expect_err("should fail with unexpected status");
+        match err {
+            ForgeError::UnexpectedStatus { status, .. } => {
+                assert_eq!(status, reqwest::StatusCode::METHOD_NOT_ALLOWED);
             }
             other => panic!("expected UnexpectedStatus, got {other:?}"),
         }
