@@ -696,24 +696,28 @@ mod tests {
         async fn get_issue(
             &self,
             _: domain::GetIssueRequest,
+            _: &domain::ForgeCredential,
         ) -> Result<domain::Issue, ServiceError> {
             todo!()
         }
         async fn get_issue_comments(
             &self,
             _: domain::GetIssueCommentsRequest,
+            _: &domain::ForgeCredential,
         ) -> Result<Vec<domain::IssueComment>, ServiceError> {
             todo!()
         }
         async fn get_issue_dependencies(
             &self,
             _: domain::GetIssueDependenciesRequest,
+            _: &domain::ForgeCredential,
         ) -> Result<domain::IssueDependencies, ServiceError> {
             todo!()
         }
         async fn list_issues(
             &self,
             _: domain::ListIssuesRequest,
+            _: &domain::ForgeCredential,
         ) -> Result<Vec<domain::Issue>, ServiceError> {
             todo!()
         }
@@ -733,6 +737,7 @@ mod tests {
         async fn get_change_request_checks(
             &self,
             _request: domain::GetChangeRequestChecksRequest,
+            _: &domain::ForgeCredential,
         ) -> Result<domain::CombinedCommitStatus, ServiceError> {
             unimplemented!()
         }
@@ -740,6 +745,7 @@ mod tests {
         async fn get_change_request_comments(
             &self,
             _request: GetChangeRequestCommentsRequest,
+            _: &domain::ForgeCredential,
         ) -> Result<Vec<ChangeRequestCommentDetail>, ServiceError> {
             unimplemented!()
         }
@@ -761,6 +767,7 @@ mod tests {
         async fn get_change_request(
             &self,
             request: GetChangeRequestRequest,
+            _: &domain::ForgeCredential,
         ) -> Result<ChangeRequest, ServiceError> {
             Ok(ChangeRequest {
                 base_branch: "main".to_string(),

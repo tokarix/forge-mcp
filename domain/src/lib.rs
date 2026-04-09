@@ -922,6 +922,7 @@ pub trait RepositoryReadService: Send + Sync {
     async fn get_change_request_checks(
         &self,
         request: GetChangeRequestChecksRequest,
+        credential: &ForgeCredential,
     ) -> Result<CombinedCommitStatus, ServiceError>;
 
     /// Retrieves the unified diff for a change request.
@@ -944,6 +945,7 @@ pub trait RepositoryReadService: Send + Sync {
     async fn get_change_request(
         &self,
         request: GetChangeRequestRequest,
+        credential: &ForgeCredential,
     ) -> Result<ChangeRequest, ServiceError>;
 
     /// Retrieves all comments and reviews for a change request.
@@ -955,6 +957,7 @@ pub trait RepositoryReadService: Send + Sync {
     async fn get_change_request_comments(
         &self,
         request: GetChangeRequestCommentsRequest,
+        credential: &ForgeCredential,
     ) -> Result<Vec<ChangeRequestCommentDetail>, ServiceError>;
 
     /// Lists change requests, optionally filtered by state.
@@ -974,7 +977,11 @@ pub trait RepositoryReadService: Send + Sync {
     ///
     /// Returns an error if the upstream forge request fails or audit
     /// recording fails.
-    async fn get_issue(&self, request: GetIssueRequest) -> Result<Issue, ServiceError>;
+    async fn get_issue(
+        &self,
+        request: GetIssueRequest,
+        credential: &ForgeCredential,
+    ) -> Result<Issue, ServiceError>;
 
     /// Retrieves all comments for an issue.
     ///
@@ -985,6 +992,7 @@ pub trait RepositoryReadService: Send + Sync {
     async fn get_issue_comments(
         &self,
         request: GetIssueCommentsRequest,
+        credential: &ForgeCredential,
     ) -> Result<Vec<IssueComment>, ServiceError>;
 
     /// Retrieves the dependency relationships for an issue.
@@ -996,6 +1004,7 @@ pub trait RepositoryReadService: Send + Sync {
     async fn get_issue_dependencies(
         &self,
         request: GetIssueDependenciesRequest,
+        credential: &ForgeCredential,
     ) -> Result<IssueDependencies, ServiceError>;
 
     /// Lists issues, optionally filtered by state.
@@ -1004,7 +1013,11 @@ pub trait RepositoryReadService: Send + Sync {
     ///
     /// Returns an error if the upstream forge request fails or audit
     /// recording fails.
-    async fn list_issues(&self, request: ListIssuesRequest) -> Result<Vec<Issue>, ServiceError>;
+    async fn list_issues(
+        &self,
+        request: ListIssuesRequest,
+        credential: &ForgeCredential,
+    ) -> Result<Vec<Issue>, ServiceError>;
 
     /// Reads a single text file from a repository through the control plane.
     ///

@@ -476,13 +476,18 @@ pub async fn get_pull(
         &path.repo,
     )?;
 
+    let credential = resolve_credential(agent, &path.forge, forge);
+
     let result = forge
         .read_service
-        .get_change_request(GetChangeRequestRequest {
-            agent: agent.identity.clone(),
-            index: path.index,
-            repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
-        })
+        .get_change_request(
+            GetChangeRequestRequest {
+                agent: agent.identity.clone(),
+                index: path.index,
+                repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
+            },
+            &credential,
+        )
         .await
         .map_err(map_service_error)?;
 
@@ -519,13 +524,18 @@ pub async fn get_pull_checks(
         &path.repo,
     )?;
 
+    let credential = resolve_credential(agent, &path.forge, forge);
+
     let result = forge
         .read_service
-        .get_change_request_checks(GetChangeRequestChecksRequest {
-            agent: agent.identity.clone(),
-            index: path.index,
-            repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
-        })
+        .get_change_request_checks(
+            GetChangeRequestChecksRequest {
+                agent: agent.identity.clone(),
+                index: path.index,
+                repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
+            },
+            &credential,
+        )
         .await
         .map_err(map_service_error)?;
 
@@ -1032,13 +1042,18 @@ pub async fn get_pull_comments(
         &path.repo,
     )?;
 
+    let credential = resolve_credential(agent, &path.forge, forge);
+
     let result = forge
         .read_service
-        .get_change_request_comments(GetChangeRequestCommentsRequest {
-            agent: agent.identity.clone(),
-            index: path.index,
-            repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
-        })
+        .get_change_request_comments(
+            GetChangeRequestCommentsRequest {
+                agent: agent.identity.clone(),
+                index: path.index,
+                repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
+            },
+            &credential,
+        )
         .await
         .map_err(map_service_error)?;
 
@@ -1189,13 +1204,18 @@ pub async fn list_issues(
         &path.repo,
     )?;
 
+    let credential = resolve_credential(agent, &path.forge, forge);
+
     let result = forge
         .read_service
-        .list_issues(domain::ListIssuesRequest {
-            agent: agent.identity.clone(),
-            repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
-            state: query.state,
-        })
+        .list_issues(
+            domain::ListIssuesRequest {
+                agent: agent.identity.clone(),
+                repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
+                state: query.state,
+            },
+            &credential,
+        )
         .await
         .map_err(map_service_error)?;
 
@@ -1232,13 +1252,18 @@ pub async fn get_issue(
         &path.repo,
     )?;
 
+    let credential = resolve_credential(agent, &path.forge, forge);
+
     let result = forge
         .read_service
-        .get_issue(domain::GetIssueRequest {
-            agent: agent.identity.clone(),
-            index: path.index,
-            repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
-        })
+        .get_issue(
+            domain::GetIssueRequest {
+                agent: agent.identity.clone(),
+                index: path.index,
+                repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
+            },
+            &credential,
+        )
         .await
         .map_err(map_service_error)?;
 
@@ -1275,13 +1300,18 @@ pub async fn get_issue_comments(
         &path.repo,
     )?;
 
+    let credential = resolve_credential(agent, &path.forge, forge);
+
     let result = forge
         .read_service
-        .get_issue_comments(domain::GetIssueCommentsRequest {
-            agent: agent.identity.clone(),
-            index: path.index,
-            repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
-        })
+        .get_issue_comments(
+            domain::GetIssueCommentsRequest {
+                agent: agent.identity.clone(),
+                index: path.index,
+                repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
+            },
+            &credential,
+        )
         .await
         .map_err(map_service_error)?;
 
@@ -1318,13 +1348,18 @@ pub async fn get_issue_dependencies(
         &path.repo,
     )?;
 
+    let credential = resolve_credential(agent, &path.forge, forge);
+
     let result = forge
         .read_service
-        .get_issue_dependencies(domain::GetIssueDependenciesRequest {
-            agent: agent.identity.clone(),
-            index: path.index,
-            repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
-        })
+        .get_issue_dependencies(
+            domain::GetIssueDependenciesRequest {
+                agent: agent.identity.clone(),
+                index: path.index,
+                repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
+            },
+            &credential,
+        )
         .await
         .map_err(map_service_error)?;
 
@@ -2135,24 +2170,28 @@ mod tests {
         async fn get_issue(
             &self,
             _: domain::GetIssueRequest,
+            _: &domain::ForgeCredential,
         ) -> Result<domain::Issue, ServiceError> {
             todo!()
         }
         async fn get_issue_comments(
             &self,
             _: domain::GetIssueCommentsRequest,
+            _: &domain::ForgeCredential,
         ) -> Result<Vec<domain::IssueComment>, ServiceError> {
             todo!()
         }
         async fn get_issue_dependencies(
             &self,
             _: domain::GetIssueDependenciesRequest,
+            _: &domain::ForgeCredential,
         ) -> Result<domain::IssueDependencies, ServiceError> {
             todo!()
         }
         async fn list_issues(
             &self,
             _: domain::ListIssuesRequest,
+            _: &domain::ForgeCredential,
         ) -> Result<Vec<domain::Issue>, ServiceError> {
             todo!()
         }
@@ -2172,6 +2211,7 @@ mod tests {
         async fn get_change_request_comments(
             &self,
             _request: GetChangeRequestCommentsRequest,
+            _: &domain::ForgeCredential,
         ) -> Result<Vec<ChangeRequestCommentDetail>, ServiceError> {
             Ok(vec![
                 ChangeRequestCommentDetail {
@@ -2198,6 +2238,7 @@ mod tests {
         async fn get_change_request_checks(
             &self,
             _request: domain::GetChangeRequestChecksRequest,
+            _: &domain::ForgeCredential,
         ) -> Result<domain::CombinedCommitStatus, ServiceError> {
             unimplemented!()
         }
@@ -2219,6 +2260,7 @@ mod tests {
         async fn get_change_request(
             &self,
             request: GetChangeRequestRequest,
+            _: &domain::ForgeCredential,
         ) -> Result<ChangeRequest, ServiceError> {
             Ok(ChangeRequest {
                 base_branch: "main".to_string(),

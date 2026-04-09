@@ -86,6 +86,7 @@ where
     async fn get_change_request_checks(
         &self,
         request: GetChangeRequestChecksRequest,
+        credential: &ForgeCredential,
     ) -> Result<CombinedCommitStatus, ServiceError> {
         self.audit_sink
             .record(AuditRecord {
@@ -97,11 +98,9 @@ where
             .await
             .map_err(|e| ServiceError::Audit(e.to_string()))?;
 
-        let credential = ForgeCredential { token: None };
-
         let cr = self
             .adapter
-            .get_change_request(&request.repository, request.index, &credential)
+            .get_change_request(&request.repository, request.index, credential)
             .await
             .map_err(|e| ServiceError::Upstream(e.to_string()))?;
 
@@ -110,7 +109,7 @@ where
             .ok_or_else(|| ServiceError::Upstream("change request has no head SHA".to_string()))?;
 
         self.adapter
-            .get_combined_commit_status(&request.repository, &head_sha, &credential)
+            .get_combined_commit_status(&request.repository, &head_sha, credential)
             .await
             .map_err(|e| ServiceError::Upstream(e.to_string()))
     }
@@ -118,6 +117,7 @@ where
     async fn get_change_request_comments(
         &self,
         request: GetChangeRequestCommentsRequest,
+        credential: &ForgeCredential,
     ) -> Result<Vec<ChangeRequestCommentDetail>, ServiceError> {
         self.audit_sink
             .record(AuditRecord {
@@ -130,11 +130,7 @@ where
             .map_err(|e| ServiceError::Audit(e.to_string()))?;
 
         self.adapter
-            .get_change_request_comments(
-                &request.repository,
-                request.index,
-                &ForgeCredential { token: None },
-            )
+            .get_change_request_comments(&request.repository, request.index, credential)
             .await
             .map_err(|e| ServiceError::Upstream(e.to_string()))
     }
@@ -168,6 +164,7 @@ where
     async fn get_change_request(
         &self,
         request: GetChangeRequestRequest,
+        credential: &ForgeCredential,
     ) -> Result<ChangeRequest, ServiceError> {
         self.audit_sink
             .record(AuditRecord {
@@ -180,11 +177,7 @@ where
             .map_err(|e| ServiceError::Audit(e.to_string()))?;
 
         self.adapter
-            .get_change_request(
-                &request.repository,
-                request.index,
-                &ForgeCredential { token: None },
-            )
+            .get_change_request(&request.repository, request.index, credential)
             .await
             .map_err(|e| ServiceError::Upstream(e.to_string()))
     }
@@ -238,7 +231,11 @@ where
             .map_err(|e| ServiceError::Upstream(e.to_string()))
     }
 
-    async fn get_issue(&self, request: GetIssueRequest) -> Result<Issue, ServiceError> {
+    async fn get_issue(
+        &self,
+        request: GetIssueRequest,
+        credential: &ForgeCredential,
+    ) -> Result<Issue, ServiceError> {
         self.audit_sink
             .record(AuditRecord {
                 agent: request.agent,
@@ -250,11 +247,7 @@ where
             .map_err(|e| ServiceError::Audit(e.to_string()))?;
 
         self.adapter
-            .get_issue(
-                &request.repository,
-                request.index,
-                &ForgeCredential { token: None },
-            )
+            .get_issue(&request.repository, request.index, credential)
             .await
             .map_err(|e| ServiceError::Upstream(e.to_string()))
     }
@@ -262,6 +255,7 @@ where
     async fn get_issue_comments(
         &self,
         request: GetIssueCommentsRequest,
+        credential: &ForgeCredential,
     ) -> Result<Vec<IssueComment>, ServiceError> {
         self.audit_sink
             .record(AuditRecord {
@@ -274,11 +268,7 @@ where
             .map_err(|e| ServiceError::Audit(e.to_string()))?;
 
         self.adapter
-            .get_issue_comments(
-                &request.repository,
-                request.index,
-                &ForgeCredential { token: None },
-            )
+            .get_issue_comments(&request.repository, request.index, credential)
             .await
             .map_err(|e| ServiceError::Upstream(e.to_string()))
     }
@@ -286,6 +276,7 @@ where
     async fn get_issue_dependencies(
         &self,
         request: GetIssueDependenciesRequest,
+        credential: &ForgeCredential,
     ) -> Result<IssueDependencies, ServiceError> {
         self.audit_sink
             .record(AuditRecord {
@@ -298,16 +289,16 @@ where
             .map_err(|e| ServiceError::Audit(e.to_string()))?;
 
         self.adapter
-            .get_issue_dependencies(
-                &request.repository,
-                request.index,
-                &ForgeCredential { token: None },
-            )
+            .get_issue_dependencies(&request.repository, request.index, credential)
             .await
             .map_err(|e| ServiceError::Upstream(e.to_string()))
     }
 
-    async fn list_issues(&self, request: ListIssuesRequest) -> Result<Vec<Issue>, ServiceError> {
+    async fn list_issues(
+        &self,
+        request: ListIssuesRequest,
+        credential: &ForgeCredential,
+    ) -> Result<Vec<Issue>, ServiceError> {
         self.audit_sink
             .record(AuditRecord {
                 agent: request.agent,
@@ -319,11 +310,7 @@ where
             .map_err(|e| ServiceError::Audit(e.to_string()))?;
 
         self.adapter
-            .list_issues(
-                &request.repository,
-                request.state.as_deref(),
-                &ForgeCredential { token: None },
-            )
+            .list_issues(&request.repository, request.state.as_deref(), credential)
             .await
             .map_err(|e| ServiceError::Upstream(e.to_string()))
     }
@@ -2401,11 +2388,14 @@ mod tests {
         let orchestrator = ReadOrchestrator::new(adapter, Arc::clone(&audit));
 
         let result = orchestrator
-            .get_change_request_checks(domain::GetChangeRequestChecksRequest {
-                agent: checks_test_agent(),
-                index: 1,
-                repository: checks_test_repo(),
-            })
+            .get_change_request_checks(
+                domain::GetChangeRequestChecksRequest {
+                    agent: checks_test_agent(),
+                    index: 1,
+                    repository: checks_test_repo(),
+                },
+                &domain::ForgeCredential { token: None },
+            )
             .await
             .expect("should succeed");
 
@@ -2435,11 +2425,14 @@ mod tests {
         let orchestrator = ReadOrchestrator::new(adapter, Arc::clone(&audit));
 
         let err = orchestrator
-            .get_change_request_checks(domain::GetChangeRequestChecksRequest {
-                agent: checks_test_agent(),
-                index: 1,
-                repository: checks_test_repo(),
-            })
+            .get_change_request_checks(
+                domain::GetChangeRequestChecksRequest {
+                    agent: checks_test_agent(),
+                    index: 1,
+                    repository: checks_test_repo(),
+                },
+                &domain::ForgeCredential { token: None },
+            )
             .await
             .expect_err("should fail without head_sha");
 
