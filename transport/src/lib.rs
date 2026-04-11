@@ -1407,7 +1407,10 @@ impl McpShim {
     }
 
     /// Post a comment on an issue.
-    #[tool(name = "comment_on_issue", description = "Post a comment on an issue.")]
+    #[tool(
+        name = "comment_on_issue",
+        description = "Post a comment on an issue. For the body, pass plain Markdown text with real newlines; do NOT pre-escape paragraph breaks as literal `\\n` sequences."
+    )]
     async fn comment_on_issue(
         &self,
         Parameters(request): Parameters<CommentOnIssueTool>,
@@ -1434,7 +1437,7 @@ impl McpShim {
     /// Create a new issue after checking for an existing open issue.
     #[tool(
         name = "create_issue",
-        description = "Create a new issue. Check for an existing open issue first to avoid duplicates."
+        description = "Create a new issue. Check for an existing open issue first to avoid duplicates. For the body, pass plain Markdown text with real newlines; do NOT pre-escape paragraph breaks as literal `\\n` sequences."
     )]
     async fn create_issue(
         &self,
@@ -1460,7 +1463,7 @@ impl McpShim {
     /// Post a general comment on a change request (pull request).
     #[tool(
         name = "comment_on_change_request",
-        description = "Post a general comment on a change request (pull request). This is not a formal review — use submit_change_request_review for that."
+        description = "Post a general comment on a change request (pull request). This is not a formal review — use submit_change_request_review for that. For the body, pass plain Markdown text with real newlines; do NOT pre-escape paragraph breaks as literal `\\n` sequences."
     )]
     async fn comment_on_change_request(
         &self,
@@ -1825,7 +1828,9 @@ impl McpShim {
         description = "Open a change request (pull request) on the forge.\n\
             Before calling this tool, check if a PR already exists for your branch \
             using list_change_requests. If one exists, do NOT open a new PR — push \
-            fixes to the existing branch using commit_patch with existing_branch: true."
+            fixes to the existing branch using commit_patch with existing_branch: true.\n\
+            For the body, pass plain Markdown text with real newlines; do NOT pre-escape \
+            paragraph breaks as literal `\\n` sequences."
     )]
     async fn open_change_request(
         &self,
@@ -2057,7 +2062,7 @@ impl McpShim {
     /// Submit a formal review on a change request (pull request).
     #[tool(
         name = "submit_change_request_review",
-        description = "Submit a formal review on a change request (pull request). Event must be APPROVED, REQUEST_CHANGES, or COMMENT."
+        description = "Submit a formal review on a change request (pull request). Event must be APPROVED, REQUEST_CHANGES, or COMMENT. For the body, pass plain Markdown text with real newlines; do NOT pre-escape paragraph breaks as literal `\\n` sequences."
     )]
     async fn submit_change_request_review(
         &self,
@@ -2088,7 +2093,7 @@ impl McpShim {
     /// Update a change request's title and/or body.
     #[tool(
         name = "update_change_request",
-        description = "Update a change request (pull request) title and/or body. Provide at least one of title or body."
+        description = "Update a change request (pull request) title and/or body. Provide at least one of title or body. For the body, pass plain Markdown text with real newlines; do NOT pre-escape paragraph breaks as literal `\\n` sequences."
     )]
     async fn update_change_request(
         &self,
@@ -2125,7 +2130,7 @@ impl McpShim {
     /// Update an issue's title and/or body.
     #[tool(
         name = "update_issue",
-        description = "Update an issue's title and/or body. Provide at least one of title or body."
+        description = "Update an issue's title and/or body. Provide at least one of title or body. For the body, pass plain Markdown text with real newlines; do NOT pre-escape paragraph breaks as literal `\\n` sequences."
     )]
     async fn update_issue(
         &self,
