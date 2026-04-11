@@ -1003,10 +1003,19 @@ impl McpShim {
         let mut instructions = String::from(
             "MCP shim for forge-mcp control plane. Proxies tool calls to the HTTP API.\n\
              \n\
-             Git clone/fetch: each gateway provides a read-only git smart HTTP proxy.\n\
-             URL: <gateway_url>/git/{forge}/{owner}/{repo}\n\
-             Auth: HTTP Basic -- any non-empty username, password is your agent token.\n\
-             git push is blocked -- use the commit_patch tool instead.\n",
+             ### Discovery & Identity\n\
+             - Use `forge_info` FIRST to discover available forges, gateway URLs, git URL templates, branch prefixes, and auth details.\n\
+             - Multi-gateway mode: Always call `forge_info` to map the `forge` alias to its correct gateway entry. \
+               Use that gateway's specific git URL template for clone/fetch operations. \
+               Do not assume a single global gateway URL when multiple gateways are configured.\n\
+             - Repository Discovery: NOT supported. Repository `owner/repo` must come from user input, an existing local checkout / git remote, \
+               issue or PR context, or other external context already available to the agent.\n\
+             \n\
+             ### Git Proxy (Read-Only)\n\
+             - Each gateway provides a read-only git smart HTTP proxy for `clone` and `fetch` operations.\n\
+             - URL: <gateway_url>/git/{forge}/{owner}/{repo}\n\
+             - Auth: HTTP Basic -- any non-empty username, password is your agent token.\n\
+             - `git push` is BLOCKED -- use the `commit_patch` tool instead.\n",
         );
 
         if self.config.gateways.len() == 1 {
@@ -1026,26 +1035,25 @@ impl McpShim {
 
         instructions.push_str(
             "\n\
-             Write workflow: clone via git proxy, make changes, generate a git-format patch\n\
-             with git itself (`git diff --no-ext-diff --binary` or `git show`), verify it\n\
-             with `git apply --check`, submit via commit_patch, then open a PR via\n\
-             open_change_request. Do not hand-write traditional unified diffs.\n\
-             \n\
-             Never commit to the default branch directly. Work on branches matching\n\
-             your configured branch_prefix and submit via commit_patch + open_change_request.\n\
-             Use forge_info to discover your available forges.",
+             ### Write Workflow\n\
+             1. **Detached Worktree**: Always work in a detached `git worktree` instead of editing in the main checkout. \
+                This keeps the main working tree clean and prevents unrelated changes from being included in patches.\n\
+             2. **Generate Patch**: Use git itself (`git diff --no-ext-diff --binary` or `git show`) to produce a `diff --git` format patch. \
+                Never hand-write traditional unified diffs.\n\
+             3. **Verify locally**: Always run `git apply --check` locally before `commit_patch` to ensure it is valid.\n\
+             4. **Submit**: Use `commit_patch` to apply and push the patch to a branch matching your configured `branch_prefix` (never commit to the default branch directly).\n\
+             5. **Open PR**: Use `open_change_request` for the initial PR.\n\
+             6. **Update PR**: Push follow-up fixes to the existing branch using `commit_patch(existing_branch=true)`. Do NOT open duplicate PRs.\n\
+             7. **Refine**: Use `rebase_branch` for squash/fixup operations on your branch after review feedback.\n",
         );
 
         if self.config.enable_channels {
             instructions.push_str(
                 "\n\
-                 \n\
-                 Channel events arrive as <channel source=\"forge-mcp\" ...> review triggers.\n\
-                 Always fetch authoritative state with get_change_request,\n\
-                 get_change_request_diff, and get_change_request_comments before acting.\n\
-                 If the current PR head differs from event head_sha, treat the event as stale and skip it.\n\
-                 If you already reviewed the same head_sha from this session, skip duplicate review.\n\
-                 These events are one-way notifications; do not expect a reply tool.\n",
+                 ### Channel Events\n\
+                 Channel events arrive as review triggers. Always fetch authoritative state with `get_change_request` tools before acting. \
+                 If the current PR head differs from the event `head_sha`, treat the event as stale and skip it. \
+                 If you already reviewed the same `head_sha` in this session, skip duplicate review.\n",
             );
         }
 
@@ -1482,7 +1490,7 @@ impl McpShim {
     /// Apply a git-format patch to a new branch and push it.
     #[tool(
         name = "commit_patch",
-        description = "Apply a git-format patch to a new branch and push it. Patch must come from git itself (for example `git diff --no-ext-diff --binary` or `git show`) and start with `diff --git`; traditional unified diffs are rejected."
+        description = "Apply a git-format patch to a new branch and push it. Patch must come from git itself (for example `git diff --no-ext-diff --binary` or `git show`) and start with `diff --git`; traditional unified diffs are rejected. New files must use git headers like `new file mode`, `--- /dev/null`, and `+++ b/<path>`. Verify locally with `git apply --check` before submitting."
     )]
     async fn commit_patch(
         &self,
@@ -1848,7 +1856,7 @@ impl McpShim {
     /// Rebase a branch by squashing (fixup) or removing (drop) commits.
     #[tool(
         name = "rebase_branch",
-        description = "Rebase a branch by squashing (fixup), removing (drop) commits, or rebasing onto the latest base branch (rebase_onto). Performs a full clone, validates operations, runs the rebase, and force-pushes with lease. Only works on branches matching your configured branch prefix."
+        description = "Rebase a branch by squashing (fixup), removing (drop) commits, or rebasing onto the latest base branch (rebase_onto). Use this for squash/fixup after review instead of leaving multiple cleanup commits. Performs a full clone, validates operations, runs the rebase, and force-pushes with lease. Only works on branches matching your configured branch prefix."
     )]
     async fn rebase_branch(
         &self,
@@ -2154,7 +2162,7 @@ impl McpShim {
     /// Discover available forges across all configured gateways.
     #[tool(
         name = "forge_info",
-        description = "Discover available forge instances, gateway URL, git proxy URL template, and authentication details. Call this first to learn which forges you can access and how to clone repositories."
+        description = "Discover dynamic facts like available forge instances, gateway URLs, git URL templates, branch prefixes, and authentication details. Call this FIRST to learn which forges you can access and to map forge aliases to the correct gateway in multi-gateway mode."
     )]
     async fn forge_info(&self) -> Result<String, McpError> {
         let git_auth = serde_json::json!({
@@ -2514,6 +2522,19 @@ mod tests {
             .experimental
             .expect("experimental capabilities");
         assert!(experimental.contains_key("claude/channel"));
+    }
+
+    #[test]
+    fn get_info_returns_updated_instructions() {
+        let shim = McpShim::new(test_config("https://example.com"));
+        let info = shim.get_info();
+        let instructions = info.instructions.expect("instructions");
+        assert!(instructions.contains("### Discovery & Identity"));
+        assert!(instructions.contains("### Git Proxy (Read-Only)"));
+        assert!(instructions.contains("### Write Workflow"));
+        assert!(instructions.contains("Detached Worktree"));
+        assert!(instructions.contains("Repository Discovery: NOT supported"));
+        assert!(instructions.contains("forge_info` FIRST"));
     }
 
     #[test]
