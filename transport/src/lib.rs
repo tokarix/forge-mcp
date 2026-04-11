@@ -1490,7 +1490,7 @@ impl McpShim {
     /// Apply a git-format patch to a new branch and push it.
     #[tool(
         name = "commit_patch",
-        description = "Apply a git-format patch to a new branch and push it. Patch must come from git itself (for example `git diff --no-ext-diff --binary` or `git show`) and start with `diff --git`; traditional unified diffs are rejected. New files must use git headers like `new file mode`, `--- /dev/null`, and `+++ b/<path>`. Verify locally with `git apply --check` before submitting."
+        description = "Apply a git-format patch to a new branch and push it. This is the REQUIRED way to push code (raw `git push` is strictly blocked). Patch must come from git itself (for example `git diff --no-ext-diff --binary` or `git show`) and start with `diff --git`; traditional unified diffs are rejected. New files must use git headers like `new file mode`, `--- /dev/null`, and `+++ b/<path>`. Verify locally with `git apply --check` before submitting."
     )]
     async fn commit_patch(
         &self,
@@ -1856,7 +1856,7 @@ impl McpShim {
     /// Rebase a branch by squashing (fixup) or removing (drop) commits.
     #[tool(
         name = "rebase_branch",
-        description = "Rebase a branch by squashing (fixup), removing (drop) commits, or rebasing onto the latest base branch (rebase_onto). Use this for squash/fixup after review instead of leaving multiple cleanup commits. Performs a full clone, validates operations, runs the rebase, and force-pushes with lease. Only works on branches matching your configured branch prefix."
+        description = "Rebase a branch by squashing (fixup), removing (drop) commits, or rebasing onto the latest base branch (rebase_onto). This is the REQUIRED way to rewrite history and force-push (raw `git push` is strictly blocked). Use this for squash/fixup after review instead of leaving multiple cleanup commits. Performs a full clone, validates operations, runs the rebase, and force-pushes with lease. Only works on branches matching your configured branch prefix."
     )]
     async fn rebase_branch(
         &self,
@@ -2162,7 +2162,7 @@ impl McpShim {
     /// Discover available forges across all configured gateways.
     #[tool(
         name = "forge_info",
-        description = "Discover dynamic facts like available forge instances, gateway URLs, git URL templates, branch prefixes, and authentication details. Call this FIRST to learn which forges you can access and to map forge aliases to the correct gateway in multi-gateway mode."
+        description = "Discover dynamic facts like available forge instances, gateway URLs, git URL templates, branch prefixes, and authentication details. Call this FIRST to learn which forges you can access and to map forge aliases to the correct gateway in multi-gateway mode. IMPORTANT: forge-mcp strictly blocks `git push`. You MUST use the `commit_patch` and `rebase_branch` tools for all write operations."
     )]
     async fn forge_info(&self) -> Result<String, McpError> {
         let git_auth = serde_json::json!({

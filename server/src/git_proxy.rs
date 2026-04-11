@@ -175,12 +175,7 @@ pub async fn info_refs(
 ) -> Response {
     let service = match query.service.as_deref() {
         Some("git-upload-pack") => "git-upload-pack",
-        Some("git-receive-pack") => {
-            return error_response(
-                StatusCode::FORBIDDEN,
-                "git push is not supported through the proxy; use the commit_patch MCP tool",
-            );
-        }
+        Some("git-receive-pack") => return receive_pack_rejected().await,
         Some(other) => {
             return error_response(
                 StatusCode::BAD_REQUEST,
@@ -329,10 +324,17 @@ pub async fn upload_pack(
 
 /// `POST /git/{forge}/{owner}/{repo}.git/git-receive-pack` — always rejected
 pub async fn receive_pack_rejected() -> Response {
-    error_response(
-        StatusCode::FORBIDDEN,
-        "git push is not supported through the proxy; use the commit_patch MCP tool",
-    )
+    let message = "Direct git push is not supported for agent workflows.\n\
+        Use forge-mcp tools instead:\n\
+        - commit_patch to update an existing branch\n\
+        - rebase_branch to rewrite/squash commits\n\
+        - open_change_request to open a PR when needed\n";
+    let mut response = Response::new(Body::from(message));
+    *response.status_mut() = StatusCode::FORBIDDEN;
+    response
+        .headers_mut()
+        .insert("content-type", HeaderValue::from_static("text/plain"));
+    response
 }
 
 #[cfg(test)]
@@ -1140,6 +1142,15 @@ mod tests {
             .expect("request should succeed");
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let body_bytes = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("read body")
+            .to_bytes();
+        let body_str = String::from_utf8(body_bytes.to_vec()).expect("utf8");
+        assert!(body_str.contains("Direct git push is not supported"));
+        assert!(body_str.contains("commit_patch"));
+        assert!(body_str.contains("rebase_branch"));
     }
 
     #[tokio::test]
@@ -1160,6 +1171,15 @@ mod tests {
             .expect("request should succeed");
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let body_bytes = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("read body")
+            .to_bytes();
+        let body_str = String::from_utf8(body_bytes.to_vec()).expect("utf8");
+        assert!(body_str.contains("Direct git push is not supported"));
+        assert!(body_str.contains("commit_patch"));
+        assert!(body_str.contains("rebase_branch"));
     }
 
     #[tokio::test]
