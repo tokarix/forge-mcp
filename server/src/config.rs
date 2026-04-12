@@ -28,6 +28,8 @@ pub struct ForgeConfig {
     #[serde(default)]
     pub git_auth_user: String,
     pub token: Option<String>,
+    pub woodpecker_url: Option<String>,
+    pub woodpecker_token: Option<String>,
     pub webhook: Option<ForgeWebhookConfig>,
 }
 
@@ -44,6 +46,11 @@ impl std::fmt::Debug for ForgeConfig {
             .field("forge_type", &self.forge_type)
             .field("git_auth_user", &self.git_auth_user)
             .field("token", &self.token.as_ref().map(|_| "[REDACTED]"))
+            .field("woodpecker_url", &self.woodpecker_url)
+            .field(
+                "woodpecker_token",
+                &self.woodpecker_token.as_ref().map(|_| "[REDACTED]"),
+            )
             .field("webhook", &self.webhook.as_ref().map(|_| "[REDACTED]"))
             .finish()
     }

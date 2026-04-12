@@ -198,6 +198,14 @@ pub trait ForgeAdapter: Send + Sync {
         credential: &ForgeCredential,
     ) -> Result<domain::CombinedCommitStatus, ForgeError>;
 
+    /// Returns detailed CI information for the given commit SHA.
+    async fn get_change_request_ci_details(
+        &self,
+        repository: &RepositoryRef,
+        sha: &str,
+        credential: &ForgeCredential,
+    ) -> Result<domain::ChangeRequestCiDetails, ForgeError>;
+
     /// Returns the repository's default merge style, if configured.
     async fn get_default_merge_style(
         &self,
@@ -359,6 +367,8 @@ pub trait ForgeWebhookAdapter: Send + Sync {
 pub struct ForgejoConfig {
     pub base_url: String,
     pub token: Option<String>,
+    pub woodpecker_url: Option<String>,
+    pub woodpecker_token: Option<String>,
 }
 
 impl std::fmt::Debug for ForgejoConfig {
@@ -366,6 +376,11 @@ impl std::fmt::Debug for ForgejoConfig {
         f.debug_struct("ForgejoConfig")
             .field("base_url", &self.base_url)
             .field("token", &self.token.as_ref().map(|_| "[REDACTED]"))
+            .field("woodpecker_url", &self.woodpecker_url)
+            .field(
+                "woodpecker_token",
+                &self.woodpecker_token.as_ref().map(|_| "[REDACTED]"),
+            )
             .finish()
     }
 }
@@ -377,6 +392,247 @@ pub struct ForgejoAdapter {
 }
 
 impl ForgejoAdapter {
+    async fn resolve_ci_failure(&self, target_url: &str) -> domain::CiResolution {
+        let (repo_id, pipeline_num, woodpecker_base) = match self.parse_woodpecker_url(target_url) {
+            Ok(ids) => ids,
+            Err(res) => return res,
+        };
+
+        let pipeline = match self
+            .fetch_woodpecker_pipeline(&woodpecker_base, &repo_id, &pipeline_num)
+            .await
+        {
+            Ok(p) => p,
+            Err(res) => return res,
+        };
+
+        let mut failed_steps = Vec::new();
+        let mut log_errors = Vec::new();
+        let workflows = pipeline.workflows.unwrap_or_default();
+        if workflows.is_empty() {
+            return domain::CiResolution::Error {
+                message: "Resolved pipeline but found no workflows".to_string(),
+            };
+        }
+
+        for workflow in workflows {
+            for step in workflow.children.unwrap_or_default() {
+                if step.state == "failure" || step.state == "error" {
+                    match self
+                        .fetch_woodpecker_step_logs(
+                            &woodpecker_base,
+                            &repo_id,
+                            &pipeline_num,
+                            &step,
+                        )
+                        .await
+                    {
+                        Ok(log_excerpt) => {
+                            failed_steps.push(domain::CiFailureStep {
+                                name: step.name,
+                                state: step.state,
+                                log_excerpt,
+                            });
+                        }
+                        Err(message) => {
+                            log_errors.push(format!("{}: {}", step.name, message));
+                            failed_steps.push(domain::CiFailureStep {
+                                name: step.name,
+                                state: step.state,
+                                log_excerpt: None,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        if failed_steps.is_empty() {
+            return domain::CiResolution::Error {
+                message: "Resolved pipeline but found no failed steps".to_string(),
+            };
+        }
+
+        let has_logs = failed_steps.iter().any(|s| s.log_excerpt.is_some());
+        if !has_logs {
+            let message = if log_errors.is_empty() {
+                "Supported provider but found no usable log excerpts for any failed steps"
+                    .to_string()
+            } else {
+                format!(
+                    "Failed to retrieve log excerpts for any failed steps: {}",
+                    log_errors.join("; ")
+                )
+            };
+            return domain::CiResolution::Error { message };
+        }
+
+        let pipeline_ui_url = woodpecker_base
+            .join(&format!("repos/{repo_id}/pipeline/{pipeline_num}"))
+            .map_or_else(|_| target_url.to_string(), |u| u.to_string());
+
+        domain::CiResolution::Resolved {
+            provider: domain::CiProvider::Woodpecker,
+            pipeline_url: pipeline_ui_url,
+            failed_steps,
+        }
+    }
+
+    fn parse_woodpecker_url(
+        &self,
+        target_url: &str,
+    ) -> Result<(String, String, reqwest::Url), domain::CiResolution> {
+        let Some(woodpecker_url_str) = &self.config.woodpecker_url else {
+            return Err(domain::CiResolution::Unsupported);
+        };
+
+        let Ok(mut base_url) = reqwest::Url::parse(woodpecker_url_str) else {
+            return Err(domain::CiResolution::Unsupported);
+        };
+
+        let Ok(url) = reqwest::Url::parse(target_url) else {
+            return Err(domain::CiResolution::Unsupported);
+        };
+
+        if url.origin() != base_url.origin() {
+            return Err(domain::CiResolution::Unsupported);
+        }
+
+        // Ensure base URL has a trailing slash for robust joining.
+        if !base_url.path().ends_with('/') {
+            let mut path = base_url.path().to_string();
+            path.push('/');
+            base_url.set_path(&path);
+        }
+
+        let base_segments = base_url
+            .path_segments()
+            .into_iter()
+            .flatten()
+            .filter(|s| !s.is_empty());
+        let mut target_segments = url.path_segments().into_iter().flatten();
+
+        for base_seg in base_segments {
+            if target_segments.next() != Some(base_seg) {
+                return Err(domain::CiResolution::Error {
+                    message: format!(
+                        "Target URL path does not match Woodpecker base path prefix: {target_url}"
+                    ),
+                });
+            }
+        }
+
+        match (
+            target_segments.next(),
+            target_segments.next(),
+            target_segments.next(),
+            target_segments.next(),
+        ) {
+            (Some("repos"), Some(repo_id), Some("pipeline"), Some(pipeline_num))
+                if repo_id.chars().all(|c| c.is_ascii_digit())
+                    && pipeline_num.chars().all(|c| c.is_ascii_digit()) =>
+            {
+                Ok((repo_id.to_string(), pipeline_num.to_string(), base_url))
+            }
+            _ => Err(domain::CiResolution::Error {
+                message: format!("Malformed or unsupported Woodpecker URL path: {target_url}"),
+            }),
+        }
+    }
+
+    async fn fetch_woodpecker_pipeline(
+        &self,
+        woodpecker_base: &reqwest::Url,
+        repo_id: &str,
+        pipeline_num: &str,
+    ) -> Result<WoodpeckerPipeline, domain::CiResolution> {
+        let url = woodpecker_base
+            .join(&format!("api/repos/{repo_id}/pipelines/{pipeline_num}"))
+            .map_err(|e| domain::CiResolution::Error {
+                message: format!("Failed to construct pipeline URL: {e}"),
+            })?;
+
+        let mut req = self.client.get(url);
+        if let Some(token) = &self.config.woodpecker_token {
+            req = req.bearer_auth(token);
+        }
+
+        let res = match req.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                return Err(domain::CiResolution::Error {
+                    message: format!("Failed to fetch pipeline: {e}"),
+                });
+            }
+        };
+
+        if !res.status().is_success() {
+            return Err(domain::CiResolution::Error {
+                message: format!("Pipeline API returned status {}", res.status()),
+            });
+        }
+
+        res.json().await.map_err(|e| domain::CiResolution::Error {
+            message: format!("Failed to parse pipeline: {e}"),
+        })
+    }
+
+    async fn fetch_woodpecker_step_logs(
+        &self,
+        woodpecker_base: &reqwest::Url,
+        repo_id: &str,
+        pipeline_num: &str,
+        step: &WoodpeckerStep,
+    ) -> Result<Option<domain::CiLogExcerpt>, String> {
+        let url = woodpecker_base
+            .join(&format!(
+                "api/repos/{repo_id}/logs/{pipeline_num}/{}",
+                step.id
+            ))
+            .map_err(|e| format!("Failed to construct logs URL: {e}"))?;
+
+        let mut req = self.client.get(url);
+        if let Some(token) = &self.config.woodpecker_token {
+            req = req.bearer_auth(token);
+        }
+
+        let res = match req.send().await {
+            Ok(r) if r.status().is_success() => r,
+            Ok(r) => {
+                return Err(format!(
+                    "Log API for step {} returned status {}",
+                    step.name,
+                    r.status()
+                ));
+            }
+            Err(e) => {
+                return Err(format!("Failed to fetch logs for step {}: {e}", step.name));
+            }
+        };
+
+        let logs: Vec<WoodpeckerLogEntry> = res
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse logs for step {}: {e}", step.name))?;
+
+        let mut lines = Vec::new();
+        for l in logs.into_iter().rev().take(20) {
+            let bytes = base64::Engine::decode(&base64::prelude::BASE64_STANDARD, l.data.trim())
+                .map_err(|e| format!("Failed to decode log data for step {}: {e}", step.name))?;
+            let line = String::from_utf8_lossy(&bytes).into_owned();
+            if !line.trim().is_empty() {
+                lines.push(line);
+            }
+        }
+
+        if lines.is_empty() {
+            Ok(None)
+        } else {
+            lines.reverse();
+            Ok(Some(domain::CiLogExcerpt { lines }))
+        }
+    }
+
     /// # Errors
     ///
     /// Returns an error if the HTTP client cannot be built.
@@ -554,6 +810,30 @@ impl ForgejoAdapter {
 struct ForgejoAuthUser {
     email: String,
     login: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct WoodpeckerPipeline {
+    workflows: Option<Vec<WoodpeckerWorkflow>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WoodpeckerWorkflow {
+    #[allow(dead_code)]
+    id: u64,
+    children: Option<Vec<WoodpeckerStep>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WoodpeckerStep {
+    id: u64,
+    name: String,
+    state: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct WoodpeckerLogEntry {
+    data: String,
 }
 
 /// Forgejo combined commit status response from
@@ -1304,6 +1584,42 @@ impl ForgeAdapter for ForgejoAdapter {
             state,
             statuses,
             total_count: combined.total_count,
+        })
+    }
+
+    async fn get_change_request_ci_details(
+        &self,
+        repository: &RepositoryRef,
+        sha: &str,
+        credential: &ForgeCredential,
+    ) -> Result<domain::ChangeRequestCiDetails, ForgeError> {
+        let combined = self
+            .get_combined_commit_status(repository, sha, credential)
+            .await?;
+        let mut details = Vec::new();
+
+        for status in combined.statuses {
+            let resolution = if status.state == domain::CommitStatusState::Failure
+                || status.state == domain::CommitStatusState::Error
+            {
+                self.resolve_ci_failure(&status.target_url).await
+            } else {
+                domain::CiResolution::Unsupported
+            };
+
+            details.push(domain::CiCheckDetail {
+                context: status.context,
+                description: status.description,
+                state: status.state,
+                target_url: status.target_url,
+                resolution,
+            });
+        }
+
+        Ok(domain::ChangeRequestCiDetails {
+            head_sha: sha.to_string(),
+            state: combined.state,
+            details,
         })
     }
 
@@ -2335,7 +2651,7 @@ mod tests {
     use sha2::Sha256;
 
     use domain::ForgeCredential;
-    use wiremock::matchers::{method, path_regex};
+    use wiremock::matchers::{header, method, path_regex};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
@@ -2344,6 +2660,8 @@ mod tests {
         ForgejoAdapter::new(ForgejoConfig {
             base_url: base_url.to_string(),
             token: Some("test-token".to_string()),
+            woodpecker_url: None,
+            woodpecker_token: None,
         })
         .expect("build forgejo adapter")
     }
@@ -3842,54 +4160,462 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn check_response_redirect_error_message_mentions_moved() {
-        let mock = MockServer::start().await;
+    #[test]
+    fn test_parse_woodpecker_url_with_prefix() {
+        let config = ForgejoConfig {
+            base_url: "https://git.example.com".to_string(),
+            token: None,
+            woodpecker_url: Some("https://ci.example.com/woodpecker/".to_string()),
+            woodpecker_token: None,
+        };
+        let adapter = ForgejoAdapter::new(config).expect("build adapter");
 
-        Mock::given(method("GET"))
-            .and(path_regex(r"/api/v1/repos/.+"))
-            .respond_with(
-                ResponseTemplate::new(302)
-                    .insert_header("Location", "https://forge.example/new-org/repo"),
-            )
-            .mount(&mock)
-            .await;
+        // Valid URL with prefix
+        let (repo_id, pipeline_num, base) = adapter
+            .parse_woodpecker_url("https://ci.example.com/woodpecker/repos/1/pipeline/42")
+            .expect("should parse");
+        assert_eq!(repo_id, "1");
+        assert_eq!(pipeline_num, "42");
+        assert_eq!(base.to_string(), "https://ci.example.com/woodpecker/");
 
-        let adapter = test_adapter(&mock.uri());
-        let cred = ForgeCredential { token: None };
-        let result = adapter.get_issue(&test_repo(), 1, &cred).await;
-
-        let err = result.expect_err("should fail with redirect");
-        let msg = err.to_string();
+        // Invalid origin
         assert!(
-            msg.contains("moved or been renamed"),
-            "error message should mention moved/renamed, got: {msg}"
+            adapter
+                .parse_woodpecker_url("https://evil.com/woodpecker/repos/1/pipeline/42")
+                .is_err()
         );
+
+        // Missing prefix
         assert!(
-            msg.contains("302"),
-            "error message should contain status code, got: {msg}"
+            adapter
+                .parse_woodpecker_url("https://ci.example.com/repos/1/pipeline/42")
+                .is_err()
         );
     }
 
     #[tokio::test]
-    async fn check_response_not_found_error_message() {
-        let mock = MockServer::start().await;
+    async fn resolve_ci_failure_rejects_untrusted_origin() {
+        let adapter = ForgejoAdapter::new(ForgejoConfig {
+            base_url: "https://forge.example".to_string(),
+            token: Some("test-token".to_string()),
+            woodpecker_url: Some("https://woodpecker.example.com".to_string()),
+            woodpecker_token: None,
+        })
+        .expect("build adapter");
 
+        // Attacker-controlled domain
+        let target_url = "https://woodpecker.example.com.evil.tld/repos/1/pipeline/1";
+        let res = adapter.resolve_ci_failure(target_url).await;
+        assert_eq!(res, domain::CiResolution::Unsupported);
+
+        // Different protocol
+        let target_url = "http://woodpecker.example.com/repos/1/pipeline/1";
+        let res = adapter.resolve_ci_failure(target_url).await;
+        assert_eq!(res, domain::CiResolution::Unsupported);
+
+        // Different port
+        let target_url = "https://woodpecker.example.com:8443/repos/1/pipeline/1";
+        let res = adapter.resolve_ci_failure(target_url).await;
+        assert_eq!(res, domain::CiResolution::Unsupported);
+    }
+
+    #[tokio::test]
+    async fn resolve_ci_failure_resolves_woodpecker_failure() {
+        let mock = MockServer::start().await;
+        let woodpecker_base = mock.uri();
+
+        let adapter = ForgejoAdapter::new(ForgejoConfig {
+            base_url: "https://forge.example".to_string(),
+            token: Some("test-token".to_string()),
+            woodpecker_url: Some(woodpecker_base.clone()),
+            woodpecker_token: None,
+        })
+        .expect("build adapter");
+
+        // Mock pipeline response
         Mock::given(method("GET"))
-            .and(path_regex(r"/api/v1/repos/.+"))
-            .respond_with(ResponseTemplate::new(404))
+            .and(path_regex(r"/api/repos/1/pipelines/42"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "workflows": [
+                    {
+                        "id": 1,
+                        "children": [
+                            {
+                                "id": 2,
+                                "name": "test",
+                                "state": "failure"
+                            }
+                        ]
+                    }
+                ]
+            })))
             .mount(&mock)
             .await;
 
-        let adapter = test_adapter(&mock.uri());
-        let cred = ForgeCredential { token: None };
-        let result = adapter.get_issue(&test_repo(), 1, &cred).await;
+        // Mock logs response
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/repos/1/logs/42/2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                { "data": base64::Engine::encode(&base64::prelude::BASE64_STANDARD, "error message\n") }
+            ])))
+            .mount(&mock)
+            .await;
 
-        let err = result.expect_err("should fail with not found");
-        let msg = err.to_string();
+        let target_url = format!("{woodpecker_base}/repos/1/pipeline/42");
+        let res = adapter.resolve_ci_failure(&target_url).await;
+
+        match res {
+            domain::CiResolution::Resolved {
+                provider,
+                pipeline_url,
+                failed_steps,
+            } => {
+                assert_eq!(provider, domain::CiProvider::Woodpecker);
+                assert_eq!(
+                    pipeline_url,
+                    format!("{woodpecker_base}/repos/1/pipeline/42")
+                );
+                assert_eq!(failed_steps.len(), 1);
+                assert_eq!(failed_steps[0].name, "test");
+                assert_eq!(
+                    failed_steps[0]
+                        .log_excerpt
+                        .as_ref()
+                        .expect("has logs")
+                        .lines[0],
+                    "error message\n"
+                );
+            }
+            other => panic!("expected Resolved, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_ci_failure_handles_lossy_utf8_logs() {
+        let mock = MockServer::start().await;
+        let woodpecker_base = mock.uri();
+
+        let adapter = ForgejoAdapter::new(ForgejoConfig {
+            base_url: "https://forge.example".to_string(),
+            token: Some("test-token".to_string()),
+            woodpecker_url: Some(woodpecker_base.clone()),
+            woodpecker_token: None,
+        })
+        .expect("build adapter");
+
+        // Invalid UTF-8 sequence: 0xFF
+        let invalid_utf8 = vec![0xFF];
+        let encoded = base64::Engine::encode(&base64::prelude::BASE64_STANDARD, &invalid_utf8);
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/repos/1/pipelines/42"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "workflows": [{ "id": 1, "children": [{ "id": 2, "name": "test", "state": "failure" }] }]
+            })))
+            .mount(&mock)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/repos/1/logs/42/2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                { "data": encoded }
+            ])))
+            .mount(&mock)
+            .await;
+
+        let target_url = format!("{woodpecker_base}/repos/1/pipeline/42");
+        let res = adapter.resolve_ci_failure(&target_url).await;
+
+        match res {
+            domain::CiResolution::Resolved { failed_steps, .. } => {
+                assert_eq!(
+                    failed_steps[0]
+                        .log_excerpt
+                        .as_ref()
+                        .expect("has logs")
+                        .lines[0],
+                    "\u{FFFD}"
+                );
+            }
+            other => panic!("expected Resolved, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_ci_failure_returns_error_on_malformed_log_data() {
+        let mock = MockServer::start().await;
+        let woodpecker_base = mock.uri();
+
+        let adapter = ForgejoAdapter::new(ForgejoConfig {
+            base_url: "https://forge.example".to_string(),
+            token: Some("test-token".to_string()),
+            woodpecker_url: Some(woodpecker_base.clone()),
+            woodpecker_token: None,
+        })
+        .expect("build adapter");
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/repos/1/pipelines/42"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "workflows": [{ "id": 1, "children": [{ "id": 2, "name": "test", "state": "failure" }] }]
+            })))
+            .mount(&mock)
+            .await;
+
+        // Invalid base64 data: "!!!"
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/repos/1/logs/42/2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                { "data": "!!!" }
+            ])))
+            .mount(&mock)
+            .await;
+
+        let target_url = format!("{woodpecker_base}/repos/1/pipeline/42");
+        let res = adapter.resolve_ci_failure(&target_url).await;
+
+        match res {
+            domain::CiResolution::Error { message } => {
+                assert!(message.contains("Failed to decode log data"));
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_ci_failure_uses_woodpecker_token() {
+        let mock = MockServer::start().await;
+        let woodpecker_base = mock.uri();
+        let woodpecker_token = "secret-wp-token";
+
+        let adapter = ForgejoAdapter::new(ForgejoConfig {
+            base_url: "https://forge.example".to_string(),
+            token: Some("test-token".to_string()),
+            woodpecker_url: Some(woodpecker_base.clone()),
+            woodpecker_token: Some(woodpecker_token.to_string()),
+        })
+        .expect("build adapter");
+
+        // Verify Bearer auth on pipeline fetch
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/repos/1/pipelines/42"))
+            .and(header("Authorization", format!("Bearer {woodpecker_token}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "workflows": [{ "id": 1, "children": [{ "id": 2, "name": "test", "state": "failure" }] }]
+            })))
+            .mount(&mock)
+            .await;
+
+        // Verify Bearer auth on logs fetch
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/repos/1/logs/42/2"))
+            .and(header(
+                "Authorization",
+                format!("Bearer {woodpecker_token}"),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                { "data": base64::Engine::encode(&base64::prelude::BASE64_STANDARD, "error\n") }
+            ])))
+            .mount(&mock)
+            .await;
+
+        let target_url = format!("{woodpecker_base}/repos/1/pipeline/42");
+        let res = adapter.resolve_ci_failure(&target_url).await;
+
+        match res {
+            domain::CiResolution::Resolved { .. } => {}
+            other => panic!("expected Resolved, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_ci_failure_returns_error_on_same_origin_bad_path() {
+        let adapter = ForgejoAdapter::new(ForgejoConfig {
+            base_url: "https://forge.example".to_string(),
+            token: Some("test-token".to_string()),
+            woodpecker_url: Some("https://woodpecker.example.com/prefix".to_string()),
+            woodpecker_token: None,
+        })
+        .expect("build adapter");
+
+        // Same origin, but wrong prefix
+        let target_url = "https://woodpecker.example.com/wrong/repos/1/pipeline/1";
+        let res = adapter.resolve_ci_failure(target_url).await;
+        match res {
+            domain::CiResolution::Error { message } => {
+                assert!(message.contains("does not match Woodpecker base path prefix"));
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+
+        // Same origin, same prefix, but malformed structure
+        let target_url = "https://woodpecker.example.com/prefix/repos/1/bad/42";
+        let res = adapter.resolve_ci_failure(target_url).await;
+        match res {
+            domain::CiResolution::Error { message } => {
+                assert!(message.contains("Malformed or unsupported Woodpecker URL path"));
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_ci_failure_aggregates_step_errors() {
+        let mock = MockServer::start().await;
+        let woodpecker_base = mock.uri();
+
+        let adapter = ForgejoAdapter::new(ForgejoConfig {
+            base_url: "https://forge.example".to_string(),
+            token: Some("test-token".to_string()),
+            woodpecker_url: Some(woodpecker_base.clone()),
+            woodpecker_token: None,
+        })
+        .expect("build adapter");
+
+        // Pipeline with two failed steps
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/repos/1/pipelines/42"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "workflows": [
+                    {
+                        "id": 1,
+                        "children": [
+                            { "id": 2, "name": "step-1", "state": "failure" },
+                            { "id": 3, "name": "step-2", "state": "error" }
+                        ]
+                    }
+                ]
+            })))
+            .mount(&mock)
+            .await;
+
+        // step-1 logs succeed
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/repos/1/logs/42/2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                { "data": base64::Engine::encode(&base64::prelude::BASE64_STANDARD, "step 1 log\n") }
+            ])))
+            .mount(&mock)
+            .await;
+
+        // step-2 logs fail
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/repos/1/logs/42/3"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&mock)
+            .await;
+
+        let target_url = format!("{woodpecker_base}/repos/1/pipeline/42");
+        let res = adapter.resolve_ci_failure(&target_url).await;
+
+        match res {
+            domain::CiResolution::Resolved { failed_steps, .. } => {
+                assert_eq!(failed_steps.len(), 2);
+                assert_eq!(failed_steps[0].name, "step-1");
+                assert!(failed_steps[0].log_excerpt.is_some());
+                assert_eq!(failed_steps[1].name, "step-2");
+                assert!(failed_steps[1].log_excerpt.is_none());
+                assert_eq!(failed_steps.len(), 2);
+                assert_eq!(failed_steps[0].name, "step-1");
+                assert!(failed_steps[0].log_excerpt.is_some());
+                assert_eq!(failed_steps[1].name, "step-2");
+                assert!(failed_steps[1].log_excerpt.is_none());
+            }
+            other => panic!("expected Resolved, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_ci_failure_returns_error_on_empty_log_excerpt() {
+        let mock = MockServer::start().await;
+        let woodpecker_base = mock.uri();
+
+        let adapter = ForgejoAdapter::new(ForgejoConfig {
+            base_url: "https://forge.example".to_string(),
+            token: Some("test-token".to_string()),
+            woodpecker_url: Some(woodpecker_base.clone()),
+            woodpecker_token: None,
+        })
+        .expect("build adapter");
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/repos/1/pipelines/42"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "workflows": [{ "id": 1, "children": [{ "id": 2, "name": "test", "state": "failure" }] }]
+            })))
+            .mount(&mock)
+            .await;
+
+        // Empty log data (whitespace only or empty list)
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/repos/1/logs/42/2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                { "data": "   " }
+            ])))
+            .mount(&mock)
+            .await;
+
+        let target_url = format!("{woodpecker_base}/repos/1/pipeline/42");
+        let res = adapter.resolve_ci_failure(&target_url).await;
+
+        match res {
+            domain::CiResolution::Error { message } => {
+                assert!(message.contains("found no usable log excerpts"));
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_woodpecker_url_rejects_path_traversal() {
+        let config = ForgejoConfig {
+            base_url: "https://git.example.com".to_string(),
+            token: None,
+            woodpecker_url: Some("https://ci.example.com/woodpecker/".to_string()),
+            woodpecker_token: None,
+        };
+        let adapter = ForgejoAdapter::new(config).expect("build adapter");
+
+        // Path traversal in repo_id
         assert!(
-            msg.contains("not found"),
-            "error message should mention not found, got: {msg}"
+            adapter
+                .parse_woodpecker_url("https://ci.example.com/woodpecker/repos/../pipeline/42")
+                .is_err()
+        );
+
+        // Path traversal in pipeline_num
+        assert!(
+            adapter
+                .parse_woodpecker_url("https://ci.example.com/woodpecker/repos/1/pipeline/..")
+                .is_err()
+        );
+
+        // Non-numeric repo_id
+        assert!(
+            adapter
+                .parse_woodpecker_url("https://ci.example.com/woodpecker/repos/abc/pipeline/42")
+                .is_err()
+        );
+
+        // Non-numeric pipeline_num
+        assert!(
+            adapter
+                .parse_woodpecker_url("https://ci.example.com/woodpecker/repos/1/pipeline/abc")
+                .is_err()
+        );
+
+        // Percent-encoded dots
+        assert!(
+            adapter
+                .parse_woodpecker_url("https://ci.example.com/woodpecker/repos/%2e%2e/pipeline/42")
+                .is_err()
+        );
+
+        // Multiple slashes
+        assert!(
+            adapter
+                .parse_woodpecker_url("https://ci.example.com/woodpecker/repos/1//pipeline/42")
+                .is_err()
         );
     }
 }

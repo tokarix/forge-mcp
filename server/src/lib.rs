@@ -31,6 +31,8 @@ use utoipa_scalar::{Scalar, Servable};
         handlers::get_issue_comments,
         handlers::get_issue_dependencies,
         handlers::get_pull,
+        handlers::get_pull_checks,
+        handlers::get_pull_ci_details,
         handlers::get_pull_comments,
         handlers::get_pull_diff,
         handlers::list_issues,
@@ -49,6 +51,12 @@ use utoipa_scalar::{Scalar, Servable};
     components(schemas(
         api::AddIssueDependencyBody,
         api::AddIssueLabelBody,
+        api::ChangeRequestCiDetailsResult,
+        api::CiCheckDetailResult,
+        api::CiResolutionResult,
+        api::CiProviderResult,
+        api::CiFailureStepResult,
+        api::CiLogExcerptResult,
         api::CommentBody,
         api::CommentOnIssueBody,
         api::CommitPatchBody,
@@ -157,6 +165,10 @@ pub fn build_router(state: AppState, enable_docs: bool) -> Router {
         .route(
             "/api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}/checks",
             get(handlers::get_pull_checks),
+        )
+        .route(
+            "/api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}/ci-details",
+            get(handlers::get_pull_ci_details),
         )
         .route(
             "/api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}/comments",

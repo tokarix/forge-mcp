@@ -727,6 +727,61 @@ pub struct CreateIssueRequest {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GetChangeRequestCiDetailsRequest {
+    pub agent: AgentIdentity,
+    pub index: u64,
+    pub repository: RepositoryRef,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ChangeRequestCiDetails {
+    pub head_sha: String,
+    pub state: CommitStatusState,
+    pub details: Vec<CiCheckDetail>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct CiCheckDetail {
+    pub context: String,
+    pub description: String,
+    pub state: CommitStatusState,
+    pub target_url: String,
+    pub resolution: CiResolution,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "type")]
+pub enum CiResolution {
+    Unsupported,
+    Error {
+        message: String,
+    },
+    Resolved {
+        provider: CiProvider,
+        pipeline_url: String,
+        failed_steps: Vec<CiFailureStep>,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CiProvider {
+    Woodpecker,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct CiFailureStep {
+    pub name: String,
+    pub state: String,
+    pub log_excerpt: Option<CiLogExcerpt>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct CiLogExcerpt {
+    pub lines: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GetChangeRequestChecksRequest {
     pub agent: AgentIdentity,
     pub index: u64,
@@ -930,6 +985,18 @@ pub enum ServiceError {
 
 #[async_trait]
 pub trait RepositoryReadService: Send + Sync {
+    /// Retrieves CI details for a change request's checks.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the upstream forge request fails or audit
+    /// recording fails.
+    async fn get_change_request_ci_details(
+        &self,
+        request: GetChangeRequestCiDetailsRequest,
+        credential: &ForgeCredential,
+    ) -> Result<ChangeRequestCiDetails, ServiceError>;
+
     /// Retrieves the combined CI/check status for a change request's head SHA.
     ///
     /// # Errors
@@ -1519,5 +1586,33 @@ mod tests {
         assert_eq!(json["state"], "Success");
         assert_eq!(json["total_count"], 1);
         assert_eq!(json["statuses"][0]["context"], "ci/woodpecker");
+    }
+
+    #[test]
+    fn ci_details_serializes() {
+        use super::{
+            ChangeRequestCiDetails, CiCheckDetail, CiProvider, CiResolution, CommitStatusState,
+        };
+        let details = ChangeRequestCiDetails {
+            head_sha: "abc123".to_string(),
+            state: CommitStatusState::Failure,
+            details: vec![CiCheckDetail {
+                context: "ci/woodpecker".to_string(),
+                description: "failed".to_string(),
+                state: CommitStatusState::Failure,
+                target_url: "https://ci.example/repos/1/pipeline/42".to_string(),
+                resolution: CiResolution::Resolved {
+                    provider: CiProvider::Woodpecker,
+                    pipeline_url: "https://ci.example/repos/1/pipeline/42".to_string(),
+                    failed_steps: vec![],
+                },
+            }],
+        };
+        let json = serde_json::to_value(&details).expect("should serialize");
+        assert_eq!(json["head_sha"], "abc123");
+        assert_eq!(json["state"], "Failure");
+        assert_eq!(json["details"][0]["context"], "ci/woodpecker");
+        assert_eq!(json["details"][0]["resolution"]["type"], "resolved");
+        assert_eq!(json["details"][0]["resolution"]["provider"], "woodpecker");
     }
 }

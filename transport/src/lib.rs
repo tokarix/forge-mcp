@@ -333,6 +333,19 @@ pub struct GetChangeRequestChecksTool {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct GetChangeRequestCiDetailsTool {
+    /// Forge alias -- use `forge_info` to discover available aliases.
+    pub forge: String,
+    /// Change request (pull request) index number.
+    #[serde(deserialize_with = "deserialize_u64_lenient")]
+    pub index: u64,
+    /// Repository owner or organization.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct GetChangeRequestCommentsTool {
     /// Forge alias -- use `forge_info` to discover available aliases.
     pub forge: String,
@@ -1667,6 +1680,33 @@ impl McpShim {
                 "pulls",
                 &request.index.to_string(),
                 "checks",
+            ],
+        )?;
+        self.gateway_get(url, &gw.token).await
+    }
+
+    /// Get the detailed CI/check status for a change request's current head.
+    #[tool(
+        name = "get_change_request_ci_details",
+        description = "Get the detailed CI/check status for a change request (pull request). Returns the aggregate state (success, pending, failure, error) and detailed per-check information for the current PR head SHA."
+    )]
+    async fn get_change_request_ci_details(
+        &self,
+        Parameters(request): Parameters<GetChangeRequestCiDetailsTool>,
+    ) -> Result<String, McpError> {
+        let gw = self.resolve_gateway(&request.forge).await?;
+        let url = Self::build_url(
+            &gw.url,
+            &[
+                "api",
+                "v1",
+                "repos",
+                &request.forge,
+                &request.owner,
+                &request.repo,
+                "pulls",
+                &request.index.to_string(),
+                "ci-details",
             ],
         )?;
         self.gateway_get(url, &gw.token).await
@@ -4529,6 +4569,59 @@ mod tests {
         // Next resolve should immediately discover "alpha" moved to gw-b.
         let gw = shim.resolve_gateway("alpha").await?;
         assert_eq!(gw.name, "gw-b");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_change_request_ci_details_tool() -> Result<(), Box<dyn std::error::Error>> {
+        let mock = wiremock::MockServer::start().await;
+
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(
+                "/api/v1/repos/adlevio/tokarix/forge-mcp/pulls/147/ci-details",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "head_sha": "abc123",
+                    "state": "failure",
+                    "details": [
+                        {
+                            "context": "ci/woodpecker",
+                            "description": "failed",
+                            "state": "failure",
+                            "target_url": "https://ci.example/1",
+                            "resolution": {
+                                "type": "resolved",
+                                "provider": "woodpecker",
+                                "pipeline_url": "https://ci.example/1",
+                                "failed_steps": []
+                            }
+                        }
+                    ]
+                })),
+            )
+            .mount(&mock)
+            .await;
+
+        let config = test_config(&mock.uri());
+        let shim = McpShim::new(config);
+
+        let request = serde_json::json!({
+            "forge": "adlevio",
+            "owner": "tokarix",
+            "repo": "forge-mcp",
+            "index": 147
+        });
+
+        let result = shim
+            .get_change_request_ci_details(Parameters(serde_json::from_value(request)?))
+            .await?;
+
+        let json: serde_json::Value = serde_json::from_str(&result)?;
+        assert_eq!(json["head_sha"], "abc123");
+        assert_eq!(json["state"], "failure");
+        assert_eq!(json["details"][0]["context"], "ci/woodpecker");
 
         Ok(())
     }

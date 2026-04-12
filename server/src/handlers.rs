@@ -24,12 +24,13 @@ use domain::{
 
 use crate::api::AgentEventsQuery;
 use crate::api::{
-    AddIssueDependencyBody, AddIssueLabelBody, CommentBody, CommentOnIssueBody, CommitPatchBody,
-    CommitPatchResult, ContentsPath, ContentsQuery, ContentsResult, CreateIssueBody, ErrorBody,
-    ForgePath, IssueDependencyPath, IssueLabelPath, IssuePath, ListIssuesQuery, ListPullsQuery,
-    ListRepositoriesQuery, OpenPullBody, PullPath, RebaseBranchBody, RebaseBranchResult,
-    RebaseOperationBody, RepoPath, ScheduleAutoMergeBody, SubmitReviewBody,
-    UpdateChangeRequestBody, UpdateIssueBody,
+    AddIssueDependencyBody, AddIssueLabelBody, ChangeRequestCiDetailsResult, CiCheckDetailResult,
+    CiFailureStepResult, CiLogExcerptResult, CiProviderResult, CiResolutionResult, CommentBody,
+    CommentOnIssueBody, CommitPatchBody, CommitPatchResult, ContentsPath, ContentsQuery,
+    ContentsResult, CreateIssueBody, ErrorBody, ForgePath, IssueDependencyPath, IssueLabelPath,
+    IssuePath, ListIssuesQuery, ListPullsQuery, ListRepositoriesQuery, OpenPullBody, PullPath,
+    RebaseBranchBody, RebaseBranchResult, RebaseOperationBody, RepoPath, ScheduleAutoMergeBody,
+    SubmitReviewBody, UpdateChangeRequestBody, UpdateIssueBody,
 };
 use crate::auth::{AgentRegistry, extract_bearer_token};
 use tokio_stream::StreamExt;
@@ -551,6 +552,95 @@ pub async fn get_pull_checks(
         .map_err(map_service_error)?;
 
     Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(to_json_value(&result)?))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}/ci-details",
+    params(
+        ("forge" = String, Path, description = "Forge alias"),
+        ("owner" = String, Path, description = "Repository owner"),
+        ("repo" = String, Path, description = "Repository name"),
+        ("index" = u64, Path, description = "Pull request index"),
+    ),
+    responses(
+        (status = 200, description = "Detailed CI/check status for the PR head", body = ChangeRequestCiDetailsResult),
+        (status = 401, description = "Unauthorized", body = ErrorBody),
+    ),
+    security(("bearer" = []))
+)]
+/// GET /api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}/ci-details
+pub async fn get_pull_ci_details(
+    State(state): State<AppState>,
+    Path(path): Path<PullPath>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let forge = resolve_forge(&state.forge_registry, &path.forge)?;
+    let agent = resolve_agent(
+        &headers,
+        &state.agent_registry,
+        &path.forge,
+        &path.owner,
+        &path.repo,
+    )?;
+
+    let credential = resolve_credential(agent, &path.forge, forge);
+
+    let result = forge
+        .read_service
+        .get_change_request_ci_details(
+            domain::GetChangeRequestCiDetailsRequest {
+                agent: agent.identity.clone(),
+                index: path.index,
+                repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
+            },
+            &credential,
+        )
+        .await
+        .map_err(map_service_error)?;
+
+    let response = ChangeRequestCiDetailsResult {
+        head_sha: result.head_sha,
+        state: format!("{:?}", result.state).to_lowercase(),
+        details: result
+            .details
+            .into_iter()
+            .map(|d| CiCheckDetailResult {
+                context: d.context,
+                description: d.description,
+                state: format!("{:?}", d.state).to_lowercase(),
+                target_url: d.target_url,
+                resolution: match d.resolution {
+                    domain::CiResolution::Unsupported => CiResolutionResult::Unsupported,
+                    domain::CiResolution::Error { message } => {
+                        CiResolutionResult::Error { message }
+                    }
+                    domain::CiResolution::Resolved {
+                        provider,
+                        pipeline_url,
+                        failed_steps,
+                    } => CiResolutionResult::Resolved {
+                        provider: match provider {
+                            domain::CiProvider::Woodpecker => CiProviderResult::Woodpecker,
+                        },
+                        pipeline_url,
+                        failed_steps: failed_steps
+                            .into_iter()
+                            .map(|s| CiFailureStepResult {
+                                name: s.name,
+                                state: s.state,
+                                log_excerpt: s
+                                    .log_excerpt
+                                    .map(|l| CiLogExcerptResult { lines: l.lines }),
+                            })
+                            .collect(),
+                    },
+                },
+            })
+            .collect(),
+    };
+
+    Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(response))
 }
 
 #[utoipa::path(
@@ -1987,12 +2077,42 @@ mod tests {
             _host: &str,
             _secret: &str,
         ) -> Result<Option<domain::WebhookEvent>, forge::ForgeWebhookError> {
-            unimplemented!()
+            Err(forge::ForgeWebhookError::InvalidPayload(
+                "unimplemented in test fake".into(),
+            ))
         }
     }
 
     #[async_trait::async_trait]
     impl forge::ForgeAdapter for FakeForgeAdapter {
+        async fn get_change_request_ci_details(
+            &self,
+            _: &domain::RepositoryRef,
+            sha: &str,
+            _: &domain::ForgeCredential,
+        ) -> Result<domain::ChangeRequestCiDetails, forge::ForgeError> {
+            Ok(domain::ChangeRequestCiDetails {
+                head_sha: sha.to_string(),
+                state: domain::CommitStatusState::Failure,
+                details: vec![domain::CiCheckDetail {
+                    context: "ci/test".into(),
+                    description: "failed".into(),
+                    state: domain::CommitStatusState::Failure,
+                    target_url: "https://ci.example/1".into(),
+                    resolution: domain::CiResolution::Resolved {
+                        provider: domain::CiProvider::Woodpecker,
+                        pipeline_url: "https://ci.example/1".into(),
+                        failed_steps: vec![domain::CiFailureStep {
+                            name: "test".into(),
+                            state: "failure".into(),
+                            log_excerpt: Some(domain::CiLogExcerpt {
+                                lines: vec!["error log".into()],
+                            }),
+                        }],
+                    },
+                }],
+            })
+        }
         async fn add_issue_dependency(
             &self,
             _: &domain::RepositoryRef,
@@ -2000,7 +2120,9 @@ mod tests {
             _: u64,
             _: &domain::ForgeCredential,
         ) -> Result<domain::Issue, forge::ForgeError> {
-            unimplemented!()
+            Err(forge::ForgeError::Unsupported(
+                "unimplemented in test fake".into(),
+            ))
         }
         async fn add_issue_label(
             &self,
@@ -2009,7 +2131,9 @@ mod tests {
             _: &str,
             _: &domain::ForgeCredential,
         ) -> Result<domain::Issue, forge::ForgeError> {
-            unimplemented!()
+            Err(forge::ForgeError::Unsupported(
+                "unimplemented in test fake".into(),
+            ))
         }
         async fn assign_issue(
             &self,
@@ -2018,7 +2142,9 @@ mod tests {
             _: &str,
             _: &domain::ForgeCredential,
         ) -> Result<domain::Issue, forge::ForgeError> {
-            unimplemented!()
+            Err(forge::ForgeError::Unsupported(
+                "unimplemented in test fake".into(),
+            ))
         }
         async fn close_issue(
             &self,
@@ -2026,7 +2152,9 @@ mod tests {
             _: u64,
             _: &domain::ForgeCredential,
         ) -> Result<domain::Issue, forge::ForgeError> {
-            unimplemented!()
+            Err(forge::ForgeError::Unsupported(
+                "unimplemented in test fake".into(),
+            ))
         }
         async fn comment_on_issue(
             &self,
@@ -2035,7 +2163,9 @@ mod tests {
             _: &str,
             _: &domain::ForgeCredential,
         ) -> Result<domain::IssueComment, forge::ForgeError> {
-            unimplemented!()
+            Err(forge::ForgeError::Unsupported(
+                "unimplemented in test fake".into(),
+            ))
         }
         async fn create_commit_status(
             &self,
@@ -2046,7 +2176,9 @@ mod tests {
             _: &str,
             _: &domain::ForgeCredential,
         ) -> Result<(), forge::ForgeError> {
-            unimplemented!()
+            Err(forge::ForgeError::Unsupported(
+                "unimplemented in test fake".into(),
+            ))
         }
         async fn create_issue(
             &self,
@@ -2055,7 +2187,9 @@ mod tests {
             _: &str,
             _: &domain::ForgeCredential,
         ) -> Result<domain::Issue, forge::ForgeError> {
-            unimplemented!()
+            Err(forge::ForgeError::Unsupported(
+                "unimplemented in test fake".into(),
+            ))
         }
         async fn get_issue(
             &self,
@@ -2063,7 +2197,9 @@ mod tests {
             _: u64,
             _: &domain::ForgeCredential,
         ) -> Result<domain::Issue, forge::ForgeError> {
-            unimplemented!()
+            Err(forge::ForgeError::Unsupported(
+                "unimplemented in test fake".into(),
+            ))
         }
         async fn get_issue_comments(
             &self,
@@ -2071,7 +2207,9 @@ mod tests {
             _: u64,
             _: &domain::ForgeCredential,
         ) -> Result<Vec<domain::IssueComment>, forge::ForgeError> {
-            unimplemented!()
+            Err(forge::ForgeError::Unsupported(
+                "unimplemented in test fake".into(),
+            ))
         }
         async fn get_issue_dependencies(
             &self,
@@ -2079,7 +2217,9 @@ mod tests {
             _: u64,
             _: &domain::ForgeCredential,
         ) -> Result<domain::IssueDependencies, forge::ForgeError> {
-            unimplemented!()
+            Err(forge::ForgeError::Unsupported(
+                "unimplemented in test fake".into(),
+            ))
         }
         async fn list_issues(
             &self,
@@ -2087,7 +2227,9 @@ mod tests {
             _: Option<&str>,
             _: &domain::ForgeCredential,
         ) -> Result<Vec<domain::Issue>, forge::ForgeError> {
-            unimplemented!()
+            Err(forge::ForgeError::Unsupported(
+                "unimplemented in test fake".into(),
+            ))
         }
         async fn list_repositories(
             &self,
@@ -2095,7 +2237,9 @@ mod tests {
             _: Option<&str>,
             _: &domain::ForgeCredential,
         ) -> Result<Vec<domain::Repository>, forge::ForgeError> {
-            unimplemented!()
+            Err(forge::ForgeError::Unsupported(
+                "unimplemented in test fake".into(),
+            ))
         }
         async fn remove_issue_dependency(
             &self,
@@ -2104,7 +2248,9 @@ mod tests {
             _: u64,
             _: &domain::ForgeCredential,
         ) -> Result<domain::Issue, forge::ForgeError> {
-            unimplemented!()
+            Err(forge::ForgeError::Unsupported(
+                "unimplemented in test fake".into(),
+            ))
         }
         async fn remove_issue_label(
             &self,
@@ -2113,7 +2259,9 @@ mod tests {
             _: &str,
             _: &domain::ForgeCredential,
         ) -> Result<domain::Issue, forge::ForgeError> {
-            unimplemented!()
+            Err(forge::ForgeError::Unsupported(
+                "unimplemented in test fake".into(),
+            ))
         }
         async fn get_authenticated_user(
             &self,
@@ -2130,7 +2278,9 @@ mod tests {
             _: u64,
             _: &domain::ForgeCredential,
         ) -> Result<domain::ChangeRequest, forge::ForgeError> {
-            unimplemented!()
+            Err(forge::ForgeError::Unsupported(
+                "unimplemented in test fake".into(),
+            ))
         }
         async fn comment_on_change_request(
             &self,
@@ -2139,7 +2289,9 @@ mod tests {
             _: &str,
             _: &domain::ForgeCredential,
         ) -> Result<domain::ChangeRequestComment, forge::ForgeError> {
-            unimplemented!()
+            Err(forge::ForgeError::Unsupported(
+                "unimplemented in test fake".into(),
+            ))
         }
         async fn create_change_request(
             &self,
@@ -2150,7 +2302,9 @@ mod tests {
             _: &str,
             _: &domain::ForgeCredential,
         ) -> Result<domain::ChangeRequest, forge::ForgeError> {
-            unimplemented!()
+            Err(forge::ForgeError::Unsupported(
+                "unimplemented in test fake".into(),
+            ))
         }
         async fn get_change_request_comments(
             &self,
@@ -2158,7 +2312,9 @@ mod tests {
             _: u64,
             _: &domain::ForgeCredential,
         ) -> Result<Vec<domain::ChangeRequestCommentDetail>, forge::ForgeError> {
-            unimplemented!()
+            Err(forge::ForgeError::Unsupported(
+                "unimplemented in test fake".into(),
+            ))
         }
         async fn get_combined_commit_status(
             &self,
@@ -2166,14 +2322,18 @@ mod tests {
             _: &str,
             _: &domain::ForgeCredential,
         ) -> Result<domain::CombinedCommitStatus, forge::ForgeError> {
-            unimplemented!()
+            Err(forge::ForgeError::Unsupported(
+                "unimplemented in test fake".into(),
+            ))
         }
         async fn get_allowed_merge_styles(
             &self,
             _: &domain::RepositoryRef,
             _: &domain::ForgeCredential,
         ) -> Result<Vec<String>, forge::ForgeError> {
-            unimplemented!()
+            Err(forge::ForgeError::Unsupported(
+                "unimplemented in test fake".into(),
+            ))
         }
         async fn get_change_request(
             &self,
@@ -2181,7 +2341,9 @@ mod tests {
             _: u64,
             _: &domain::ForgeCredential,
         ) -> Result<domain::ChangeRequest, forge::ForgeError> {
-            unimplemented!()
+            Err(forge::ForgeError::Unsupported(
+                "unimplemented in test fake".into(),
+            ))
         }
         async fn get_change_request_diff(
             &self,
@@ -2189,21 +2351,27 @@ mod tests {
             _: u64,
             _: &domain::ForgeCredential,
         ) -> Result<String, forge::ForgeError> {
-            unimplemented!()
+            Err(forge::ForgeError::Unsupported(
+                "unimplemented in test fake".into(),
+            ))
         }
         async fn get_default_merge_style(
             &self,
             _: &domain::RepositoryRef,
             _: &domain::ForgeCredential,
         ) -> Result<Option<String>, forge::ForgeError> {
-            unimplemented!()
+            Err(forge::ForgeError::Unsupported(
+                "unimplemented in test fake".into(),
+            ))
         }
         async fn get_repository_merge_settings(
             &self,
             _: &domain::RepositoryRef,
             _: &domain::ForgeCredential,
         ) -> Result<domain::RepositoryMergeSettings, forge::ForgeError> {
-            unimplemented!()
+            Err(forge::ForgeError::Unsupported(
+                "unimplemented in test fake".into(),
+            ))
         }
         async fn list_change_requests(
             &self,
@@ -2211,7 +2379,9 @@ mod tests {
             _: Option<&domain::ChangeRequestState>,
             _: &domain::ForgeCredential,
         ) -> Result<Vec<domain::ChangeRequest>, forge::ForgeError> {
-            unimplemented!()
+            Err(forge::ForgeError::Unsupported(
+                "unimplemented in test fake".into(),
+            ))
         }
         async fn read_repository_file(
             &self,
@@ -2220,7 +2390,9 @@ mod tests {
             _: Option<&str>,
             _: &domain::ForgeCredential,
         ) -> Result<domain::ReadRepositoryFileResponse, forge::ForgeError> {
-            unimplemented!()
+            Err(forge::ForgeError::Unsupported(
+                "unimplemented in test fake".into(),
+            ))
         }
         async fn schedule_auto_merge(
             &self,
@@ -2231,7 +2403,9 @@ mod tests {
             _: Option<bool>,
             _: &domain::ForgeCredential,
         ) -> Result<(), forge::ForgeError> {
-            unimplemented!()
+            Err(forge::ForgeError::Unsupported(
+                "unimplemented in test fake".into(),
+            ))
         }
         async fn submit_change_request_review(
             &self,
@@ -2241,7 +2415,9 @@ mod tests {
             _: &str,
             _: &domain::ForgeCredential,
         ) -> Result<domain::ChangeRequestReview, forge::ForgeError> {
-            unimplemented!()
+            Err(forge::ForgeError::Unsupported(
+                "unimplemented in test fake".into(),
+            ))
         }
         async fn update_change_request(
             &self,
@@ -2251,7 +2427,9 @@ mod tests {
             _: Option<&str>,
             _: &domain::ForgeCredential,
         ) -> Result<domain::ChangeRequest, forge::ForgeError> {
-            unimplemented!()
+            Err(forge::ForgeError::Unsupported(
+                "unimplemented in test fake".into(),
+            ))
         }
 
         async fn update_issue(
@@ -2262,7 +2440,9 @@ mod tests {
             _: Option<&str>,
             _: &domain::ForgeCredential,
         ) -> Result<domain::Issue, forge::ForgeError> {
-            unimplemented!()
+            Err(forge::ForgeError::Unsupported(
+                "unimplemented in test fake".into(),
+            ))
         }
     }
 
@@ -2344,7 +2524,35 @@ mod tests {
             _request: domain::GetChangeRequestChecksRequest,
             _: &domain::ForgeCredential,
         ) -> Result<domain::CombinedCommitStatus, ServiceError> {
-            unimplemented!()
+            Err(ServiceError::Upstream("unimplemented in test fake".into()))
+        }
+
+        async fn get_change_request_ci_details(
+            &self,
+            _req: domain::GetChangeRequestCiDetailsRequest,
+            _cred: &domain::ForgeCredential,
+        ) -> Result<domain::ChangeRequestCiDetails, domain::ServiceError> {
+            Ok(domain::ChangeRequestCiDetails {
+                head_sha: "abc123".to_string(),
+                state: domain::CommitStatusState::Failure,
+                details: vec![domain::CiCheckDetail {
+                    context: "ci/test".into(),
+                    description: "failed".into(),
+                    state: domain::CommitStatusState::Failure,
+                    target_url: "https://ci.example/1".into(),
+                    resolution: domain::CiResolution::Resolved {
+                        provider: domain::CiProvider::Woodpecker,
+                        pipeline_url: "https://ci.example/1".into(),
+                        failed_steps: vec![domain::CiFailureStep {
+                            name: "test".into(),
+                            state: "failure".into(),
+                            log_excerpt: Some(domain::CiLogExcerpt {
+                                lines: vec!["error log".into()],
+                            }),
+                        }],
+                    },
+                }],
+            })
         }
 
         async fn get_change_request_diff(
@@ -2352,7 +2560,7 @@ mod tests {
             _request: domain::GetChangeRequestDiffRequest,
             _credential: &domain::ForgeCredential,
         ) -> Result<domain::ChangeRequestDiff, ServiceError> {
-            unimplemented!()
+            Err(ServiceError::Upstream("unimplemented in test fake".into()))
         }
 
         async fn list_change_requests(
@@ -2531,7 +2739,7 @@ mod tests {
             _authorized: domain::policy::AuthorizedWrite,
             _credential: &domain::ForgeCredential,
         ) -> Result<domain::RebaseBranchResponse, ServiceError> {
-            unimplemented!()
+            Err(ServiceError::Upstream("unimplemented in test fake".into()))
         }
 
         async fn remove_issue_dependency(
@@ -3400,5 +3608,35 @@ mod tests {
             .expect("request should succeed");
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn get_pull_ci_details_returns_lowercase_state() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let app = crate::build_router(test_state(), false);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/repos/test-forge/org/repo/pulls/1/ci-details")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read response body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("parse JSON response");
+
+        // Mock state in test_state() should be Failure/Error etc.
+        // We want to ensure it's lowercase.
+        assert_eq!(json["state"], "failure");
+        assert_eq!(json["details"][0]["state"], "failure");
     }
 }

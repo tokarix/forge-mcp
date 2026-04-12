@@ -917,6 +917,34 @@ impl crate::ForgeAdapter for GitLabAdapter {
         })
     }
 
+    async fn get_change_request_ci_details(
+        &self,
+        repository: &RepositoryRef,
+        sha: &str,
+        credential: &ForgeCredential,
+    ) -> Result<domain::ChangeRequestCiDetails, ForgeError> {
+        let combined = self
+            .get_combined_commit_status(repository, sha, credential)
+            .await?;
+        let details = combined
+            .statuses
+            .into_iter()
+            .map(|status| domain::CiCheckDetail {
+                context: status.context,
+                description: status.description,
+                state: status.state,
+                target_url: status.target_url,
+                resolution: domain::CiResolution::Unsupported,
+            })
+            .collect();
+
+        Ok(domain::ChangeRequestCiDetails {
+            head_sha: sha.to_string(),
+            state: combined.state,
+            details,
+        })
+    }
+
     async fn get_default_merge_style(
         &self,
         repository: &RepositoryRef,

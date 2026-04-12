@@ -95,6 +95,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let adapter = Arc::new(ForgejoAdapter::new(ForgejoConfig {
                     base_url: forge_config.base_url.clone(),
                     token: forge_config.token.clone(),
+                    woodpecker_url: forge_config.woodpecker_url.clone(),
+                    woodpecker_token: forge_config.woodpecker_token.clone(),
                 })?);
                 build_forge_instance(
                     adapter,

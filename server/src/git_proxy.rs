@@ -435,6 +435,14 @@ mod tests {
 
     #[async_trait::async_trait]
     impl forge::ForgeAdapter for FakeForgeAdapter {
+        async fn get_change_request_ci_details(
+            &self,
+            _: &domain::RepositoryRef,
+            _: &str,
+            _: &domain::ForgeCredential,
+        ) -> Result<domain::ChangeRequestCiDetails, forge::ForgeError> {
+            unimplemented!()
+        }
         async fn add_issue_dependency(
             &self,
             _: &domain::RepositoryRef,
@@ -759,6 +767,14 @@ mod tests {
             _request: domain::GetChangeRequestChecksRequest,
             _: &domain::ForgeCredential,
         ) -> Result<domain::CombinedCommitStatus, ServiceError> {
+            unimplemented!()
+        }
+
+        async fn get_change_request_ci_details(
+            &self,
+            _req: domain::GetChangeRequestCiDetailsRequest,
+            _cred: &domain::ForgeCredential,
+        ) -> Result<domain::ChangeRequestCiDetails, domain::ServiceError> {
             unimplemented!()
         }
 

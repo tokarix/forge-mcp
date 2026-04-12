@@ -215,6 +215,55 @@ pub struct UpdateIssueBody {
     pub title: Option<String>,
 }
 
+/// Response for GET /pulls/{index}/ci-details
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ChangeRequestCiDetailsResult {
+    pub head_sha: String,
+    pub state: String,
+    pub details: Vec<CiCheckDetailResult>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CiCheckDetailResult {
+    pub context: String,
+    pub description: String,
+    pub state: String,
+    pub target_url: String,
+    pub resolution: CiResolutionResult,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case", tag = "type")]
+pub enum CiResolutionResult {
+    Unsupported,
+    Error {
+        message: String,
+    },
+    Resolved {
+        provider: CiProviderResult,
+        pipeline_url: String,
+        failed_steps: Vec<CiFailureStepResult>,
+    },
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CiProviderResult {
+    Woodpecker,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CiFailureStepResult {
+    pub name: String,
+    pub state: String,
+    pub log_excerpt: Option<CiLogExcerptResult>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CiLogExcerptResult {
+    pub lines: Vec<String>,
+}
+
 /// Response for GET /api/v1/agent/info
 #[derive(Debug, Serialize)]
 pub struct AgentInfoResult {
