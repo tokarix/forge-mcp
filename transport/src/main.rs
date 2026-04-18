@@ -20,6 +20,10 @@ struct Cli {
     #[arg(long)]
     gateway_url: Option<String>,
 
+    /// Enable read-only mode (block forge write operations).
+    #[arg(long, env = "FORGE_MCP_READ_ONLY", default_value_t = false)]
+    read_only: bool,
+
     /// Send a single synthetic channel notification on startup for compatibility testing.
     #[arg(long, env = "FORGE_MCP_CHANNEL_STARTUP_SPIKE", default_value_t = false)]
     channel_startup_spike: bool,
@@ -145,6 +149,7 @@ fn load_config(cli: &Cli) -> Result<ShimConfig, Box<dyn std::error::Error>> {
         channel_startup_spike: cli.channel_startup_spike,
         enable_channels: cli.enable_channels,
         gateways,
+        read_only: cli.read_only,
         server_name: "forge-mcp-shim".to_string(),
         server_version: env!("CARGO_PKG_VERSION").to_string(),
     })

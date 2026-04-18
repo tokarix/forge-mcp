@@ -81,6 +81,7 @@ pub struct ShimConfig {
     pub channel_startup_spike: bool,
     pub enable_channels: bool,
     pub gateways: Vec<GatewayConfig>,
+    pub read_only: bool,
     pub server_name: String,
     pub server_version: String,
 }
@@ -757,6 +758,17 @@ impl McpShim {
         }
     }
 
+    /// Return an error if the shim is in read-only mode.
+    fn ensure_writable(&self) -> Result<(), McpError> {
+        if self.config.read_only {
+            return Err(McpError::invalid_params(
+                "forge-mcp is in read-only mode: this write operation is disabled".to_string(),
+                None,
+            ));
+        }
+        Ok(())
+    }
+
     /// Discover which forge aliases each gateway advertises and build the
     /// routing table.
     ///
@@ -1298,6 +1310,7 @@ impl McpShim {
         &self,
         Parameters(request): Parameters<AddIssueDependencyTool>,
     ) -> Result<String, McpError> {
+        self.ensure_writable()?;
         let gw = self.resolve_gateway(&request.forge).await?;
         let url = Self::build_url(
             &gw.url,
@@ -1326,6 +1339,8 @@ impl McpShim {
         &self,
         Parameters(request): Parameters<AddIssueLabelTool>,
     ) -> Result<String, McpError> {
+        // Enforce read-only mode for adding issue labels
+        self.ensure_writable()?;
         let gw = self.resolve_gateway(&request.forge).await?;
         let url = Self::build_url(
             &gw.url,
@@ -1351,6 +1366,7 @@ impl McpShim {
         &self,
         Parameters(request): Parameters<AssignIssueTool>,
     ) -> Result<String, McpError> {
+        self.ensure_writable()?;
         let gw = self.resolve_gateway(&request.forge).await?;
         let url = Self::build_url(
             &gw.url,
@@ -1378,6 +1394,7 @@ impl McpShim {
         &self,
         Parameters(request): Parameters<CloseChangeRequestTool>,
     ) -> Result<String, McpError> {
+        self.ensure_writable()?;
         let gw = self.resolve_gateway(&request.forge).await?;
         let url = Self::build_url(
             &gw.url,
@@ -1401,6 +1418,7 @@ impl McpShim {
         &self,
         Parameters(request): Parameters<CloseIssueTool>,
     ) -> Result<String, McpError> {
+        self.ensure_writable()?;
         let gw = self.resolve_gateway(&request.forge).await?;
         let url = Self::build_url(
             &gw.url,
@@ -1456,6 +1474,7 @@ impl McpShim {
         &self,
         Parameters(request): Parameters<CreateIssueTool>,
     ) -> Result<String, McpError> {
+        self.ensure_writable()?;
         let gw = self.resolve_gateway(&request.forge).await?;
         let url = Self::build_url(
             &gw.url,
@@ -1482,6 +1501,7 @@ impl McpShim {
         &self,
         Parameters(request): Parameters<CommentOnChangeRequestTool>,
     ) -> Result<String, McpError> {
+        self.ensure_writable()?;
         let gw = self.resolve_gateway(&request.forge).await?;
         let url = Self::build_url(
             &gw.url,
@@ -1512,6 +1532,7 @@ impl McpShim {
         &self,
         Parameters(request): Parameters<CommitPatchTool>,
     ) -> Result<String, McpError> {
+        self.ensure_writable()?;
         let gw = self.resolve_gateway(&request.forge).await?;
         let commit_author = resolve_commit_author(&request, discover_local_commit_author)?;
 
@@ -1876,6 +1897,7 @@ impl McpShim {
         &self,
         Parameters(request): Parameters<OpenChangeRequestTool>,
     ) -> Result<String, McpError> {
+        self.ensure_writable()?;
         let gw = self.resolve_gateway(&request.forge).await?;
         let url = Self::build_url(
             &gw.url,
@@ -1907,6 +1929,7 @@ impl McpShim {
         &self,
         Parameters(request): Parameters<RebaseBranchTool>,
     ) -> Result<String, McpError> {
+        self.ensure_writable()?;
         let gw = self.resolve_gateway(&request.forge).await?;
         let url = Self::build_url(
             &gw.url,
@@ -1963,6 +1986,7 @@ impl McpShim {
         &self,
         Parameters(request): Parameters<ScheduleAutoMergeTool>,
     ) -> Result<String, McpError> {
+        self.ensure_writable()?;
         let gw = self.resolve_gateway(&request.forge).await?;
         let url = Self::build_url(
             &gw.url,
@@ -2052,6 +2076,7 @@ impl McpShim {
         &self,
         Parameters(request): Parameters<RemoveIssueDependencyTool>,
     ) -> Result<String, McpError> {
+        self.ensure_writable()?;
         let gw = self.resolve_gateway(&request.forge).await?;
         let url = Self::build_url(
             &gw.url,
@@ -2080,6 +2105,7 @@ impl McpShim {
         &self,
         Parameters(request): Parameters<RemoveIssueLabelTool>,
     ) -> Result<String, McpError> {
+        self.ensure_writable()?;
         let gw = self.resolve_gateway(&request.forge).await?;
         let url = Self::build_url(
             &gw.url,
@@ -2139,6 +2165,7 @@ impl McpShim {
         &self,
         Parameters(request): Parameters<UpdateChangeRequestTool>,
     ) -> Result<String, McpError> {
+        self.ensure_writable()?;
         let gw = self.resolve_gateway(&request.forge).await?;
         let url = Self::build_url(
             &gw.url,
@@ -2176,6 +2203,7 @@ impl McpShim {
         &self,
         Parameters(request): Parameters<UpdateIssueTool>,
     ) -> Result<String, McpError> {
+        self.ensure_writable()?;
         let gw = self.resolve_gateway(&request.forge).await?;
         let url = Self::build_url(
             &gw.url,
@@ -2509,6 +2537,7 @@ mod tests {
                 token: "test-token".to_string(),
                 url: gateway_url.to_string(),
             }],
+            read_only: false,
             server_name: "forge-mcp-shim".to_string(),
             server_version: "0.1.0-test".to_string(),
         }
@@ -2533,6 +2562,7 @@ mod tests {
                     url: (*url).to_string(),
                 })
                 .collect(),
+            read_only: false,
             server_name: "forge-mcp-shim".to_string(),
             server_version: "0.1.0-test".to_string(),
         }
@@ -2642,6 +2672,528 @@ mod tests {
                 email: "you@example.com".to_string(),
                 name: "Your Name".to_string(),
             }
+        );
+    }
+
+    #[tokio::test]
+    async fn commit_patch_fails_in_read_only_mode() {
+        let mock_server = wiremock::MockServer::start().await;
+        let mut config = test_config(&mock_server.uri());
+        config.read_only = true;
+        let shim = McpShim::new(config);
+
+        let request = CommitPatchTool {
+            author_email: None,
+            author_name: None,
+            base_branch: "main".to_string(),
+            commit_message: "feat: something".to_string(),
+            existing_branch: false,
+            forge: "test".to_string(),
+            new_branch: "agent/task-1".to_string(),
+            patch: Some("diff --git ...".to_string()),
+            patch_file: None,
+            repo: "cockpit".to_string(),
+            owner: "tokarix".to_string(),
+        };
+
+        let err = shim
+            .commit_patch(Parameters(request))
+            .await
+            .expect_err("should fail in read-only mode");
+        assert!(err.message.contains("read-only mode"));
+
+        let requests = mock_server
+            .received_requests()
+            .await
+            .expect("received requests");
+        assert!(
+            requests.is_empty(),
+            "no requests should reach the gateway in read-only mode"
+        );
+    }
+
+    #[tokio::test]
+    async fn comment_on_issue_allowed_in_read_only_mode() {
+        let mock_server = wiremock::MockServer::start().await;
+        let mut config = test_config(&mock_server.uri());
+        config.read_only = true;
+        let shim = McpShim::new(config);
+
+        let request = CommentOnIssueTool {
+            body: "hello".to_string(),
+            forge: "test".to_string(),
+            index: 1,
+            owner: "owner".to_string(),
+            repo: "repo".to_string(),
+        };
+
+        let err = shim
+            .comment_on_issue(Parameters(request))
+            .await
+            .expect_err("should fail at HTTP layer, not writability");
+        assert!(!err.message.contains("read-only mode"));
+    }
+
+    #[tokio::test]
+    async fn add_issue_label_blocked_in_read_only_mode() {
+        // Verify that add_issue_label is correctly blocked when read_only is true
+        let mock_server = wiremock::MockServer::start().await;
+        let mut config = test_config(&mock_server.uri());
+        config.read_only = true;
+        let shim = McpShim::new(config);
+
+        let request = AddIssueLabelTool {
+            forge: "test".to_string(),
+            index: 1,
+            label: "test".to_string(),
+            owner: "owner".to_string(),
+            repo: "repo".to_string(),
+        };
+
+        let err = shim
+            .add_issue_label(Parameters(request))
+            .await
+            .expect_err("should be blocked due to read-only mode");
+        assert!(err.message.contains("read-only mode"));
+
+        let requests = mock_server
+            .received_requests()
+            .await
+            .expect("received requests");
+        assert!(
+            requests.is_empty(),
+            "no requests should reach the gateway in read-only mode"
+        );
+    }
+
+    #[tokio::test]
+    async fn submit_change_request_review_allowed_in_read_only_mode() {
+        let mock_server = wiremock::MockServer::start().await;
+        let mut config = test_config(&mock_server.uri());
+        config.read_only = true;
+        let shim = McpShim::new(config);
+
+        let request = SubmitChangeRequestReviewTool {
+            body: "looks good".to_string(),
+            event: "APPROVED".to_string(),
+            forge: "test".to_string(),
+            index: 1,
+            owner: "owner".to_string(),
+            repo: "repo".to_string(),
+        };
+
+        let err = shim
+            .submit_change_request_review(Parameters(request))
+            .await
+            .expect_err("should fail at HTTP layer, not writability");
+        assert!(!err.message.contains("read-only mode"));
+    }
+
+    #[tokio::test]
+    async fn remove_issue_dependency_blocked_in_read_only_mode() {
+        let mock_server = wiremock::MockServer::start().await;
+        let mut config = test_config(&mock_server.uri());
+        config.read_only = true;
+        let shim = McpShim::new(config);
+
+        let request = RemoveIssueDependencyTool {
+            dependency: 2,
+            forge: "test".to_string(),
+            index: 1,
+            owner: "owner".to_string(),
+            repo: "repo".to_string(),
+        };
+
+        let err = shim
+            .remove_issue_dependency(Parameters(request))
+            .await
+            .expect_err("should fail in read-only mode");
+        assert!(err.message.contains("read-only mode"));
+
+        let requests = mock_server
+            .received_requests()
+            .await
+            .expect("received requests");
+        assert!(
+            requests.is_empty(),
+            "no requests should reach the gateway in read-only mode"
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_issue_label_blocked_in_read_only_mode() {
+        let mock_server = wiremock::MockServer::start().await;
+        let mut config = test_config(&mock_server.uri());
+        config.read_only = true;
+        let shim = McpShim::new(config);
+
+        let request = RemoveIssueLabelTool {
+            forge: "test".to_string(),
+            index: 1,
+            label: "test".to_string(),
+            owner: "owner".to_string(),
+            repo: "repo".to_string(),
+        };
+
+        let err = shim
+            .remove_issue_label(Parameters(request))
+            .await
+            .expect_err("should fail in read-only mode");
+        assert!(err.message.contains("read-only mode"));
+
+        let requests = mock_server
+            .received_requests()
+            .await
+            .expect("received requests");
+        assert!(
+            requests.is_empty(),
+            "no requests should reach the gateway in read-only mode"
+        );
+    }
+
+    #[tokio::test]
+    async fn add_issue_dependency_blocked_in_read_only_mode() {
+        let mock_server = wiremock::MockServer::start().await;
+        let mut config = test_config(&mock_server.uri());
+        config.read_only = true;
+        let shim = McpShim::new(config);
+
+        let request = AddIssueDependencyTool {
+            dependency: 2,
+            forge: "test".to_string(),
+            index: 1,
+            owner: "owner".to_string(),
+            repo: "repo".to_string(),
+        };
+
+        let err = shim
+            .add_issue_dependency(Parameters(request))
+            .await
+            .expect_err("should fail in read-only mode");
+        assert!(err.message.contains("read-only mode"));
+
+        let requests = mock_server
+            .received_requests()
+            .await
+            .expect("received requests");
+        assert!(
+            requests.is_empty(),
+            "no requests should reach the gateway in read-only mode"
+        );
+    }
+
+    #[tokio::test]
+    async fn assign_issue_blocked_in_read_only_mode() {
+        let mock_server = wiremock::MockServer::start().await;
+        let mut config = test_config(&mock_server.uri());
+        config.read_only = true;
+        let shim = McpShim::new(config);
+
+        let request = AssignIssueTool {
+            assignee: "user".to_string(),
+            forge: "test".to_string(),
+            index: 1,
+            owner: "owner".to_string(),
+            repo: "repo".to_string(),
+        };
+
+        let err = shim
+            .assign_issue(Parameters(request))
+            .await
+            .expect_err("should fail in read-only mode");
+        assert!(err.message.contains("read-only mode"));
+
+        let requests = mock_server
+            .received_requests()
+            .await
+            .expect("received requests");
+        assert!(
+            requests.is_empty(),
+            "no requests should reach the gateway in read-only mode"
+        );
+    }
+
+    #[tokio::test]
+    async fn close_change_request_blocked_in_read_only_mode() {
+        let mock_server = wiremock::MockServer::start().await;
+        let mut config = test_config(&mock_server.uri());
+        config.read_only = true;
+        let shim = McpShim::new(config);
+
+        let request = CloseChangeRequestTool {
+            forge: "test".to_string(),
+            index: 1,
+            owner: "owner".to_string(),
+            repo: "repo".to_string(),
+        };
+
+        let err = shim
+            .close_change_request(Parameters(request))
+            .await
+            .expect_err("should fail in read-only mode");
+        assert!(err.message.contains("read-only mode"));
+
+        let requests = mock_server
+            .received_requests()
+            .await
+            .expect("received requests");
+        assert!(
+            requests.is_empty(),
+            "no requests should reach the gateway in read-only mode"
+        );
+    }
+
+    #[tokio::test]
+    async fn close_issue_blocked_in_read_only_mode() {
+        let mock_server = wiremock::MockServer::start().await;
+        let mut config = test_config(&mock_server.uri());
+        config.read_only = true;
+        let shim = McpShim::new(config);
+
+        let request = CloseIssueTool {
+            forge: "test".to_string(),
+            index: 1,
+            owner: "owner".to_string(),
+            repo: "repo".to_string(),
+        };
+
+        let err = shim
+            .close_issue(Parameters(request))
+            .await
+            .expect_err("should fail in read-only mode");
+        assert!(err.message.contains("read-only mode"));
+
+        let requests = mock_server
+            .received_requests()
+            .await
+            .expect("received requests");
+        assert!(
+            requests.is_empty(),
+            "no requests should reach the gateway in read-only mode"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_issue_blocked_in_read_only_mode() {
+        let mock_server = wiremock::MockServer::start().await;
+        let mut config = test_config(&mock_server.uri());
+        config.read_only = true;
+        let shim = McpShim::new(config);
+
+        let request = CreateIssueTool {
+            body: "test body".to_string(),
+            forge: "test".to_string(),
+            owner: "owner".to_string(),
+            repo: "repo".to_string(),
+            title: "test title".to_string(),
+        };
+
+        let err = shim
+            .create_issue(Parameters(request))
+            .await
+            .expect_err("should fail in read-only mode");
+        assert!(err.message.contains("read-only mode"));
+
+        let requests = mock_server
+            .received_requests()
+            .await
+            .expect("received requests");
+        assert!(
+            requests.is_empty(),
+            "no requests should reach the gateway in read-only mode"
+        );
+    }
+
+    #[tokio::test]
+    async fn comment_on_change_request_blocked_in_read_only_mode() {
+        let mock_server = wiremock::MockServer::start().await;
+        let mut config = test_config(&mock_server.uri());
+        config.read_only = true;
+        let shim = McpShim::new(config);
+
+        let request = CommentOnChangeRequestTool {
+            body: "test body".to_string(),
+            forge: "test".to_string(),
+            index: 1,
+            owner: "owner".to_string(),
+            repo: "repo".to_string(),
+        };
+
+        let err = shim
+            .comment_on_change_request(Parameters(request))
+            .await
+            .expect_err("should fail in read-only mode");
+        assert!(err.message.contains("read-only mode"));
+
+        let requests = mock_server
+            .received_requests()
+            .await
+            .expect("received requests");
+        assert!(
+            requests.is_empty(),
+            "no requests should reach the gateway in read-only mode"
+        );
+    }
+
+    #[tokio::test]
+    async fn open_change_request_blocked_in_read_only_mode() {
+        let mock_server = wiremock::MockServer::start().await;
+        let mut config = test_config(&mock_server.uri());
+        config.read_only = true;
+        let shim = McpShim::new(config);
+
+        let request = OpenChangeRequestTool {
+            base_branch: "main".to_string(),
+            body: "test body".to_string(),
+            forge: "test".to_string(),
+            head_branch: "agent/branch".to_string(),
+            owner: "owner".to_string(),
+            repo: "repo".to_string(),
+            title: "test title".to_string(),
+        };
+
+        let err = shim
+            .open_change_request(Parameters(request))
+            .await
+            .expect_err("should fail in read-only mode");
+        assert!(err.message.contains("read-only mode"));
+
+        let requests = mock_server
+            .received_requests()
+            .await
+            .expect("received requests");
+        assert!(
+            requests.is_empty(),
+            "no requests should reach the gateway in read-only mode"
+        );
+    }
+
+    #[tokio::test]
+    async fn rebase_branch_blocked_in_read_only_mode() {
+        let mock_server = wiremock::MockServer::start().await;
+        let mut config = test_config(&mock_server.uri());
+        config.read_only = true;
+        let shim = McpShim::new(config);
+
+        let request = RebaseBranchTool {
+            base_branch: "main".to_string(),
+            branch: "agent/branch".to_string(),
+            forge: "test".to_string(),
+            operations: vec![RebaseBranchOperationTool::RebaseOnto {}],
+            owner: "owner".to_string(),
+            repo: "repo".to_string(),
+        };
+
+        let err = shim
+            .rebase_branch(Parameters(request))
+            .await
+            .expect_err("should fail in read-only mode");
+        assert!(err.message.contains("read-only mode"));
+
+        let requests = mock_server
+            .received_requests()
+            .await
+            .expect("received requests");
+        assert!(
+            requests.is_empty(),
+            "no requests should reach the gateway in read-only mode"
+        );
+    }
+
+    #[tokio::test]
+    async fn schedule_auto_merge_blocked_in_read_only_mode() {
+        let mock_server = wiremock::MockServer::start().await;
+        let mut config = test_config(&mock_server.uri());
+        config.read_only = true;
+        let shim = McpShim::new(config);
+
+        let request = ScheduleAutoMergeTool {
+            delete_branch_after_merge: None,
+            expected_head_sha: "sha".to_string(),
+            forge: "test".to_string(),
+            index: 1,
+            merge_style: "rebase".to_string(),
+            owner: "owner".to_string(),
+            repo: "repo".to_string(),
+        };
+
+        let err = shim
+            .schedule_auto_merge(Parameters(request))
+            .await
+            .expect_err("should fail in read-only mode");
+        assert!(err.message.contains("read-only mode"));
+
+        let requests = mock_server
+            .received_requests()
+            .await
+            .expect("received requests");
+        assert!(
+            requests.is_empty(),
+            "no requests should reach the gateway in read-only mode"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_change_request_blocked_in_read_only_mode() {
+        let mock_server = wiremock::MockServer::start().await;
+        let mut config = test_config(&mock_server.uri());
+        config.read_only = true;
+        let shim = McpShim::new(config);
+
+        let request = UpdateChangeRequestTool {
+            body: None,
+            forge: "test".to_string(),
+            index: 1,
+            owner: "owner".to_string(),
+            repo: "repo".to_string(),
+            title: Some("new title".to_string()),
+        };
+
+        let err = shim
+            .update_change_request(Parameters(request))
+            .await
+            .expect_err("should fail in read-only mode");
+        assert!(err.message.contains("read-only mode"));
+
+        let requests = mock_server
+            .received_requests()
+            .await
+            .expect("received requests");
+        assert!(
+            requests.is_empty(),
+            "no requests should reach the gateway in read-only mode"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_issue_blocked_in_read_only_mode() {
+        let mock_server = wiremock::MockServer::start().await;
+        let mut config = test_config(&mock_server.uri());
+        config.read_only = true;
+        let shim = McpShim::new(config);
+
+        let request = UpdateIssueTool {
+            body: None,
+            forge: "test".to_string(),
+            index: 1,
+            owner: "owner".to_string(),
+            repo: "repo".to_string(),
+            title: Some("new title".to_string()),
+        };
+
+        let err = shim
+            .update_issue(Parameters(request))
+            .await
+            .expect_err("should fail in read-only mode");
+        assert!(err.message.contains("read-only mode"));
+
+        let requests = mock_server
+            .received_requests()
+            .await
+            .expect("received requests");
+        assert!(
+            requests.is_empty(),
+            "no requests should reach the gateway in read-only mode"
         );
     }
 
