@@ -18,8 +18,9 @@ use domain::{
     CloseChangeRequestRequest, CommentOnChangeRequestRequest, CommitPatchRequest, ForgeKind,
     GetChangeRequestChecksRequest, GetChangeRequestCommentsRequest, GetChangeRequestRequest,
     ListChangeRequestsRequest, OpenChangeRequestRequest, PublishableEvent,
-    ReadRepositoryFileRequest, RebaseBranchRequest, RepositoryRef, ScheduleAutoMergeRequest,
-    ServiceError, SubmitChangeRequestReviewRequest, UpdateChangeRequestRequest,
+    ReadRepositoryFileRequest, RebaseBranchRequest, Repository, RepositoryRef,
+    ScheduleAutoMergeRequest, ServiceError, SubmitChangeRequestReviewRequest,
+    UpdateChangeRequestRequest,
 };
 
 use crate::api::AgentEventsQuery;
@@ -1279,6 +1280,65 @@ pub async fn submit_pull_review(
     Ok::<_, (StatusCode, Json<ErrorBody>)>((StatusCode::CREATED, Json(to_json_value(&result)?)))
 }
 
+/// Fetch repositories from the forge adapter, respecting the agent's scoped access.
+async fn fetch_repos(
+    forge: &crate::registry::ForgeInstance,
+    agent: &crate::auth::ResolvedAgent,
+    credential: &domain::ForgeCredential,
+    search_q: Option<&str>,
+    owner: Option<&str>,
+) -> Result<Vec<Repository>, (StatusCode, Json<ErrorBody>)> {
+    match owner {
+        Some(o) => {
+            if !agent.policy_config.is_owner_accessible(&forge.alias, o) {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    Json(ErrorBody {
+                        error: format!(
+                            "agent '{}' is not authorized to list repositories for owner '{}'",
+                            agent.identity.agent_id, o
+                        ),
+                    }),
+                ));
+            }
+            Ok(forge
+                .adapter
+                .list_repositories(Some(o), search_q, credential)
+                .await
+                .map_err(|e| map_service_error(ServiceError::Upstream(e.to_string())))?)
+        }
+        None => {
+            if let Some(owners) = agent.policy_config.listable_owners(&forge.alias) {
+                let mut all_repos: Vec<Repository> = Vec::new();
+                let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+                for ow in owners {
+                    if !agent.policy_config.is_owner_accessible(&forge.alias, &ow) {
+                        continue;
+                    }
+                    let repos = forge
+                        .adapter
+                        .list_repositories(Some(&ow), search_q, credential)
+                        .await
+                        .map_err(|e| map_service_error(ServiceError::Upstream(e.to_string())))?;
+                    for repo in repos {
+                        if seen.insert(repo.full_name.clone()) {
+                            all_repos.push(repo);
+                        }
+                    }
+                }
+                Ok(all_repos)
+            } else {
+                // Unscoped access — use existing behavior.
+                Ok(forge
+                    .adapter
+                    .list_repositories(None, search_q, credential)
+                    .await
+                    .map_err(|e| map_service_error(ServiceError::Upstream(e.to_string())))?)
+            }
+        }
+    }
+}
+
 #[utoipa::path(
     get,
     path = "/api/v1/repos/{forge}",
@@ -1305,22 +1365,42 @@ pub async fn list_repositories(
     let agent = resolve_authenticated_agent(&headers, &state.agent_registry)?;
 
     // Check listing authorization (supports owner-scoped wildcards).
-    if !agent
-        .policy_config
-        .can_list_repositories(&path.forge, query.owner.as_deref())
-    {
+    if !agent.policy_config.can_list_repositories(&path.forge) {
         return Err((
             StatusCode::FORBIDDEN,
             Json(ErrorBody {
                 error: format!(
-                    "agent '{}' is not authorized to list repositories on forge '{}'{}",
-                    agent.identity.agent_id,
-                    path.forge,
-                    query
-                        .owner
-                        .as_deref()
-                        .map(|o| format!(" with owner filter '{o}'"))
-                        .unwrap_or_default(),
+                    "agent '{}' is not authorized to list repositories on forge '{}'",
+                    agent.identity.agent_id, path.forge,
+                ),
+            }),
+        ));
+    }
+
+    // Validate owner filter against agent's allowed owners.
+    if let Some(owner) = query.owner.as_deref()
+        && !agent.policy_config.is_owner_accessible(&path.forge, owner)
+    {
+        let scope_hint = match agent.policy_config.listable_owners(&path.forge) {
+            Some(ref owners) if owners.is_empty() => String::new(),
+            Some(ref owners) => format!(
+                " Your access is scoped to {} owner(s): {}",
+                owners.len(),
+                owners
+                    .iter()
+                    .take(5)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            None => String::new(),
+        };
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorBody {
+                error: format!(
+                    "agent '{}' is not authorized to list repositories for owner '{}'{}",
+                    agent.identity.agent_id, owner, scope_hint,
                 ),
             }),
         ));
@@ -1346,11 +1426,16 @@ pub async fn list_repositories(
         .await
         .map_err(|e| map_service_error(ServiceError::Audit(e.to_string())))?;
 
-    let result = forge
-        .adapter
-        .list_repositories(query.owner.as_deref(), query.q.as_deref(), &credential)
-        .await
-        .map_err(|e| map_service_error(ServiceError::Upstream(e.to_string())))?;
+    // When no owner filter is provided and the agent has scoped access,
+    // collect results from all accessible owners.
+    let result = fetch_repos(
+        forge,
+        agent,
+        &credential,
+        query.q.as_deref(),
+        query.owner.as_deref(),
+    )
+    .await?;
 
     Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(to_json_value(&result)?))
 }

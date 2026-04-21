@@ -141,16 +141,71 @@ impl AgentPolicyConfig {
         AllowedForges::Specific(aliases)
     }
 
-    /// Returns whether the agent can list repositories on the given forge,
-    /// optionally restricted to an owner filter.
+    /// Returns the owner namespaces the agent can access on the given forge,
+    /// derived from `allowed_repos` patterns.
+    ///
+    /// Returns:
+    /// - `None` — no matching patterns for this forge (no access)
+    /// - `Some(empty)` — unscoped access (`"*"` or `"alias/*"`)
+    /// - `Some(non-empty)` — scoped to these specific owners
+    #[must_use]
+    pub fn listable_owners(&self, forge_alias: &str) -> Option<std::collections::BTreeSet<String>> {
+        let mut owners = std::collections::BTreeSet::new();
+        let mut has_unscoped = false;
+
+        for pattern in &self.allowed_repos {
+            if pattern == "*" {
+                has_unscoped = true;
+                continue;
+            }
+            let Some((alias, rest)) = pattern.split_once('/') else {
+                continue;
+            };
+            if alias != forge_alias {
+                continue;
+            }
+            if rest == "*" {
+                has_unscoped = true;
+                continue;
+            }
+            let Some((namespace, _repo_pattern)) = rest.rsplit_once('/') else {
+                continue;
+            };
+            // Both wildcard and exact repo patterns contribute the namespace.
+            owners.insert(namespace.to_string());
+        }
+
+        if has_unscoped {
+            Some(owners)
+        } else if owners.is_empty() {
+            None
+        } else {
+            Some(owners)
+        }
+    }
+
+    /// Returns whether the given owner is accessible by this agent on the
+    /// given forge.
+    ///
+    /// Returns `true` if the agent has unscoped access (`"*"` or
+    /// `"alias/*"`) or if the owner is in the set of listable owners.
+    #[must_use]
+    pub fn is_owner_accessible(&self, forge_alias: &str, owner: &str) -> bool {
+        match self.listable_owners(forge_alias) {
+            None => false,
+            Some(ref owners) if owners.is_empty() => true,
+            Some(ref owners) => owners.contains(owner),
+        }
+    }
+
+    /// Returns whether the agent can list repositories on the given forge.
     ///
     /// Authorization rules:
-    /// - `"*"` or `"alias/*"` — allowed with any (or no) owner filter
-    /// - `"alias/owner/*"` — allowed only when `owner_filter` matches the
-    ///   pattern's namespace
-    /// - Exact repo patterns — never sufficient for listing
+    /// - `"*"` or `"alias/*"` — allowed
+    /// - `"alias/owner/*"` — allowed (owners are resolved via `listable_owners`)
+    /// - Exact repo patterns — allowed (handler will fetch specific repos)
     #[must_use]
-    pub fn can_list_repositories(&self, forge_alias: &str, owner_filter: Option<&str>) -> bool {
+    pub fn can_list_repositories(&self, forge_alias: &str) -> bool {
         self.allowed_repos.iter().any(|pattern| {
             if pattern == "*" {
                 return true;
@@ -164,18 +219,15 @@ impl AgentPolicyConfig {
             if rest == "*" {
                 return true;
             }
-            let Some((namespace, repo_pattern)) = rest.rsplit_once('/') else {
+            let Some((_namespace, repo_pattern)) = rest.rsplit_once('/') else {
                 return false;
             };
-            // Only wildcard repo patterns grant listing rights.
-            if repo_pattern != "*" {
-                return false;
+            if repo_pattern == "*" {
+                // Owner wildcard: allowed regardless of owner filter.
+                return true;
             }
-            // Namespace wildcard: owner filter must match the namespace.
-            match owner_filter {
-                Some(owner) => namespace == owner,
-                None => false,
-            }
+            // Exact repo pattern: allowed (handler will fetch specific repos).
+            true
         })
     }
 
@@ -864,8 +916,7 @@ allowed_repos = ["gl/group/subgroup/repo", "gl/group/subgroup/*"]
             branch_prefix: None,
             protected_paths: vec![],
         };
-        assert!(policy.can_list_repositories("any-forge", None));
-        assert!(policy.can_list_repositories("any-forge", Some("any-owner")));
+        assert!(policy.can_list_repositories("any-forge"));
     }
 
     #[test]
@@ -875,37 +926,31 @@ allowed_repos = ["gl/group/subgroup/repo", "gl/group/subgroup/*"]
             branch_prefix: None,
             protected_paths: vec![],
         };
-        assert!(policy.can_list_repositories("internal", None));
-        assert!(policy.can_list_repositories("internal", Some("any-owner")));
-        assert!(!policy.can_list_repositories("other", None));
+        assert!(policy.can_list_repositories("internal"));
+        assert!(!policy.can_list_repositories("other"));
     }
 
     #[test]
-    fn can_list_repos_owner_wildcard_requires_owner_filter() {
+    fn can_list_repos_owner_wildcard_allows_without_filter() {
         let policy = AgentPolicyConfig {
             allowed_repos: vec!["internal/org/*".to_string()],
             branch_prefix: None,
             protected_paths: vec![],
         };
-        // Must provide matching owner filter.
-        assert!(policy.can_list_repositories("internal", Some("org")));
-        // Without owner filter, denied.
-        assert!(!policy.can_list_repositories("internal", None));
-        // Wrong owner, denied.
-        assert!(!policy.can_list_repositories("internal", Some("other-org")));
+        assert!(policy.can_list_repositories("internal"));
         // Wrong forge, denied.
-        assert!(!policy.can_list_repositories("other", Some("org")));
+        assert!(!policy.can_list_repositories("other"));
     }
 
     #[test]
-    fn can_list_repos_exact_match_denied() {
+    fn can_list_repos_exact_match_allows_without_filter() {
         let policy = AgentPolicyConfig {
             allowed_repos: vec!["internal/org/repo".to_string()],
             branch_prefix: None,
             protected_paths: vec![],
         };
-        assert!(!policy.can_list_repositories("internal", None));
-        assert!(!policy.can_list_repositories("internal", Some("org")));
+        // Exact match is allowed (handler fetches specific repos).
+        assert!(policy.can_list_repositories("internal"));
     }
 
     #[test]
@@ -915,7 +960,7 @@ allowed_repos = ["gl/group/subgroup/repo", "gl/group/subgroup/*"]
             branch_prefix: None,
             protected_paths: vec![],
         };
-        assert!(!policy.can_list_repositories("any", None));
+        assert!(!policy.can_list_repositories("any"));
     }
 
     #[test]
@@ -925,11 +970,168 @@ allowed_repos = ["gl/group/subgroup/repo", "gl/group/subgroup/*"]
             branch_prefix: None,
             protected_paths: vec![],
         };
-        assert!(policy.can_list_repositories("gl", Some("group/subgroup")));
-        assert!(!policy.can_list_repositories("gl", Some("group")));
-        assert!(!policy.can_list_repositories("gl", None));
+        assert!(policy.can_list_repositories("gl"));
+        assert!(policy.can_list_repositories("gl"));
     }
 
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn listable_owners_global_wildcard_returns_empty() {
+        let policy = AgentPolicyConfig {
+            allowed_repos: vec!["*".to_string()],
+            branch_prefix: None,
+            protected_paths: vec![],
+        };
+        let owners = policy.listable_owners("any-forge");
+        assert!(owners.is_some());
+        assert!(owners.expect("should be Some").is_empty());
+    }
+
+    #[test]
+    fn listable_owners_forge_wildcard_returns_empty() {
+        let policy = AgentPolicyConfig {
+            allowed_repos: vec!["internal/*".to_string()],
+            branch_prefix: None,
+            protected_paths: vec![],
+        };
+        // For matching forge, unscoped access (empty set).
+        let owners = policy.listable_owners("internal");
+        assert!(owners.is_some());
+        assert!(owners.expect("should be Some").is_empty());
+        // For non-matching forge, no access (None).
+        assert!(policy.listable_owners("other").is_none());
+    }
+
+    #[test]
+    fn listable_owners_owner_wildcard_returns_owners() {
+        let policy = AgentPolicyConfig {
+            allowed_repos: vec!["internal/org/*".to_string()],
+            branch_prefix: None,
+            protected_paths: vec![],
+        };
+        let owners = policy
+            .listable_owners("internal")
+            .expect("should have owners");
+        assert_eq!(owners.len(), 1);
+        assert!(owners.contains("org"));
+    }
+
+    #[test]
+    fn listable_owners_exact_match_returns_owner() {
+        let policy = AgentPolicyConfig {
+            allowed_repos: vec!["internal/org/repo".to_string()],
+            branch_prefix: None,
+            protected_paths: vec![],
+        };
+        let owners = policy
+            .listable_owners("internal")
+            .expect("should have owners");
+        assert_eq!(owners.len(), 1);
+        assert!(owners.contains("org"));
+    }
+
+    #[test]
+    fn listable_owners_multiple_patterns_returns_all_owners() {
+        let policy = AgentPolicyConfig {
+            allowed_repos: vec![
+                "internal/org1/*".to_string(),
+                "internal/org2/*".to_string(),
+                "internal/org3/repo".to_string(),
+            ],
+            branch_prefix: None,
+            protected_paths: vec![],
+        };
+        let owners = policy
+            .listable_owners("internal")
+            .expect("should have owners");
+        assert_eq!(owners.len(), 3);
+        assert!(owners.contains("org1"));
+        assert!(owners.contains("org2"));
+        assert!(owners.contains("org3"));
+    }
+
+    #[test]
+    fn listable_owners_nested_namespace_returns_full_path() {
+        let policy = AgentPolicyConfig {
+            allowed_repos: vec!["gl/group/subgroup/*".to_string()],
+            branch_prefix: None,
+            protected_paths: vec![],
+        };
+        let owners = policy.listable_owners("gl").expect("should have owners");
+        assert_eq!(owners.len(), 1);
+        assert!(owners.contains("group/subgroup"));
+    }
+
+    #[test]
+    fn listable_owners_mixed_unscoped_for_other_forge() {
+        let policy = AgentPolicyConfig {
+            allowed_repos: vec!["internal/org/*".to_string(), "other/*".to_string()],
+            branch_prefix: None,
+            protected_paths: vec![],
+        };
+        // Has scoped access for "internal".
+        let owners = policy
+            .listable_owners("internal")
+            .expect("should have owners");
+        assert_eq!(owners.len(), 1);
+        assert!(owners.contains("org"));
+        // For "other" forge, has unscoped access (empty set).
+        let owners = policy.listable_owners("other");
+        assert!(owners.is_some());
+        assert!(owners.expect("should be Some").is_empty());
+    }
+
+    #[test]
+    fn listable_owners_wrong_forge_returns_none() {
+        let policy = AgentPolicyConfig {
+            allowed_repos: vec!["internal/org/*".to_string()],
+            branch_prefix: None,
+            protected_paths: vec![],
+        };
+        assert!(policy.listable_owners("other").is_none());
+    }
+
+    #[test]
+    fn is_owner_accessible_global_wildcard() {
+        let policy = AgentPolicyConfig {
+            allowed_repos: vec!["*".to_string()],
+            branch_prefix: None,
+            protected_paths: vec![],
+        };
+        assert!(policy.is_owner_accessible("any-forge", "any-owner"));
+    }
+
+    #[test]
+    fn is_owner_accessible_forge_wildcard() {
+        let policy = AgentPolicyConfig {
+            allowed_repos: vec!["internal/*".to_string()],
+            branch_prefix: None,
+            protected_paths: vec![],
+        };
+        assert!(policy.is_owner_accessible("internal", "any-owner"));
+        assert!(!policy.is_owner_accessible("other", "any-owner"));
+    }
+
+    #[test]
+    fn is_owner_accessible_scoped_owner() {
+        let policy = AgentPolicyConfig {
+            allowed_repos: vec!["internal/org/*".to_string()],
+            branch_prefix: None,
+            protected_paths: vec![],
+        };
+        assert!(policy.is_owner_accessible("internal", "org"));
+        assert!(!policy.is_owner_accessible("internal", "other-org"));
+    }
+
+    #[test]
+    fn is_owner_accessible_no_matching_patterns() {
+        let policy = AgentPolicyConfig {
+            allowed_repos: vec!["internal/org/*".to_string()],
+            branch_prefix: None,
+            protected_paths: vec![],
+        };
+        assert!(!policy.is_owner_accessible("other", "any-owner"));
+    }
     #[test]
     fn debug_redacts_tokens() {
         let config = parse_config(VALID_CONFIG).expect("should parse");
