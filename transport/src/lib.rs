@@ -221,6 +221,9 @@ pub struct CommitPatchTool {
     pub owner: String,
     /// Git-format patch to apply. Must be produced by `git diff` or `git show`
     /// and begin with `diff --git`; traditional unified diffs are rejected.
+    /// The patch must be generated from a repository with the correct history
+    /// (e.g., your workspace clone or worktree). DO NOT generate patches from a newly
+    /// `git init`ed directory or a fake repository, as they will be rejected.
     /// Provide either this or `patch_file`.
     pub patch: Option<String>,
     /// Path to a file containing a git-format patch. Use this instead of
@@ -1065,11 +1068,11 @@ impl McpShim {
                 This keeps the main working tree clean and prevents unrelated changes from being included in patches.\n\
              2. **Generate Patch**: Use git itself (`git diff --no-ext-diff --binary` or `git show`) to produce a `diff --git` format patch. \
                 Never hand-write traditional unified diffs.\n\
-             3. **Verify locally**: Always run `git apply --check` locally before `commit_patch` to ensure it is valid.\n\
-             4. **Submit**: Use `commit_patch` to apply and push the patch to a branch matching your configured `branch_prefix` (never commit to the default branch directly).\n\
-             5. **Open PR**: Use `open_change_request` for the initial PR.\n\
-             6. **Update PR**: Push follow-up fixes to the existing branch using `commit_patch(existing_branch=true)`. Do NOT open duplicate PRs.\n\
-             7. **Refine**: Use `rebase_branch` for squash/fixup operations on your branch after review feedback.\n",
+             3. **Submit**: Use `commit_patch` to apply and push the patch to a branch matching your configured `branch_prefix` (never commit to the default branch directly). \
+                The server validates the patch and applies it in a clean clone of the base branch — do NOT run `git apply --check` locally (it will fail because your worktree already contains the changes).\n\
+             4. **Open PR**: Use `open_change_request` for the initial PR.\n\
+             5. **Update PR**: Push follow-up fixes to the existing branch using `commit_patch(existing_branch=true)`. Do NOT open duplicate PRs.\n\
+             6. **Refine**: Use `rebase_branch` for squash/fixup operations on your branch after review feedback.\n",
         );
 
         if self.config.enable_channels {
@@ -1526,7 +1529,7 @@ impl McpShim {
     /// Apply a git-format patch to a new branch and push it.
     #[tool(
         name = "commit_patch",
-        description = "Apply a git-format patch to a new branch and push it. This is the REQUIRED way to push code (raw `git push` is strictly blocked). Patch must come from git itself (for example `git diff --no-ext-diff --binary` or `git show`) and start with `diff --git`; traditional unified diffs are rejected. New files must use git headers like `new file mode`, `--- /dev/null`, and `+++ b/<path>`. Verify locally with `git apply --check` before submitting."
+        description = "Apply a git-format patch to a new branch and push it. This is the REQUIRED way to push code (raw `git push` is strictly blocked). Patch must come from git itself (for example `git diff --no-ext-diff --binary` or `git show`) and start with `diff --git`; traditional unified diffs are rejected. New files must use git headers like `new file mode`, `--- /dev/null`, and `+++ b/<path>`. The server validates the patch and applies it in a clean clone of the base branch — do NOT run `git apply --check` locally (it will fail because your worktree already contains the changes)."
     )]
     async fn commit_patch(
         &self,

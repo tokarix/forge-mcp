@@ -12,7 +12,7 @@ MCP tools:
 Write safety:
 - Diff validation rejects binary files, symlinks, submodules, path traversal, oversized patches
 - `commit_patch` only accepts git diff format; generate patches with `git diff --no-ext-diff --binary` or `git show`, not hand-written traditional unified diffs
-- Validate patches locally with `git apply --check` before calling `commit_patch`
+- The server validates and applies patches in a clean clone of the base branch
 - Policy engine enforces branch prefix (`agent/`) and protected path rejection
 - Audit-before-action on all write operations
 - Git auth via `http.extraHeader` — token never in argv or URLs

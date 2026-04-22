@@ -87,6 +87,8 @@ do not file a duplicate.
 
 Always work in a **detached git worktree** — never edit files in the main checkout. This keeps the main working tree clean and prevents patches from picking up unrelated changes, especially when multiple agents share the same repository.
 
+**CRITICAL WARNING:** You MUST generate patches from a proper git clone or worktree that shares the target repository's history. DO NOT run `git init` in a temporary directory to create a fake repository for patch generation — patches generated against an empty history will be rejected by the server because they will not apply cleanly. If you do not have a clone of the repository, you MUST run `git clone` using the git proxy URL first.
+
 1. Clone the repo via git proxy (skip if already cloned)
 2. Fetch the latest base branch: `git fetch origin master`
 3. Create a worktree for the feature branch:
@@ -95,7 +97,7 @@ Always work in a **detached git worktree** — never edit files in the main chec
    ```
 4. Make changes in the worktree
 5. Generate a git-format patch from the worktree with git itself, for example `git diff --no-ext-diff --binary`, `git diff --cached --no-ext-diff --binary`, or `git show`
-6. Validate the patch locally with `git apply --check` (or `git apply --check --index`) and then submit via `commit_patch` with the diff, target branch name, and commit message
+6. Submit via `commit_patch` with the diff, target branch name, and commit message — the server validates the patch and applies it in a clean clone of the base branch. Do NOT run `git apply --check` locally; your worktree already contains the changes so it will always fail there.
 7. Open a pull request via `open_change_request`
 8. Remove the worktree when done (it will have dirty files after patch generation):
    ```bash
@@ -106,7 +108,7 @@ Always work in a **detached git worktree** — never edit files in the main chec
 - `commit_patch` only accepts git diff format starting with `diff --git`
 - Do not hand-write traditional unified diffs; use git to generate the patch
 - New files must use git headers such as `new file mode`, `--- /dev/null`, and `+++ b/<path>`
-- If `git apply --check` fails locally, `commit_patch` will fail too
+- The server validates the patch in a clean clone — if it rejects the patch, check your diff against the base branch
 
 **Branch naming:** Your branch must start with the configured prefix (e.g. `agent/claude/`). The gateway enforces this.
 
@@ -139,5 +141,5 @@ When a reviewer requests changes on a PR:
 | Wrong branch prefix | Check your agent's configured `branch_prefix` |
 | Touching CI/workflow files | These are protected paths -- the gateway will reject |
 | Using Bearer auth with git | Git sends Basic auth -- use password field for token |
-| Hand-written or traditional unified diff patch | Generate the patch with `git diff --no-ext-diff --binary` or `git show`, then verify with `git apply --check` |
+| Hand-written or traditional unified diff patch | Generate the patch with `git diff --no-ext-diff --binary` or `git show` |
 | Editing files in the main checkout | Always use a detached `git worktree` — the main checkout accumulates drift and picks up unrelated changes |
