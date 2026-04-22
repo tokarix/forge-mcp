@@ -31,8 +31,8 @@ fn install_ring_provider() {
 pub enum ForgeError {
     #[error("upstream request failed: {0}")]
     Http(#[from] reqwest::Error),
-    #[error("repository not found (upstream returned {status})")]
-    NotFound { status: StatusCode },
+    #[error("{message} (upstream returned {status})")]
+    NotFound { status: StatusCode, message: String },
     #[error(
         "repository may have moved or been renamed (upstream returned {status} redirect to {location})"
     )]
@@ -56,6 +56,56 @@ pub enum ForgeWebhookError {
     InvalidSignature,
     #[error("missing webhook header '{0}'")]
     MissingHeader(String),
+}
+
+/// Recursively extracts a human-readable error string from a JSON value
+/// by walking the AST directly without serialization round-trips.
+fn extract_error_recursive(value: &serde_json::Value) -> Option<String> {
+    if let Some(msg) = value.get("message").and_then(|v| v.as_str()) {
+        return Some(msg.to_string());
+    }
+    for key in &["message", "error"] {
+        if let Some(inner) = value.get(key)
+            && (inner.is_object() || inner.is_array())
+            && let Some(found) = extract_error_recursive(inner)
+        {
+            return Some(found);
+        }
+    }
+    if let Some(err) = value.get("error").and_then(|v| v.as_str()) {
+        return Some(err.to_string());
+    }
+    if let Some(first_obj) = value.get(0).and_then(|v| v.as_object())
+        && let Some(msg) = first_obj.get("message").and_then(|v| v.as_str())
+    {
+        return Some(msg.to_string());
+    }
+    if let Some(arr) = value.as_array()
+        && let Some(first) = arr.first().and_then(|v| v.as_str())
+    {
+        return Some(first.to_string());
+    }
+    None
+}
+
+/// Extracts a descriptive error message from a JSON response body.
+///
+/// Handles common formats used by Forgejo and GitLab, checking the `message`
+/// and `error` keys.  For GitLab's structured error format (a JSON array of
+/// `{message: "..."}` objects or nested `message`/`error` objects) it unwraps
+/// to find the first human-readable message string.
+///
+/// Returns `None` when the body is empty or not valid JSON.
+pub(crate) fn parse_forge_error_message(body: &str) -> Option<String> {
+    let body = body.trim();
+    if body.is_empty() {
+        return None;
+    }
+
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(body) {
+        return extract_error_recursive(&value);
+    }
+    None
 }
 
 #[async_trait]
@@ -674,17 +724,20 @@ impl ForgejoAdapter {
             return Err(ForgeError::Redirect { status, location });
         }
 
-        if status == StatusCode::NOT_FOUND {
-            tracing::warn!(
-                %status,
-                url = %response.url(),
-                "upstream returned 404 — repository or resource not found",
-            );
-            return Err(ForgeError::NotFound { status });
-        }
-
         let url = response.url().clone();
         let body = response.text().await.unwrap_or_default();
+
+        if status == StatusCode::NOT_FOUND {
+            let message = parse_forge_error_message(&body)
+                .unwrap_or_else(|| "repository or resource not found".to_string());
+            tracing::warn!(
+                %status,
+                %message,
+                %url,
+                "upstream returned 404",
+            );
+            return Err(ForgeError::NotFound { status, message });
+        }
         tracing::warn!(
             %status,
             %url,
@@ -2168,11 +2221,14 @@ impl ForgeAdapter for ForgejoAdapter {
                 return Err(ForgeError::Redirect { status, location });
             }
             if status == StatusCode::NOT_FOUND {
+                let message = parse_forge_error_message(&body)
+                    .unwrap_or_else(|| "repository or resource not found".to_string());
                 tracing::warn!(
                     %status,
-                    "upstream returned 404 — repository or resource not found",
+                    %message,
+                    "upstream returned 404",
                 );
-                return Err(ForgeError::NotFound { status });
+                return Err(ForgeError::NotFound { status, message });
             }
             tracing::warn!(
                 %status,
@@ -4129,8 +4185,37 @@ mod tests {
 
         let err = result.expect_err("should fail with not found");
         match err {
-            ForgeError::NotFound { status } => {
+            ForgeError::NotFound { status, message } => {
                 assert_eq!(status, StatusCode::NOT_FOUND);
+                assert_eq!(message, "The target couldn't be found.");
+            }
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn check_response_returns_descriptive_message_on_404() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path_regex(r"/api/v1/repos/.+/.+/pulls$"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "message": "head branch does not exist"
+            })))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let result = adapter
+            .create_change_request(&test_repo(), "test", "test", "feature", "main", &cred)
+            .await;
+
+        let err = result.expect_err("should fail with not found");
+        match err {
+            ForgeError::NotFound { status, message } => {
+                assert_eq!(status, StatusCode::NOT_FOUND);
+                assert_eq!(message, "head branch does not exist");
             }
             other => panic!("expected NotFound, got {other:?}"),
         }
@@ -4525,6 +4610,131 @@ mod tests {
         }
     }
 
+    #[test]
+    fn parse_forge_error_message_extracts_message_key() {
+        let body = r#"{"message": "branch not found"}"#;
+        assert_eq!(
+            parse_forge_error_message(body),
+            Some("branch not found".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_forge_error_message_extracts_error_key() {
+        let body = r#"{"error": "not found"}"#;
+        assert_eq!(
+            parse_forge_error_message(body),
+            Some("not found".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_forge_error_message_prefers_message_over_error() {
+        let body = r#"{"message": "repo not found", "error": "fallback"}"#;
+        assert_eq!(
+            parse_forge_error_message(body),
+            Some("repo not found".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_forge_error_message_returns_none_for_empty_body() {
+        assert!(parse_forge_error_message("").is_none());
+        assert!(parse_forge_error_message("   ").is_none());
+    }
+
+    #[test]
+    fn parse_forge_error_message_returns_none_for_plain_text() {
+        assert!(parse_forge_error_message("plain text response").is_none());
+    }
+
+    #[test]
+    fn parse_forge_error_message_handles_empty_json_object() {
+        assert!(parse_forge_error_message("{}").is_none());
+    }
+
+    #[test]
+    fn parse_forge_error_message_handles_gitlab_structured_errors() {
+        let body = r#"[{"message": "404 Not Found"}, {"message": "details"}]"#;
+        assert_eq!(
+            parse_forge_error_message(body),
+            Some("404 Not Found".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_forge_error_message_unwraps_nested_message_object() {
+        let body =
+            r#"{"message": {"message": "Branch not found", "id": "not_found", "attributes": {}}}"#;
+        assert_eq!(
+            parse_forge_error_message(body),
+            Some("Branch not found".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_forge_error_message_unwraps_nested_error_in_message_object() {
+        let body = r#"{"message": {"error": "something went wrong"}}"#;
+        assert_eq!(
+            parse_forge_error_message(body),
+            Some("something went wrong".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_forge_error_message_falls_back_to_top_level_error_when_message_nested() {
+        let body = r#"{"message": {"id": "not_found"}, "error": "project not found"}"#;
+        assert_eq!(
+            parse_forge_error_message(body),
+            Some("project not found".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_forge_error_message_handles_top_level_array_of_strings() {
+        let body = r#"["error: not found", "more info"]"#;
+        assert_eq!(
+            parse_forge_error_message(body),
+            Some("error: not found".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_forge_error_message_unwraps_nested_error_object() {
+        let body = r#"{"error":{"message":"branch not found","id":"not_found"}}"#;
+        assert_eq!(
+            parse_forge_error_message(body),
+            Some("branch not found".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_forge_error_message_unwraps_structured_error_array() {
+        let body = r#"{"error":["branch not found","details"]}"#;
+        assert_eq!(
+            parse_forge_error_message(body),
+            Some("branch not found".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_forge_error_message_prefers_message_over_nested_error() {
+        let body = r#"{"message":"msg found","error":{"message":"error found"}}"#;
+        assert_eq!(
+            parse_forge_error_message(body),
+            Some("msg found".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_forge_error_message_prefers_nested_message_over_flat_error() {
+        let body = r#"{"message":{"message":"Branch not found"},"error":"not found"}"#;
+        assert_eq!(
+            parse_forge_error_message(body),
+            Some("Branch not found".to_string())
+        );
+    }
+
     #[tokio::test]
     async fn resolve_ci_failure_returns_error_on_empty_log_excerpt() {
         let mock = MockServer::start().await;
@@ -4563,6 +4773,82 @@ mod tests {
                 assert!(message.contains("found no usable log excerpts"));
             }
             other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn schedule_auto_merge_404_returns_descriptive_message() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path_regex(r"/api/v1/repos/.+/pulls/\d+/merge"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "message": "branch 'feature' not found"
+            })))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let result = adapter
+            .schedule_auto_merge(&test_repo(), 42, "rebase", "abc123sha", None, &cred)
+            .await;
+
+        let err = result.expect_err("should fail with not found");
+        match err {
+            ForgeError::NotFound { status, message } => {
+                assert_eq!(status, StatusCode::NOT_FOUND);
+                assert_eq!(message, "branch 'feature' not found");
+            }
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn check_response_returns_generic_message_on_404_with_empty_body() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/.+/.+/issues/1$"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let result = adapter.get_issue(&test_repo(), 1, &cred).await;
+
+        let err = result.expect_err("should fail with not found");
+        match err {
+            ForgeError::NotFound { status, message } => {
+                assert_eq!(status, StatusCode::NOT_FOUND);
+                assert_eq!(message, "repository or resource not found");
+            }
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn check_response_returns_generic_message_on_404_with_non_json_body() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/.+/.+/issues/1$"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("some opaque HTML error page"))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let result = adapter.get_issue(&test_repo(), 1, &cred).await;
+
+        let err = result.expect_err("should fail with not found");
+        match err {
+            ForgeError::NotFound { status, message } => {
+                assert_eq!(status, StatusCode::NOT_FOUND);
+                assert_eq!(message, "repository or resource not found");
+            }
+            other => panic!("expected NotFound, got {other:?}"),
         }
     }
 

@@ -103,17 +103,20 @@ impl GitLabAdapter {
             return Err(ForgeError::Redirect { status, location });
         }
 
-        if status == StatusCode::NOT_FOUND {
-            tracing::warn!(
-                %status,
-                url = %response.url(),
-                "upstream returned 404",
-            );
-            return Err(ForgeError::NotFound { status });
-        }
-
         let url = response.url().clone();
         let body = response.text().await.unwrap_or_default();
+
+        if status == StatusCode::NOT_FOUND {
+            let message = crate::parse_forge_error_message(&body)
+                .unwrap_or_else(|| "repository or resource not found".to_string());
+            tracing::warn!(
+                %status,
+                %message,
+                %url,
+                "upstream returned 404",
+            );
+            return Err(ForgeError::NotFound { status, message });
+        }
         tracing::warn!(
             %status,
             %url,
@@ -1231,7 +1234,9 @@ impl crate::ForgeAdapter for GitLabAdapter {
                 return Ok(());
             }
             if status == StatusCode::NOT_FOUND {
-                return Err(ForgeError::NotFound { status });
+                let message = crate::parse_forge_error_message(&body)
+                    .unwrap_or_else(|| "repository or resource not found".to_string());
+                return Err(ForgeError::NotFound { status, message });
             }
             return Err(ForgeError::UnexpectedStatus { status, body });
         }
@@ -2317,6 +2322,151 @@ mod tests {
                 assert_eq!(cr.delivery_id, "uuid-123");
             }
             _ => panic!("expected ChangeRequest event"),
+        }
+    }
+
+    #[tokio::test]
+    async fn schedule_auto_merge_404_returns_descriptive_message() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("PUT"))
+            .and(path_regex(r"/projects/.+/merge_requests/\d+/merge"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "message": "404 Branch Does Not Exist"
+            })))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let result = adapter
+            .schedule_auto_merge(&test_repo(), 1, "merge", "abc", None, &cred)
+            .await;
+
+        let err = result.expect_err("should fail with not found");
+        match err {
+            ForgeError::NotFound { status, message } => {
+                assert_eq!(status, StatusCode::NOT_FOUND);
+                assert_eq!(message, "404 Branch Does Not Exist");
+            }
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn check_response_returns_descriptive_message_on_404() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path_regex(r"/projects/.+/merge_requests$"))
+            .respond_with(
+                ResponseTemplate::new(404)
+                    .set_body_string("{\"message\":\"404 Project Not Found\"}"),
+            )
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let result = adapter
+            .create_change_request(&test_repo(), "test", "body", "feature", "main", &cred)
+            .await;
+
+        let err = result.expect_err("should fail with not found");
+        match err {
+            ForgeError::NotFound { status, message } => {
+                assert_eq!(status, StatusCode::NOT_FOUND);
+                assert_eq!(message, "404 Project Not Found");
+            }
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn check_response_unwraps_nested_gitlab_message_object_on_404() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path_regex(r"/projects/.+/merge_requests$"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "message": {
+                    "message": "Branch not found",
+                    "id": "not_found"
+                }
+            })))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let result = adapter
+            .create_change_request(&test_repo(), "test", "body", "feature", "main", &cred)
+            .await;
+
+        let err = result.expect_err("should fail with not found");
+        match err {
+            ForgeError::NotFound { status, message } => {
+                assert_eq!(status, StatusCode::NOT_FOUND);
+                assert_eq!(message, "Branch not found");
+            }
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn check_response_unwraps_nested_gitlab_error_object_on_404() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path_regex(r"/projects/.+/merge_requests$"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "error": {
+                    "message": "branch not found",
+                    "id": "not_found"
+                }
+            })))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let result = adapter
+            .create_change_request(&test_repo(), "test", "body", "feature", "main", &cred)
+            .await;
+
+        let err = result.expect_err("should fail with not found");
+        match err {
+            ForgeError::NotFound { status, message } => {
+                assert_eq!(status, StatusCode::NOT_FOUND);
+                assert_eq!(message, "branch not found");
+            }
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn check_response_returns_generic_message_on_404_with_empty_body() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path_regex(r"/projects/.+/merge_requests$"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let result = adapter
+            .create_change_request(&test_repo(), "test", "body", "feature", "main", &cred)
+            .await;
+
+        let err = result.expect_err("should fail with not found");
+        match err {
+            ForgeError::NotFound { status, message } => {
+                assert_eq!(status, StatusCode::NOT_FOUND);
+                assert_eq!(message, "repository or resource not found");
+            }
+            other => panic!("expected NotFound, got {other:?}"),
         }
     }
 }
