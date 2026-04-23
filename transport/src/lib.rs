@@ -161,6 +161,8 @@ pub struct CloseIssueTool {
     /// Issue index number.
     #[serde(deserialize_with = "deserialize_u64_lenient")]
     pub index: u64,
+    /// Closing comment message.
+    pub message: String,
     /// Repository owner or organization.
     pub owner: String,
     /// Repository name.
@@ -1436,7 +1438,7 @@ impl McpShim {
                 &request.index.to_string(),
             ],
         )?;
-        let body = serde_json::json!({"state": "closed"});
+        let body = serde_json::json!({"state": "closed", "message": request.message});
         self.gateway_patch(url, &gw.token, &body).await
     }
 
@@ -2956,6 +2958,7 @@ mod tests {
         let request = CloseIssueTool {
             forge: "test".to_string(),
             index: 1,
+            message: "fixes done".to_string(),
             owner: "owner".to_string(),
             repo: "repo".to_string(),
         };
@@ -2974,6 +2977,41 @@ mod tests {
             requests.is_empty(),
             "no requests should reach the gateway in read-only mode"
         );
+    }
+
+    #[tokio::test]
+    async fn close_issue_sends_correct_payload() {
+        let mock_server = wiremock::MockServer::start().await;
+
+        wiremock::Mock::given(wiremock::matchers::method("PATCH"))
+            .and(wiremock::matchers::path(
+                "/api/v1/repos/test/owner/repo/issues/1",
+            ))
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "state": "closed",
+                "message": "fixes done"
+            })))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_string("{}"))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let config = test_config(&mock_server.uri());
+        let shim = McpShim::new(config);
+
+        let request = CloseIssueTool {
+            forge: "test".to_string(),
+            index: 1,
+            message: "fixes done".to_string(),
+            owner: "owner".to_string(),
+            repo: "repo".to_string(),
+        };
+
+        let result = shim
+            .close_issue(Parameters(request))
+            .await
+            .expect("should succeed");
+        assert_eq!(result, "{}");
     }
 
     #[tokio::test]

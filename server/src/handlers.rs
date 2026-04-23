@@ -1780,12 +1780,24 @@ pub async fn update_issue(
 
     // Handle close
     if body.state.as_deref() == Some("closed") {
+        let message = match &body.message {
+            Some(m) if !m.trim().is_empty() => m.clone(),
+            _ => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorBody {
+                        error: "message is required when closing an issue".to_string(),
+                    }),
+                ));
+            }
+        };
         let result = forge
             .write_service
             .close_issue(
                 domain::CloseIssueRequest {
                     agent: agent.identity.clone(),
                     index: path.index,
+                    message,
                     repository: repo,
                 },
                 authorized,
@@ -2132,7 +2144,10 @@ pub async fn agent_info(State(state): State<AppState>, headers: HeaderMap) -> im
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::todo, clippy::unimplemented)]
 mod tests {
-    use std::{collections::HashMap, sync::Arc};
+    use std::{
+        collections::HashMap,
+        sync::{Arc, Mutex},
+    };
 
     use axum::{
         body::Body,
@@ -2677,7 +2692,17 @@ mod tests {
         }
     }
 
-    struct FakeWriteService;
+    struct FakeWriteService {
+        captured_close_msg: Arc<Mutex<Option<String>>>,
+    }
+
+    impl FakeWriteService {
+        fn new() -> Self {
+            Self {
+                captured_close_msg: Arc::new(Mutex::new(None)),
+            }
+        }
+    }
 
     #[async_trait::async_trait]
     impl domain::RepositoryWriteService for FakeWriteService {
@@ -2715,11 +2740,20 @@ mod tests {
         }
         async fn close_issue(
             &self,
-            _: domain::CloseIssueRequest,
+            request: domain::CloseIssueRequest,
             _: domain::policy::AuthorizedWrite,
             _: &domain::ForgeCredential,
         ) -> Result<domain::Issue, ServiceError> {
-            todo!()
+            *self.captured_close_msg.lock().expect("poisoned lock") = Some(request.message.clone());
+            Ok(domain::Issue {
+                assignees: vec![],
+                body: String::new(),
+                index: request.index,
+                labels: vec![],
+                state: "closed".to_string(),
+                title: "Issue".to_string(),
+                url: "https://example.com/issues/1".to_string(),
+            })
         }
         async fn comment_on_issue(
             &self,
@@ -2933,7 +2967,11 @@ mod tests {
             .clone()
     }
 
-    fn test_forge_instance(alias: &str, base_url: &str) -> crate::registry::ForgeInstance {
+    fn test_forge_instance(
+        alias: &str,
+        base_url: &str,
+        write_service: Arc<FakeWriteService>,
+    ) -> crate::registry::ForgeInstance {
         crate::registry::ForgeInstance {
             adapter: Arc::new(FakeForgeAdapter),
             alias: alias.to_string(),
@@ -2946,7 +2984,7 @@ mod tests {
             token: None,
             webhook: None,
             webhook_adapter: Arc::new(FakeForgeAdapter),
-            write_service: Arc::new(FakeWriteService),
+            write_service,
         }
     }
 
@@ -2960,6 +2998,10 @@ mod tests {
     }
 
     fn test_state() -> AppState {
+        test_state_with_write(Arc::new(FakeWriteService::new()))
+    }
+
+    fn test_state_with_write(write_svc: Arc<FakeWriteService>) -> AppState {
         let configs = vec![crate::config::AgentConfig {
             agent_id: "codex".to_string(),
             forge_identity: std::collections::HashMap::new(),
@@ -2975,7 +3017,7 @@ mod tests {
         let mut forges = std::collections::HashMap::new();
         forges.insert(
             "test-forge".to_string(),
-            test_forge_instance("test-forge", "https://forge.example"),
+            test_forge_instance("test-forge", "https://forge.example", write_svc),
         );
 
         AppState {
@@ -3158,7 +3200,11 @@ mod tests {
         let mut forges = std::collections::HashMap::new();
         forges.insert(
             "test-forge".to_string(),
-            test_forge_instance("test-forge", "https://forge.example"),
+            test_forge_instance(
+                "test-forge",
+                "https://forge.example",
+                Arc::new(FakeWriteService::new()),
+            ),
         );
 
         let state = AppState {
@@ -3327,7 +3373,11 @@ mod tests {
         let mut forges = std::collections::HashMap::new();
         forges.insert(
             "test-forge".to_string(),
-            test_forge_instance("test-forge", "https://forge.example"),
+            test_forge_instance(
+                "test-forge",
+                "https://forge.example",
+                Arc::new(FakeWriteService::new()),
+            ),
         );
 
         let state = AppState {
@@ -3451,11 +3501,19 @@ mod tests {
         let mut forges = std::collections::HashMap::new();
         forges.insert(
             "test-forge".to_string(),
-            test_forge_instance("test-forge", "https://forge.example"),
+            test_forge_instance(
+                "test-forge",
+                "https://forge.example",
+                Arc::new(FakeWriteService::new()),
+            ),
         );
         forges.insert(
             "other-forge".to_string(),
-            test_forge_instance("other-forge", "https://other.example"),
+            test_forge_instance(
+                "other-forge",
+                "https://other.example",
+                Arc::new(FakeWriteService::new()),
+            ),
         );
 
         let state = AppState {
@@ -3693,6 +3751,119 @@ mod tests {
             .expect("request should succeed");
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn patch_issue_close_without_message_returns_400() {
+        let app = crate::build_router(test_state(), false);
+        let body = serde_json::json!({
+            "state": "closed"
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/v1/repos/test-forge/org/repo/issues/1")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&body).expect("serialize JSON body"),
+                    ))
+                    .expect("build request"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let resp_body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read response body");
+        let json: serde_json::Value =
+            serde_json::from_slice(&resp_body).expect("parse JSON response");
+        assert!(
+            json["error"]
+                .as_str()
+                .expect("error field is a string")
+                .contains("message is required"),
+        );
+    }
+
+    #[tokio::test]
+    async fn patch_issue_close_with_message_succeeds() {
+        let write_svc = Arc::new(FakeWriteService::new());
+        let app = crate::build_router(test_state_with_write(Arc::clone(&write_svc)), false);
+        let body = serde_json::json!({
+            "state": "closed",
+            "message": "fixes done"
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/v1/repos/test-forge/org/repo/issues/1")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&body).expect("serialize JSON body"),
+                    ))
+                    .expect("build request"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let resp_body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read response body");
+        let json: serde_json::Value =
+            serde_json::from_slice(&resp_body).expect("parse JSON response");
+        assert_eq!(json["state"], "closed");
+
+        assert_eq!(
+            write_svc
+                .captured_close_msg
+                .lock()
+                .expect("poisoned lock")
+                .as_deref(),
+            Some("fixes done"),
+            "handler must forward the validated message to CloseIssueRequest"
+        );
+    }
+
+    #[tokio::test]
+    async fn patch_issue_close_with_blank_message_returns_400() {
+        let app = crate::build_router(test_state(), false);
+        let body = serde_json::json!({
+            "state": "closed",
+            "message": "   "
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/v1/repos/test-forge/org/repo/issues/1")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&body).expect("serialize JSON body"),
+                    ))
+                    .expect("build request"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let resp_body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read response body");
+        let json: serde_json::Value =
+            serde_json::from_slice(&resp_body).expect("parse JSON response");
+        assert!(
+            json["error"]
+                .as_str()
+                .expect("error field is a string")
+                .contains("message is required"),
+        );
     }
 
     #[tokio::test]

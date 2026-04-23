@@ -211,6 +211,7 @@ pub struct CreateIssueBody {
 pub struct UpdateIssueBody {
     pub assignees: Option<Vec<String>>,
     pub body: Option<String>,
+    pub message: Option<String>,
     pub state: Option<String>,
     pub title: Option<String>,
 }

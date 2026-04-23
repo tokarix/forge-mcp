@@ -664,20 +664,52 @@ where
         _authorized: domain::policy::AuthorizedWrite,
         credential: &ForgeCredential,
     ) -> Result<Issue, ServiceError> {
+        let agent = request.agent.clone();
+        let repository = request.repository.clone();
+        let index = request.index;
+        let message = request.message.clone();
+
+        // 1. Audit the comment action
         self.audit_sink
             .record(AuditRecord {
-                agent: request.agent,
-                action: "close_issue".to_string(),
-                repository: request.repository.clone(),
-                target: request.index.to_string(),
+                agent: agent.clone(),
+                action: "comment_on_issue".to_string(),
+                repository: repository.clone(),
+                target: index.to_string(),
             })
             .await
             .map_err(|e| ServiceError::Audit(e.to_string()))?;
 
+        // 2. Post comment upstream
         self.adapter
-            .close_issue(&request.repository, request.index, credential)
+            .comment_on_issue(&repository, index, &message, credential)
             .await
-            .map_err(|e| ServiceError::Upstream(e.to_string()))
+            .map_err(|e| ServiceError::Upstream(e.to_string()))?;
+
+        // 3. Audit the close action
+        self.audit_sink
+            .record(AuditRecord {
+                agent,
+                action: "close_issue".to_string(),
+                repository: repository.clone(),
+                target: index.to_string(),
+            })
+            .await
+            .map_err(|e| {
+                ServiceError::Audit(format!(
+                    "audit failed (closing comment may already have been posted): {e}"
+                ))
+            })?;
+
+        // 4. Close issue upstream
+        self.adapter
+            .close_issue(&repository, index, credential)
+            .await
+            .map_err(|e| {
+                ServiceError::Upstream(format!(
+                    "close failed (closing comment may already have been posted): {e}"
+                ))
+            })
     }
 
     async fn comment_on_issue(
@@ -1421,10 +1453,10 @@ mod tests {
     use audit::{AuditError, AuditRecord, AuditSink, InMemoryAuditSink};
     use domain::{
         AgentIdentity, ChangeRequest, ChangeRequestCommentDetail, ChangeRequestState,
-        CloseChangeRequestRequest, CommentOnChangeRequestRequest, CommitPatchRequest,
-        ForgeCredential, ForgeKind, OpenChangeRequestRequest, ReadRepositoryFileRequest,
-        RepositoryReadService, RepositoryRef, RepositoryWriteService, ServiceError,
-        SubmitChangeRequestReviewRequest, UpdateChangeRequestRequest,
+        CloseChangeRequestRequest, CloseIssueRequest, CommentOnChangeRequestRequest,
+        CommitPatchRequest, ForgeCredential, ForgeKind, IssueComment, OpenChangeRequestRequest,
+        ReadRepositoryFileRequest, RepositoryReadService, RepositoryRef, RepositoryWriteService,
+        ServiceError, SubmitChangeRequestReviewRequest, UpdateChangeRequestRequest,
     };
     use forge::{ForgeAdapter, ForgeError};
 
@@ -6026,5 +6058,548 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
         let (name, email) = resolve_committer_identity(user, "claude");
         assert_eq!(name, "claude");
         assert_eq!(email, "claude@forge-mcp");
+    }
+
+    // --- close_issue orchestrator tests ---
+
+    /// Configurable forge adapter for `close_issue` tests.
+    struct CloseIssueTestForgeAdapter {
+        state: std::sync::Mutex<CloseIssueAdapterState>,
+    }
+
+    struct CloseIssueAdapterState {
+        comment_error: bool,
+        close_error: bool,
+        call_order: Vec<&'static str>,
+        comment_body: Option<String>,
+    }
+
+    impl CloseIssueTestForgeAdapter {
+        fn new(comment_error: bool, close_error: bool) -> Self {
+            Self {
+                state: std::sync::Mutex::new(CloseIssueAdapterState {
+                    comment_error,
+                    close_error,
+                    call_order: Vec::new(),
+                    comment_body: None,
+                }),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ForgeAdapter for CloseIssueTestForgeAdapter {
+        async fn add_issue_dependency(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            Err(ForgeError::Unsupported("test fake".into()))
+        }
+        async fn add_issue_label(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            Err(ForgeError::Unsupported("test fake".into()))
+        }
+        async fn assign_issue(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            Err(ForgeError::Unsupported("test fake".into()))
+        }
+        async fn close_issue(
+            &self,
+            _: &RepositoryRef,
+            index: u64,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            let mut state = self.state.lock().expect("poisoned");
+            state.call_order.push("close_issue");
+            if state.close_error {
+                return Err(ForgeError::InvalidPayload("close failed".to_string()));
+            }
+            Ok(domain::Issue {
+                assignees: vec![],
+                body: String::new(),
+                index,
+                labels: vec![],
+                state: "closed".to_string(),
+                title: "Issue".to_string(),
+                url: format!("https://example.com/issues/{index}"),
+            })
+        }
+        async fn comment_on_issue(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            body: &str,
+            _: &ForgeCredential,
+        ) -> Result<domain::IssueComment, ForgeError> {
+            let mut state = self.state.lock().expect("poisoned");
+            state.call_order.push("comment_on_issue");
+            state.comment_body = Some(body.to_string());
+            if state.comment_error {
+                return Err(ForgeError::InvalidPayload("comment failed".to_string()));
+            }
+            Ok(IssueComment {
+                author: "test-agent".to_string(),
+                body: body.to_string(),
+                created_at: "2025-01-01T00:00:00Z".to_string(),
+                id: 1,
+            })
+        }
+        async fn create_commit_status(
+            &self,
+            _: &RepositoryRef,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<(), ForgeError> {
+            Err(ForgeError::Unsupported("test fake".into()))
+        }
+        async fn create_issue(
+            &self,
+            _: &RepositoryRef,
+            _: &str,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            Err(ForgeError::Unsupported("test fake".into()))
+        }
+        async fn get_combined_commit_status(
+            &self,
+            _: &RepositoryRef,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<domain::CombinedCommitStatus, ForgeError> {
+            Err(ForgeError::Unsupported("test fake".into()))
+        }
+        async fn get_change_request_ci_details(
+            &self,
+            _repo: &RepositoryRef,
+            _head_sha: &str,
+            _credential: &ForgeCredential,
+        ) -> Result<domain::ChangeRequestCiDetails, ForgeError> {
+            Err(ForgeError::Unsupported("test fake".into()))
+        }
+        async fn get_allowed_merge_styles(
+            &self,
+            _: &RepositoryRef,
+            _: &ForgeCredential,
+        ) -> Result<Vec<String>, ForgeError> {
+            Err(ForgeError::Unsupported("test fake".into()))
+        }
+        async fn get_issue(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            Err(ForgeError::Unsupported("test fake".into()))
+        }
+        async fn get_issue_comments(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<Vec<domain::IssueComment>, ForgeError> {
+            Err(ForgeError::Unsupported("test fake".into()))
+        }
+        async fn get_issue_dependencies(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<domain::IssueDependencies, ForgeError> {
+            Err(ForgeError::Unsupported("test fake".into()))
+        }
+        async fn list_issues(
+            &self,
+            _: &RepositoryRef,
+            _: Option<&str>,
+            _: &ForgeCredential,
+        ) -> Result<Vec<domain::Issue>, ForgeError> {
+            Err(ForgeError::Unsupported("test fake".into()))
+        }
+        async fn list_repositories(
+            &self,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: &ForgeCredential,
+        ) -> Result<Vec<domain::Repository>, ForgeError> {
+            Err(ForgeError::Unsupported("test fake".into()))
+        }
+        async fn remove_issue_dependency(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            Err(ForgeError::Unsupported("test fake".into()))
+        }
+        async fn remove_issue_label(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            Err(ForgeError::Unsupported("test fake".into()))
+        }
+        async fn get_authenticated_user(
+            &self,
+            _: &ForgeCredential,
+        ) -> Result<domain::ForgeUser, ForgeError> {
+            Err(ForgeError::Unsupported("test fake".into()))
+        }
+        async fn close_change_request(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<ChangeRequest, ForgeError> {
+            Err(ForgeError::Unsupported("test fake".into()))
+        }
+        async fn comment_on_change_request(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<domain::ChangeRequestComment, ForgeError> {
+            Err(ForgeError::Unsupported("test fake".into()))
+        }
+        async fn create_change_request(
+            &self,
+            _: &RepositoryRef,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<ChangeRequest, ForgeError> {
+            Err(ForgeError::Unsupported("test fake".into()))
+        }
+        async fn get_change_request_comments(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<Vec<ChangeRequestCommentDetail>, ForgeError> {
+            Err(ForgeError::Unsupported("test fake".into()))
+        }
+        async fn get_change_request(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<ChangeRequest, ForgeError> {
+            Err(ForgeError::Unsupported("test fake".into()))
+        }
+        async fn get_change_request_diff(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<String, ForgeError> {
+            Err(ForgeError::Unsupported("test fake".into()))
+        }
+        async fn get_default_merge_style(
+            &self,
+            _: &RepositoryRef,
+            _: &ForgeCredential,
+        ) -> Result<Option<String>, ForgeError> {
+            Err(ForgeError::Unsupported("test fake".into()))
+        }
+        async fn get_repository_merge_settings(
+            &self,
+            _: &RepositoryRef,
+            _: &ForgeCredential,
+        ) -> Result<domain::RepositoryMergeSettings, ForgeError> {
+            Err(ForgeError::Unsupported("test fake".into()))
+        }
+        async fn list_change_requests(
+            &self,
+            _: &RepositoryRef,
+            _: Option<&ChangeRequestState>,
+            _: &ForgeCredential,
+        ) -> Result<Vec<ChangeRequest>, ForgeError> {
+            Err(ForgeError::Unsupported("test fake".into()))
+        }
+        async fn read_repository_file(
+            &self,
+            _: &RepositoryRef,
+            _: &str,
+            _: Option<&str>,
+            _: &ForgeCredential,
+        ) -> Result<domain::ReadRepositoryFileResponse, ForgeError> {
+            Err(ForgeError::Unsupported("test fake".into()))
+        }
+        async fn schedule_auto_merge(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &str,
+            _: &str,
+            _: Option<bool>,
+            _: &ForgeCredential,
+        ) -> Result<(), ForgeError> {
+            Err(ForgeError::Unsupported("test fake".into()))
+        }
+        async fn submit_change_request_review(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &str,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<domain::ChangeRequestReview, ForgeError> {
+            Err(ForgeError::Unsupported("test fake".into()))
+        }
+        async fn update_change_request(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: &ForgeCredential,
+        ) -> Result<ChangeRequest, ForgeError> {
+            Err(ForgeError::Unsupported("test fake".into()))
+        }
+        async fn update_issue(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            Err(ForgeError::Unsupported("test fake".into()))
+        }
+    }
+
+    fn close_issue_test_repo() -> RepositoryRef {
+        RepositoryRef {
+            alias: "test".to_string(),
+            forge: ForgeKind::Forgejo,
+            host: "https://forge.example".to_string(),
+            name: "repo".to_string(),
+            owner: "org".to_string(),
+        }
+    }
+
+    fn close_issue_test_request() -> CloseIssueRequest {
+        CloseIssueRequest {
+            agent: AgentIdentity {
+                agent_id: "test-agent".to_string(),
+                session_id: "test-session".to_string(),
+            },
+            index: 42,
+            message: "fixes done".to_string(),
+            repository: close_issue_test_repo(),
+        }
+    }
+
+    // Success path: all four steps complete, two audit records created
+    #[tokio::test]
+    async fn close_issue_succeeds_and_records_both_audits() {
+        let adapter = Arc::new(CloseIssueTestForgeAdapter::new(false, false));
+        let audit = Arc::new(InMemoryAuditSink::new());
+        let orchestrator = WriteOrchestrator::new(Arc::clone(&adapter), Arc::clone(&audit));
+
+        let result = orchestrator
+            .close_issue(
+                close_issue_test_request(),
+                default_authorized(),
+                &ForgeCredential { token: None },
+            )
+            .await
+            .expect("close_issue should succeed");
+
+        assert_eq!(result.state, "closed");
+        assert_eq!(result.index, 42);
+
+        // Verify both audit records: comment_on_issue first, then close_issue
+        let records = audit.records().expect("audit records");
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].action, "comment_on_issue");
+        assert_eq!(records[0].target, "42");
+        assert_eq!(records[1].action, "close_issue");
+        assert_eq!(records[1].target, "42");
+
+        // Verify the validated message was passed through and both calls happened in order
+        let state = adapter.state.lock().expect("poisoned");
+        assert_eq!(
+            state.call_order,
+            vec!["comment_on_issue", "close_issue"],
+            "expected comment then close call order"
+        );
+        assert_eq!(
+            state.comment_body,
+            Some("fixes done".to_string()),
+            "message should have been propagated to comment"
+        );
+    }
+
+    // Comment failure: short-circuits after comment_on_issue audit
+    #[tokio::test]
+    async fn close_issue_fails_on_comment_error() {
+        let adapter = Arc::new(CloseIssueTestForgeAdapter::new(true, false));
+        let audit = Arc::new(InMemoryAuditSink::new());
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
+
+        let err = orchestrator
+            .close_issue(
+                close_issue_test_request(),
+                default_authorized(),
+                &ForgeCredential { token: None },
+            )
+            .await
+            .expect_err("close_issue should fail");
+
+        assert!(
+            matches!(err, ServiceError::Upstream(_)),
+            "expected Upstream error, got {err:?}"
+        );
+
+        // Only the comment audit should be recorded; close audit must not be reached
+        let records = audit.records().expect("audit records");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].action, "comment_on_issue");
+    }
+
+    // Upstream close failure: both audits recorded, close returns error
+    #[tokio::test]
+    async fn close_issue_fails_on_close_error() {
+        let adapter = Arc::new(CloseIssueTestForgeAdapter::new(false, true));
+        let audit = Arc::new(InMemoryAuditSink::new());
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
+
+        let err = orchestrator
+            .close_issue(
+                close_issue_test_request(),
+                default_authorized(),
+                &ForgeCredential { token: None },
+            )
+            .await
+            .expect_err("close_issue should fail");
+
+        assert!(
+            matches!(err, ServiceError::Upstream(_)),
+            "expected Upstream error, got {err:?}"
+        );
+
+        // Error message should mention the comment may have already been posted
+        let err_msg = match err {
+            ServiceError::Upstream(ref msg) => msg.as_str(),
+            _ => panic!("expected Upstream error"),
+        };
+        assert!(
+            err_msg.contains("closing comment may already have been posted"),
+            "error should mention partial success: {err_msg}"
+        );
+
+        // Both audit records should be present
+        let records = audit.records().expect("audit records");
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].action, "comment_on_issue");
+        assert_eq!(records[1].action, "close_issue");
+    }
+
+    // Audit sink failure: short-circuits on first audit record attempt
+    #[tokio::test]
+    async fn close_issue_fails_on_first_audit_error() {
+        let adapter = Arc::new(CloseIssueTestForgeAdapter::new(false, false));
+        let audit = Arc::new(FailingAuditSink);
+        let orchestrator = WriteOrchestrator::new(adapter, audit);
+
+        let err = orchestrator
+            .close_issue(
+                close_issue_test_request(),
+                default_authorized(),
+                &ForgeCredential { token: None },
+            )
+            .await
+            .expect_err("close_issue should fail on audit error");
+
+        assert!(
+            matches!(err, ServiceError::Audit(_)),
+            "expected Audit error, got {err:?}"
+        );
+    }
+
+    /// Audit sink that fails on its Nth call.
+    struct ConditionalAuditSink {
+        fail_after: Mutex<usize>,
+    }
+
+    impl ConditionalAuditSink {
+        fn new(fail_after: usize) -> Self {
+            Self {
+                fail_after: Mutex::new(fail_after),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AuditSink for ConditionalAuditSink {
+        async fn record(&self, _record: AuditRecord) -> Result<(), AuditError> {
+            let mut fail_after = self.fail_after.lock().expect("poisoned");
+            *fail_after -= 1;
+            if *fail_after == 0 {
+                Err(AuditError::Unavailable)
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    // Close-audit failure: comment posted, second audit fails, upstream close NOT attempted
+    #[tokio::test]
+    async fn close_issue_fails_on_close_audit_error() {
+        let adapter = Arc::new(CloseIssueTestForgeAdapter::new(false, false));
+        let audit = Arc::new(ConditionalAuditSink::new(2));
+        let orchestrator = WriteOrchestrator::new(Arc::clone(&adapter), audit);
+
+        let err = orchestrator
+            .close_issue(
+                close_issue_test_request(),
+                default_authorized(),
+                &ForgeCredential { token: None },
+            )
+            .await
+            .expect_err("close_issue should fail on second audit error");
+
+        assert!(
+            matches!(err, ServiceError::Audit(_)),
+            "expected Audit error, got {err:?}"
+        );
+
+        // Error message must indicate the comment may already have been posted
+        let err_msg = match err {
+            ServiceError::Audit(ref msg) => msg.as_str(),
+            _ => panic!("expected Audit error"),
+        };
+        assert!(
+            err_msg.contains("closing comment may already have been posted"),
+            "error should mention partial success: {err_msg}"
+        );
+
+        // Only comment_on_issue should have been called; close must NOT be called
+        let state = adapter.state.lock().expect("poisoned");
+        assert_eq!(state.call_order, vec!["comment_on_issue"]);
+        assert_eq!(state.comment_body, Some("fixes done".to_string()));
     }
 }

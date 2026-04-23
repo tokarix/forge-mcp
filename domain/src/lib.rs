@@ -680,6 +680,7 @@ pub struct CloseChangeRequestRequest {
 pub struct CloseIssueRequest {
     pub agent: AgentIdentity,
     pub index: u64,
+    pub message: String,
     pub repository: RepositoryRef,
 }
 
