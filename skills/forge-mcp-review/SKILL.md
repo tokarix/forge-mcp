@@ -9,8 +9,7 @@ Use this skill for PR review work done through forge-mcp.
 
 ## Workflow
 
-1. **Prefer lean memory patterns**. Start the session with a lean bootstrap (e.g., `memory_bootstrap(..., include_recall=false)`). Do not load full recall-heavy context. 
-2. Use targeted `memory_rules(tags=[...])` to pull in specific required context like git and commit-hygiene rules. Use `memory_search(...)` selectively when exploring unfamiliar project components.
+1. **Prefer lean memory patterns**. Rely on your coordinator's injected `memory_rules` and do not load full recall-heavy context. Use targeted `memory_rules(tags=[...])` if you need to pull in specific required context like git and commit-hygiene rules. Use `memory_search(...)` selectively when exploring unfamiliar project components.
 3. Call `forge_info` first to learn the forge alias and confirm the active forge-mcp identity.
 4. Resolve the PR target before reviewing:
    - If the user already gave a PR index, use it.
@@ -120,7 +119,7 @@ Use forge-mcp review tools as needed:
 - get_change_request_diff
 - submit_change_request_review
 
-If your runtime uses the memory-server, perform a lean bootstrap (e.g. `memory_bootstrap` with `include_recall=false`) and pull in strictly relevant rules via `memory_rules(tags=...)` rather than loading noisy general project recall.
+If your runtime uses the memory-server, pull in strictly relevant rules via `memory_rules(tags=...)` rather than loading noisy general project recall.
 
 Focus on bugs, regressions, missing tests, and commit hygiene.
 
