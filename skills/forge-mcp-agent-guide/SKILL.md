@@ -38,52 +38,7 @@ git config --global credential.helper cache
 git clone http://gateway:8443/git/myforge/org/repo
 ```
 
-## MCP Tools
-
-Most tools require a `forge` parameter — the alias of the target forge instance.
-
-### Discovery
-
-| Tool | Purpose |
-|------|---------|
-| `forge_info` | Discover available forges, gateway URL, and git proxy URL |
-| `poll_events` | Poll for buffered channel events (webhooks, notifications) |
-
-### Reading
-
-| Tool | Purpose |
-|------|---------|
-| `read_repository_file` | Read a single file (with optional git ref) |
-| `list_change_requests` | List pull requests (filter by state) |
-| `get_change_request` | Get details of a specific pull request |
-| `get_change_request_diff` | Get the unified diff for a pull request |
-| `get_change_request_comments` | Get all comments and reviews on a pull request |
-| `list_issues` | List issues (filter by state) |
-| `get_issue` | Get a single issue by index |
-| `get_issue_comments` | Get all comments on an issue |
-
-### Writing
-
-| Tool | Purpose |
-|------|---------|
-| `commit_patch` | Apply a git-format patch to a branch and push |
-| `open_change_request` | Open a pull request |
-| `update_change_request` | Update a pull request's title and/or body |
-| `close_change_request` | Close a pull request |
-| `comment_on_change_request` | Post a comment on a pull request |
-| `submit_change_request_review` | Submit a formal review (APPROVED, REQUEST_CHANGES, COMMENT) |
-| `rebase_branch` | Squash (fixup) commits on a branch |
-| `schedule_auto_merge` | Schedule a PR for auto-merge when checks pass |
-| `create_issue` | Create a new issue |
-| `assign_issue` | Assign an issue to a user |
-| `close_issue` | Close an issue |
-| `comment_on_issue` | Post a comment on an issue |
-
-Before calling `create_issue`, check existing open issues with `list_issues`
-and inspect the closest match with `get_issue` / `get_issue_comments` so you
-do not file a duplicate.
-
-### Write Workflow
+## Write Workflow
 
 Always work in a **detached git worktree** — never edit files in the main checkout. This keeps the main working tree clean and prevents patches from picking up unrelated changes, especially when multiple agents share the same repository.
 
