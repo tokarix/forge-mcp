@@ -2213,7 +2213,7 @@ impl McpShim {
         let git_auth = serde_json::json!({
             "scheme": "basic",
             "username": "any non-empty value",
-            "password_source": "agent_token"
+            "password_source": "git_token from the root response (single gateway) or from the matching forges[] entry (multi-gateway)"
         });
 
         // Single gateway: preserve the original flat response shape.
@@ -2229,7 +2229,8 @@ impl McpShim {
             parsed["gateway_url"] = serde_json::Value::String(gw_url.to_string());
             parsed["git_url_template"] =
                 serde_json::Value::String(format!("{gw_url}/git/{{forge}}/{{owner}}/{{repo}}"));
-            parsed["git_auth"] = git_auth;
+            parsed["git_token"] = serde_json::Value::String(gw.token.clone());
+            parsed["git_auth"] = git_auth.clone();
 
             return serde_json::to_string_pretty(&parsed).map_err(|e| {
                 McpError::internal_error(format!("JSON serialization failed: {e}"), None)
@@ -2298,7 +2299,22 @@ impl McpShim {
             let forges = info["forges"].clone();
             if let Some(forge_arr) = forges.as_array() {
                 for forge in forge_arr {
-                    if let Some(alias) = forge["alias"].as_str() {
+                    let mut annotated_forge = forge.clone();
+                    if let Some(obj) = annotated_forge.as_object_mut() {
+                        obj.insert(
+                            "git_token".to_string(),
+                            serde_json::Value::String(gw.token.clone()),
+                        );
+                        obj.insert(
+                            "gateway_name".to_string(),
+                            serde_json::Value::String(gw.name.clone()),
+                        );
+                        obj.insert(
+                            "gateway_url".to_string(),
+                            serde_json::Value::String(gw_url.to_string()),
+                        );
+                    }
+                    if let Some(alias) = annotated_forge["alias"].as_str() {
                         if let Some(existing_gw) = alias_sources.get(alias) {
                             ambiguous_aliases.push(format!(
                                 "forge alias '{}' advertised by gateways '{}' and '{}'",
@@ -2308,7 +2324,7 @@ impl McpShim {
                             alias_sources.insert(alias.to_string(), gw.name.clone());
                         }
                     }
-                    all_forges.push(forge.clone());
+                    all_forges.push(annotated_forge);
                 }
             }
 
@@ -4716,12 +4732,49 @@ mod tests {
             .expect("text result");
         let parsed: serde_json::Value = serde_json::from_str(&text)?;
 
-        // Should have merged forges list
+        // Should have merged forges list with per-forge auth metadata
         let forges = parsed["forges"].as_array().expect("forges array");
         assert_eq!(forges.len(), 2);
         let aliases: Vec<&str> = forges.iter().filter_map(|f| f["alias"].as_str()).collect();
         assert!(aliases.contains(&"alpha"));
         assert!(aliases.contains(&"beta"));
+
+        // Each forge entry should carry git_token, gateway_name, gateway_url
+        for forge in forges {
+            assert!(
+                forge["git_token"].is_string(),
+                "each forge should have git_token"
+            );
+            assert!(
+                forge["gateway_name"].is_string(),
+                "each forge should have gateway_name"
+            );
+            assert!(
+                forge["gateway_url"].is_string(),
+                "each forge should have gateway_url"
+            );
+        }
+
+        // Tokens must not cross between gateways
+        let forge_by_alias: std::collections::HashMap<_, _> = forges
+            .iter()
+            .filter_map(|f| f["alias"].as_str())
+            .zip(forges.iter())
+            .collect();
+        if let Some(alpha_forge) = forge_by_alias.get(&"alpha") {
+            assert_eq!(
+                alpha_forge["git_token"], "token-a",
+                "alpha should use token-a",
+            );
+            assert_eq!(alpha_forge["gateway_name"], "gw-a");
+        }
+        if let Some(beta_forge) = forge_by_alias.get(&"beta") {
+            assert_eq!(
+                beta_forge["git_token"], "token-b",
+                "beta should use token-b",
+            );
+            assert_eq!(beta_forge["gateway_name"], "gw-b");
+        }
 
         // Should have gateways array
         let gateways = parsed["gateways"].as_array().expect("gateways array");
@@ -4771,6 +4824,12 @@ mod tests {
             "should have git_url_template"
         );
         assert!(parsed["git_auth"].is_object(), "should have git_auth");
+        assert_eq!(
+            parsed["git_auth"]["password_source"],
+            "git_token from the root response (single gateway) or from the matching forges[] entry (multi-gateway)"
+        );
+        // Should expose the git token for per-command credential injection
+        assert_eq!(parsed["git_token"], "test-token", "should expose git_token");
         // Should NOT have gateways array in single-gateway mode
         assert!(
             parsed["gateways"].is_null(),
@@ -4912,6 +4971,10 @@ mod tests {
         let forges = parsed["forges"].as_array().expect("forges array");
         assert_eq!(forges.len(), 1);
         assert_eq!(forges[0]["alias"], "healthy");
+        // Exposed forge must carry valid auth metadata
+        assert_eq!(forges[0]["git_token"], "token-h");
+        assert_eq!(forges[0]["gateway_name"], "gw-healthy");
+        assert!(forges[0]["gateway_url"].is_string());
 
         // Gateways array should contain both entries
         let gateways = parsed["gateways"].as_array().expect("gateways array");
@@ -4977,6 +5040,10 @@ mod tests {
         let forges = parsed["forges"].as_array().expect("forges array");
         assert_eq!(forges.len(), 1);
         assert_eq!(forges[0]["alias"], "healthy");
+        // Exposed forge must carry valid auth metadata
+        assert_eq!(forges[0]["git_token"], "token-h");
+        assert_eq!(forges[0]["gateway_name"], "gw-healthy");
+        assert!(forges[0]["gateway_url"].is_string());
 
         // Gateways array should contain both entries
         let gateways = parsed["gateways"].as_array().expect("gateways array");

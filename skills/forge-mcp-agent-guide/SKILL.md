@@ -18,7 +18,9 @@ forge-mcp is a policy-enforcing gateway between AI agents and forge instances. A
 All requests use your agent bearer token.
 
 - **MCP tools:** Handled automatically by the MCP shim
-- **Git proxy:** Use HTTP Basic auth — any username, token as password
+- **Git proxy:** HTTP Basic auth — any username, token as password. Extract the token from the `forge_info` response:
+  - **Single gateway:** Read `git_token` from the root of the `forge_info` JSON response.
+  - **Multi-gateway:** Iterate the `forges[]` array, find the entry where `alias` matches the target forge, and read `git_token` from that entry.
 
 ## Git Proxy (clone/fetch)
 
@@ -26,11 +28,14 @@ The proxy is **read-only**. `git push` is blocked — use the `commit_patch` MCP
 
 **URL pattern:** `<scheme>://<gateway-host>:<port>/git/{forge}/{owner}/{repo}`
 
-```bash
-# Cache credentials in memory globally (default 15 min, avoids plaintext on disk)
-git config --global credential.helper cache
+**Credential injection — per-command only.** Use per-command environment variables to inject credentials. **Do NOT** write tokens to `.git/config`, global Git config, `.netrc`, or embed them in remote URLs.
 
-# Clone through the gateway (use https:// if behind a TLS reverse proxy)
+```bash
+GIT_CONFIG_COUNT=2 \
+GIT_CONFIG_KEY_0=credential.helper \
+GIT_CONFIG_VALUE_0= \
+GIT_CONFIG_KEY_1=credential.helper \
+GIT_CONFIG_VALUE_1='!f() { echo username=<agent_id>; echo password=<git_token>; }; f' \
 git clone http://gateway:8443/git/myforge/org/repo
 ```
 
@@ -72,6 +77,11 @@ When a reviewer requests changes on a PR:
 1. Read the review with `get_change_request_comments`
 2. If the worktree from the original work no longer exists, create one from the PR branch:
    ```bash
+   GIT_CONFIG_COUNT=2 \
+   GIT_CONFIG_KEY_0=credential.helper \
+   GIT_CONFIG_VALUE_0= \
+   GIT_CONFIG_KEY_1=credential.helper \
+   GIT_CONFIG_VALUE_1='!f() { echo username=<agent_id>; echo password=<git_token>; }; f' \
    git fetch origin <pr-branch>
    git worktree add /tmp/<repo>-<feature> FETCH_HEAD
    ```
@@ -94,3 +104,4 @@ When a reviewer requests changes on a PR:
 | Using Bearer auth with git | Git sends Basic auth -- use password field for token |
 | Hand-written or traditional unified diff patch | Generate the patch with `git diff --no-ext-diff --binary` or `git show` |
 | Editing files in the main checkout | Always use a detached `git worktree` — the main checkout accumulates drift and picks up unrelated changes |
+| Writing tokens to config files, .netrc, or remote URLs | Use per-command env vars — never persist tokens on disk |
