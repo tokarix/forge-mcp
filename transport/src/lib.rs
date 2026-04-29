@@ -18,41 +18,8 @@ use rmcp::{
     transport::stdio,
 };
 use schemars::JsonSchema;
-use serde::de;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-
-/// Deserializes a `u64` from either a JSON number or a string containing a
-/// number. LLMs frequently send `"5"` instead of `5` for integer tool
-/// parameters.
-fn deserialize_u64_lenient<'de, D>(deserializer: D) -> Result<u64, D::Error>
-where
-    D: de::Deserializer<'de>,
-{
-    struct U64LenientVisitor;
-
-    impl de::Visitor<'_> for U64LenientVisitor {
-        type Value = u64;
-
-        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.write_str("a u64 or a string containing a u64")
-        }
-
-        fn visit_u64<E: de::Error>(self, v: u64) -> Result<u64, E> {
-            Ok(v)
-        }
-
-        fn visit_i64<E: de::Error>(self, v: i64) -> Result<u64, E> {
-            u64::try_from(v).map_err(|_| E::custom(format!("negative value: {v}")))
-        }
-
-        fn visit_str<E: de::Error>(self, v: &str) -> Result<u64, E> {
-            v.parse().map_err(E::custom)
-        }
-    }
-
-    deserializer.deserialize_any(U64LenientVisitor)
-}
 
 /// Configuration for a single gateway.
 #[derive(Clone)]
@@ -97,12 +64,12 @@ pub enum TransportError {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct AddIssueDependencyTool {
     /// Index of the issue that this issue depends on (the blocking issue).
-    #[serde(deserialize_with = "deserialize_u64_lenient")]
+    #[serde(deserialize_with = "serde_aux::field_attributes::deserialize_number_from_string")]
     pub dependency: u64,
     /// Forge alias -- use `forge_info` to discover available aliases.
     pub forge: String,
     /// Issue index number.
-    #[serde(deserialize_with = "deserialize_u64_lenient")]
+    #[serde(deserialize_with = "serde_aux::field_attributes::deserialize_number_from_string")]
     pub index: u64,
     /// Repository owner or organization.
     pub owner: String,
@@ -115,7 +82,7 @@ pub struct AddIssueLabelTool {
     /// Forge alias -- use `forge_info` to discover available aliases.
     pub forge: String,
     /// Issue index number.
-    #[serde(deserialize_with = "deserialize_u64_lenient")]
+    #[serde(deserialize_with = "serde_aux::field_attributes::deserialize_number_from_string")]
     pub index: u64,
     /// Label name to add. The label will be created on the repository if it
     /// does not already exist.
@@ -133,7 +100,7 @@ pub struct AssignIssueTool {
     /// Forge alias -- use `forge_info` to discover available aliases.
     pub forge: String,
     /// Issue index number.
-    #[serde(deserialize_with = "deserialize_u64_lenient")]
+    #[serde(deserialize_with = "serde_aux::field_attributes::deserialize_number_from_string")]
     pub index: u64,
     /// Repository owner or organization.
     pub owner: String,
@@ -146,7 +113,7 @@ pub struct CloseChangeRequestTool {
     /// Forge alias -- use `forge_info` to discover available aliases.
     pub forge: String,
     /// Change request index number.
-    #[serde(deserialize_with = "deserialize_u64_lenient")]
+    #[serde(deserialize_with = "serde_aux::field_attributes::deserialize_number_from_string")]
     pub index: u64,
     /// Repository owner or organization.
     pub owner: String,
@@ -159,7 +126,7 @@ pub struct CloseIssueTool {
     /// Forge alias -- use `forge_info` to discover available aliases.
     pub forge: String,
     /// Issue index number.
-    #[serde(deserialize_with = "deserialize_u64_lenient")]
+    #[serde(deserialize_with = "serde_aux::field_attributes::deserialize_number_from_string")]
     pub index: u64,
     /// Closing comment message.
     pub message: String,
@@ -176,7 +143,7 @@ pub struct CommentOnChangeRequestTool {
     /// Forge alias -- use `forge_info` to discover available aliases.
     pub forge: String,
     /// Change request index number.
-    #[serde(deserialize_with = "deserialize_u64_lenient")]
+    #[serde(deserialize_with = "serde_aux::field_attributes::deserialize_number_from_string")]
     pub index: u64,
     /// Repository owner or organization.
     pub owner: String,
@@ -191,7 +158,7 @@ pub struct CommentOnIssueTool {
     /// Forge alias -- use `forge_info` to discover available aliases.
     pub forge: String,
     /// Issue index number.
-    #[serde(deserialize_with = "deserialize_u64_lenient")]
+    #[serde(deserialize_with = "serde_aux::field_attributes::deserialize_number_from_string")]
     pub index: u64,
     /// Repository owner or organization.
     pub owner: String,
@@ -317,7 +284,7 @@ pub struct GetChangeRequestDiffTool {
     /// Forge alias -- use `forge_info` to discover available aliases.
     pub forge: String,
     /// Change request index number.
-    #[serde(deserialize_with = "deserialize_u64_lenient")]
+    #[serde(deserialize_with = "serde_aux::field_attributes::deserialize_number_from_string")]
     pub index: u64,
     /// Repository owner or organization.
     pub owner: String,
@@ -330,7 +297,7 @@ pub struct GetChangeRequestChecksTool {
     /// Forge alias -- use `forge_info` to discover available aliases.
     pub forge: String,
     /// Change request (pull request) index number.
-    #[serde(deserialize_with = "deserialize_u64_lenient")]
+    #[serde(deserialize_with = "serde_aux::field_attributes::deserialize_number_from_string")]
     pub index: u64,
     /// Repository owner or organization.
     pub owner: String,
@@ -343,7 +310,7 @@ pub struct GetChangeRequestCiDetailsTool {
     /// Forge alias -- use `forge_info` to discover available aliases.
     pub forge: String,
     /// Change request (pull request) index number.
-    #[serde(deserialize_with = "deserialize_u64_lenient")]
+    #[serde(deserialize_with = "serde_aux::field_attributes::deserialize_number_from_string")]
     pub index: u64,
     /// Repository owner or organization.
     pub owner: String,
@@ -356,7 +323,7 @@ pub struct GetChangeRequestCommentsTool {
     /// Forge alias -- use `forge_info` to discover available aliases.
     pub forge: String,
     /// Change request index number.
-    #[serde(deserialize_with = "deserialize_u64_lenient")]
+    #[serde(deserialize_with = "serde_aux::field_attributes::deserialize_number_from_string")]
     pub index: u64,
     /// Repository owner or organization.
     pub owner: String,
@@ -369,7 +336,7 @@ pub struct GetChangeRequestTool {
     /// Forge alias -- use `forge_info` to discover available aliases.
     pub forge: String,
     /// Change request index number.
-    #[serde(deserialize_with = "deserialize_u64_lenient")]
+    #[serde(deserialize_with = "serde_aux::field_attributes::deserialize_number_from_string")]
     pub index: u64,
     /// Repository owner or organization.
     pub owner: String,
@@ -382,7 +349,7 @@ pub struct GetIssueTool {
     /// Forge alias -- use `forge_info` to discover available aliases.
     pub forge: String,
     /// Issue index number.
-    #[serde(deserialize_with = "deserialize_u64_lenient")]
+    #[serde(deserialize_with = "serde_aux::field_attributes::deserialize_number_from_string")]
     pub index: u64,
     /// Repository owner or organization.
     pub owner: String,
@@ -395,7 +362,7 @@ pub struct GetIssueCommentsTool {
     /// Forge alias -- use `forge_info` to discover available aliases.
     pub forge: String,
     /// Issue index number.
-    #[serde(deserialize_with = "deserialize_u64_lenient")]
+    #[serde(deserialize_with = "serde_aux::field_attributes::deserialize_number_from_string")]
     pub index: u64,
     /// Repository owner or organization.
     pub owner: String,
@@ -408,7 +375,7 @@ pub struct GetIssueDependenciesTool {
     /// Forge alias -- use `forge_info` to discover available aliases.
     pub forge: String,
     /// Issue index number.
-    #[serde(deserialize_with = "deserialize_u64_lenient")]
+    #[serde(deserialize_with = "serde_aux::field_attributes::deserialize_number_from_string")]
     pub index: u64,
     /// Repository owner or organization.
     pub owner: String,
@@ -523,12 +490,12 @@ pub struct ReadRepositoryFileTool {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct RemoveIssueDependencyTool {
     /// Index of the dependency issue to remove.
-    #[serde(deserialize_with = "deserialize_u64_lenient")]
+    #[serde(deserialize_with = "serde_aux::field_attributes::deserialize_number_from_string")]
     pub dependency: u64,
     /// Forge alias -- use `forge_info` to discover available aliases.
     pub forge: String,
     /// Issue index number.
-    #[serde(deserialize_with = "deserialize_u64_lenient")]
+    #[serde(deserialize_with = "serde_aux::field_attributes::deserialize_number_from_string")]
     pub index: u64,
     /// Repository owner or organization.
     pub owner: String,
@@ -541,7 +508,7 @@ pub struct RemoveIssueLabelTool {
     /// Forge alias -- use `forge_info` to discover available aliases.
     pub forge: String,
     /// Issue index number.
-    #[serde(deserialize_with = "deserialize_u64_lenient")]
+    #[serde(deserialize_with = "serde_aux::field_attributes::deserialize_number_from_string")]
     pub index: u64,
     /// Label name to remove.
     pub label: String,
@@ -561,7 +528,7 @@ pub struct ScheduleAutoMergeTool {
     /// Forge alias -- use `forge_info` to discover available aliases.
     pub forge: String,
     /// Change request index number.
-    #[serde(deserialize_with = "deserialize_u64_lenient")]
+    #[serde(deserialize_with = "serde_aux::field_attributes::deserialize_number_from_string")]
     pub index: u64,
     /// Merge style: rebase, rebase-merge, merge, squash, or fast-forward-only.
     pub merge_style: String,
@@ -586,7 +553,7 @@ pub struct UpdateChangeRequestTool {
     /// Forge alias -- use `forge_info` to discover available aliases.
     pub forge: String,
     /// Change request index number.
-    #[serde(deserialize_with = "deserialize_u64_lenient")]
+    #[serde(deserialize_with = "serde_aux::field_attributes::deserialize_number_from_string")]
     pub index: u64,
     /// Repository owner or organization.
     pub owner: String,
@@ -603,7 +570,7 @@ pub struct UpdateIssueTool {
     /// Forge alias -- use `forge_info` to discover available aliases.
     pub forge: String,
     /// Issue index number.
-    #[serde(deserialize_with = "deserialize_u64_lenient")]
+    #[serde(deserialize_with = "serde_aux::field_attributes::deserialize_number_from_string")]
     pub index: u64,
     /// Repository owner or organization.
     pub owner: String,
@@ -622,7 +589,7 @@ pub struct SubmitChangeRequestReviewTool {
     /// Forge alias -- use `forge_info` to discover available aliases.
     pub forge: String,
     /// Change request index number.
-    #[serde(deserialize_with = "deserialize_u64_lenient")]
+    #[serde(deserialize_with = "serde_aux::field_attributes::deserialize_number_from_string")]
     pub index: u64,
     /// Repository owner or organization.
     pub owner: String,
