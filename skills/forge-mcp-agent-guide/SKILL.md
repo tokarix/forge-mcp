@@ -13,10 +13,6 @@ forge-mcp is a policy-enforcing gateway between AI agents and forge instances. A
 - **MCP tools** for reading files, committing patches, and opening pull requests
 - **Git smart HTTP proxy** for `git clone` and `git fetch` (read-only)
 
-## Network Security
-
-The gateway listens on plain HTTP. In production, place it behind a TLS-terminating reverse proxy or restrict it to a trusted network. Never expose the HTTP port over untrusted networks — agent tokens would travel in cleartext.
-
 ## Authentication
 
 All requests use your agent bearer token.
