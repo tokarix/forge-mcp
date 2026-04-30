@@ -2,7 +2,11 @@
 
 Multi-forge, policy-enforcing MCP server for AI coding agents.
 
-Current status: Phase 2 — Forgejo read + write MCP server.
+Supported forges:
+- **Forgejo / Gitea** — full support
+- **GitLab** — read + write support. The GitLab adapter was autonomously implemented by cockpit-orchestrated agents overnight while I slept — which is kind of the whole point of this project.
+
+GitHub support is planned.
 
 MCP tools:
 - `read_repository_file` — read a single UTF-8 text file from a repository
@@ -16,6 +20,11 @@ Write safety:
 - Policy engine enforces branch prefix (`agent/`) and protected path rejection
 - Audit-before-action on all write operations
 - Git auth via `http.extraHeader` — token never in argv or URLs
+
+Limitations:
+- This thing is not efficient. `commit_patch` and `rebase_branch` do a full clone every time. For small to medium repos, that's fine. For large repos, you'll feel it.
+- Repos with many submodules will be painful — but then again, submodules are a vile antipattern and nobody should be using them.
+- Scaling to very large monorepos is not a goal right now.
 
 Workspace layout:
 - `audit/`: audit sink interfaces and in-memory implementation
@@ -31,3 +40,5 @@ How to run:
 - Set `FORGEJO_TOKEN` for authenticated reads and all write operations.
 - Optionally set `FORGE_MCP_AGENT_ID` and `FORGE_MCP_SESSION_ID`.
 - Start the server with `cargo run -p server`.
+
+Issues & PRs disabled. Development happens on an internal Forgejo instance.
