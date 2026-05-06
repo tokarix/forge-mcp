@@ -25,13 +25,15 @@ use domain::{
 
 use crate::api::AgentEventsQuery;
 use crate::api::{
-    AddIssueDependencyBody, AddIssueLabelBody, ChangeRequestCiDetailsResult, CiCheckDetailResult,
-    CiFailureStepResult, CiLogExcerptResult, CiProviderResult, CiResolutionResult, CommentBody,
-    CommentOnIssueBody, CommitPatchBody, CommitPatchResult, ContentsPath, ContentsQuery,
-    ContentsResult, CreateIssueBody, ErrorBody, ForgePath, IssueDependencyPath, IssueLabelPath,
-    IssuePath, ListIssuesQuery, ListPullsQuery, ListRepositoriesQuery, OpenPullBody, PullPath,
-    RebaseBranchBody, RebaseBranchResult, RebaseOperationBody, RepoPath, ScheduleAutoMergeBody,
-    SubmitReviewBody, UpdateChangeRequestBody, UpdateIssueBody,
+    AddIssueDependencyBody, AddIssueLabelBody, BranchDetailsResult, BranchItem,
+    ChangeRequestCiDetailsResult, CiCheckDetailResult, CiFailureStepResult, CiLogExcerptResult,
+    CiProviderResult, CiResolutionResult, CommentBody, CommentOnIssueBody, CommitPatchBody,
+    CommitPatchResult, ContentsPath, ContentsQuery, ContentsResult, CreateIssueBody, ErrorBody,
+    ForgePath, GetBranchQuery, IssueDependencyPath, IssueLabelPath, IssuePath, ListBranchesQuery,
+    ListBranchesResponse as ApiListBranchesResponse, ListIssuesQuery, ListPullsQuery,
+    ListRepositoriesQuery, OpenPullBody, PullPath, RebaseBranchBody, RebaseBranchResult,
+    RebaseOperationBody, RepoPath, ScheduleAutoMergeBody, SubmitReviewBody,
+    UpdateChangeRequestBody, UpdateIssueBody,
 };
 use crate::auth::{AgentRegistry, extract_bearer_token};
 use tokio_stream::StreamExt;
@@ -2141,6 +2143,118 @@ pub async fn agent_info(State(state): State<AppState>, headers: HeaderMap) -> im
     }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/repos/{forge}/{owner}/{repo}/branches",
+    params(
+        ("forge" = String, Path, description = "Forge alias"),
+        ("owner" = String, Path, description = "Repository owner"),
+        ("repo" = String, Path, description = "Repository name"),
+        ("prefix" = Option<String>, Query, description = "Optional branch name prefix filter"),
+        ("limit" = Option<u32>, Query, description = "Maximum number of branches to return"),
+    ),
+    responses(
+        (status = 200, description = "List of branches", body = ApiListBranchesResponse),
+        (status = 401, description = "Unauthorized", body = ErrorBody),
+    ),
+    security(("bearer" = []))
+)]
+pub async fn list_branches(
+    State(state): State<AppState>,
+    Path(path): Path<RepoPath>,
+    Query(query): Query<ListBranchesQuery>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let forge = resolve_forge(&state.forge_registry, &path.forge)?;
+    let agent = resolve_agent(
+        &headers,
+        &state.agent_registry,
+        &path.forge,
+        &path.owner,
+        &path.repo,
+    )?;
+
+    let credential = resolve_credential(agent, &path.forge, forge);
+
+    let result = forge
+        .read_service
+        .list_branches(
+            domain::ListBranchesRequest {
+                agent: agent.identity.clone(),
+                repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
+                prefix: query.prefix,
+                limit: query.limit,
+            },
+            &credential,
+        )
+        .await
+        .map_err(map_service_error)?;
+
+    Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(ApiListBranchesResponse {
+        branches: result
+            .branches
+            .into_iter()
+            .map(|b| BranchItem {
+                name: b.name,
+                commit_sha: b.commit_sha,
+            })
+            .collect(),
+        truncated: result.truncated,
+    }))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/repos/{forge}/{owner}/{repo}/branches/by-name",
+    params(
+        ("forge" = String, Path, description = "Forge alias"),
+        ("owner" = String, Path, description = "Repository owner"),
+        ("repo" = String, Path, description = "Repository name"),
+        ("branch" = String, Query, description = "Branch name to look up"),
+    ),
+    responses(
+        (status = 200, description = "Branch details with existence flag", body = BranchDetailsResult),
+        (status = 401, description = "Unauthorized", body = ErrorBody),
+    ),
+    security(("bearer" = []))
+)]
+pub async fn get_branch(
+    State(state): State<AppState>,
+    Path(path): Path<RepoPath>,
+    Query(query): Query<GetBranchQuery>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let forge = resolve_forge(&state.forge_registry, &path.forge)?;
+    let agent = resolve_agent(
+        &headers,
+        &state.agent_registry,
+        &path.forge,
+        &path.owner,
+        &path.repo,
+    )?;
+
+    let credential = resolve_credential(agent, &path.forge, forge);
+
+    let result = forge
+        .read_service
+        .get_branch(
+            domain::GetBranchRequest {
+                agent: agent.identity.clone(),
+                repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
+                branch: query.branch,
+            },
+            &credential,
+        )
+        .await
+        .map_err(map_service_error)?;
+
+    Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(BranchDetailsResult {
+        exists: result.exists,
+        name: result.name,
+        commit_sha: result.commit_sha,
+    }))
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::todo, clippy::unimplemented)]
 mod tests {
@@ -2154,9 +2268,10 @@ mod tests {
         http::{Request, StatusCode},
     };
     use domain::{
-        ChangeRequest, ChangeRequestCommentDetail, ChangeRequestState, CommitPatchResponse,
-        GetChangeRequestCommentsRequest, GetChangeRequestRequest, ListChangeRequestsRequest,
-        OpenChangeRequestResponse, ReadRepositoryFileResponse, ServiceError,
+        Branch, BranchDetails, ChangeRequest, ChangeRequestCommentDetail, ChangeRequestState,
+        CommitPatchResponse, GetChangeRequestCommentsRequest, GetChangeRequestRequest,
+        ListBranchesResponse, ListChangeRequestsRequest, OpenChangeRequestResponse,
+        ReadRepositoryFileResponse, ServiceError,
     };
     use tower::ServiceExt;
 
@@ -2544,9 +2659,60 @@ mod tests {
                 "unimplemented in test fake".into(),
             ))
         }
+
+        async fn list_branches(
+            &self,
+            _: &domain::RepositoryRef,
+            _: Option<&str>,
+            _: Option<u32>,
+            _: &domain::ForgeCredential,
+        ) -> Result<(Vec<domain::Branch>, bool), forge::ForgeError> {
+            Err(forge::ForgeError::Unsupported(
+                "unimplemented in test fake".into(),
+            ))
+        }
+
+        async fn get_branch(
+            &self,
+            _: &domain::RepositoryRef,
+            _: &str,
+            _: &domain::ForgeCredential,
+        ) -> Result<(String, Option<String>, bool), forge::ForgeError> {
+            Err(forge::ForgeError::Unsupported(
+                "unimplemented in test fake".into(),
+            ))
+        }
     }
 
-    struct FakeReadService;
+    struct FakeReadService {
+        list_branches_response: Arc<Mutex<Option<ListBranchesResponse>>>,
+        get_branch_response: Arc<Mutex<Option<BranchDetails>>>,
+    }
+
+    impl FakeReadService {
+        fn new() -> Self {
+            Self {
+                list_branches_response: Arc::new(Mutex::new(None)),
+                get_branch_response: Arc::new(Mutex::new(None)),
+            }
+        }
+
+        fn with_list_branches(resp: ListBranchesResponse) -> Arc<Self> {
+            let svc = Self {
+                list_branches_response: Arc::new(Mutex::new(Some(resp))),
+                get_branch_response: Arc::new(Mutex::new(None)),
+            };
+            Arc::new(svc)
+        }
+
+        fn with_get_branch(resp: BranchDetails) -> Arc<Self> {
+            let svc = Self {
+                list_branches_response: Arc::new(Mutex::new(None)),
+                get_branch_response: Arc::new(Mutex::new(Some(resp))),
+            };
+            Arc::new(svc)
+        }
+    }
 
     #[async_trait::async_trait]
     impl domain::RepositoryReadService for FakeReadService {
@@ -2689,6 +2855,30 @@ mod tests {
                 title: "Fix".to_string(),
                 url: "https://example.com/pulls/1".to_string(),
             })
+        }
+
+        async fn list_branches(
+            &self,
+            _: domain::ListBranchesRequest,
+            _: &domain::ForgeCredential,
+        ) -> Result<domain::ListBranchesResponse, ServiceError> {
+            if let Some(resp) = self.list_branches_response.lock().expect("lock").take() {
+                Ok(resp)
+            } else {
+                Err(ServiceError::Upstream("unimplemented in test fake".into()))
+            }
+        }
+
+        async fn get_branch(
+            &self,
+            _: domain::GetBranchRequest,
+            _: &domain::ForgeCredential,
+        ) -> Result<domain::BranchDetails, ServiceError> {
+            if let Some(resp) = self.get_branch_response.lock().expect("lock").take() {
+                Ok(resp)
+            } else {
+                Err(ServiceError::Upstream("unimplemented in test fake".into()))
+            }
         }
     }
 
@@ -2980,7 +3170,7 @@ mod tests {
             forge_kind: ForgeKind::Forgejo,
             forge_type: "forgejo".to_string(),
             git_auth_user: String::new(),
-            read_service: Arc::new(FakeReadService),
+            read_service: Arc::new(FakeReadService::new()),
             token: None,
             webhook: None,
             webhook_adapter: Arc::new(FakeForgeAdapter),
@@ -3019,6 +3209,37 @@ mod tests {
             "test-forge".to_string(),
             test_forge_instance("test-forge", "https://forge.example", write_svc),
         );
+
+        AppState {
+            agent_registry: AgentRegistry::from_configs(&configs),
+            audit_sink: Arc::new(audit::InMemoryAuditSink::new()),
+            auto_merge_service: test_auto_merge_service(),
+            event_bus: crate::events::EventBus::new(),
+            forge_registry: Arc::new(crate::registry::ForgeRegistry::new(forges)),
+        }
+    }
+
+    fn test_state_with_read(
+        read_svc: Arc<dyn domain::RepositoryReadService>,
+        allowed_repos: Vec<String>,
+        write_svc: Arc<FakeWriteService>,
+    ) -> AppState {
+        let configs = vec![crate::config::AgentConfig {
+            agent_id: "codex".to_string(),
+            forge_identity: std::collections::HashMap::new(),
+            policy: AgentPolicyConfig {
+                allowed_repos,
+                branch_prefix: Some("agent/".to_string()),
+                protected_paths: vec![],
+            },
+            session_id: "default".to_string(),
+            token: "test-token".to_string(),
+        }];
+
+        let mut fi = test_forge_instance("test-forge", "https://forge.example", write_svc);
+        fi.read_service = read_svc;
+        let mut forges = std::collections::HashMap::new();
+        forges.insert("test-forge".to_string(), fi);
 
         AppState {
             agent_registry: AgentRegistry::from_configs(&configs),
@@ -3894,5 +4115,131 @@ mod tests {
         // We want to ensure it's lowercase.
         assert_eq!(json["state"], "failure");
         assert_eq!(json["details"][0]["state"], "failure");
+    }
+
+    #[tokio::test]
+    async fn list_branches_allowed_repo_returns_200() {
+        let branches_resp = ListBranchesResponse {
+            branches: vec![Branch {
+                name: "main".to_string(),
+                commit_sha: "abc123".to_string(),
+            }],
+            truncated: false,
+        };
+        let read_svc = FakeReadService::with_list_branches(branches_resp);
+        let state = test_state_with_read(
+            read_svc,
+            vec!["test-forge/org/repo".to_string()],
+            Arc::new(FakeWriteService::new()),
+        );
+        let app = crate::build_router(state, false);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/repos/test-forge/org/repo/branches")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read response body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("parse JSON response");
+        assert_eq!(json["branches"][0]["name"], "main");
+        assert!(json["truncated"].as_bool() == Some(false));
+    }
+
+    #[tokio::test]
+    async fn list_branches_unauthorized_repo_returns_403() {
+        let branches_resp = ListBranchesResponse {
+            branches: vec![],
+            truncated: false,
+        };
+        let read_svc = FakeReadService::with_list_branches(branches_resp);
+        let state = test_state_with_read(
+            read_svc,
+            vec!["test-forge/org/other".to_string()],
+            Arc::new(FakeWriteService::new()),
+        );
+        let app = crate::build_router(state, false);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/repos/test-forge/org/repo/branches")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn get_branch_allowed_repo_returns_200() {
+        let branch_details = BranchDetails {
+            exists: true,
+            name: "feature".to_string(),
+            commit_sha: Some("def456".to_string()),
+        };
+        let read_svc = FakeReadService::with_get_branch(branch_details);
+        let state = test_state_with_read(
+            read_svc,
+            vec!["test-forge/org/repo".to_string()],
+            Arc::new(FakeWriteService::new()),
+        );
+        let app = crate::build_router(state, false);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/repos/test-forge/org/repo/branches/by-name?branch=feature")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read response body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("parse JSON response");
+        assert_eq!(json["name"], "feature");
+        assert_eq!(json["commit_sha"], "def456");
+        assert!(json["exists"].as_bool() == Some(true));
+    }
+
+    #[tokio::test]
+    async fn get_branch_unauthorized_repo_returns_403() {
+        let branch_details = BranchDetails {
+            exists: true,
+            name: "main".to_string(),
+            commit_sha: Some("abc123".to_string()),
+        };
+        let read_svc = FakeReadService::with_get_branch(branch_details);
+        let state = test_state_with_read(
+            read_svc,
+            vec!["test-forge/org/other".to_string()],
+            Arc::new(FakeWriteService::new()),
+        );
+        let app = crate::build_router(state, false);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/repos/test-forge/org/repo/branches/by-name?branch=main")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 }

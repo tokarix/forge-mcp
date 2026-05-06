@@ -782,6 +782,40 @@ pub struct CiLogExcerpt {
     pub lines: Vec<String>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct Branch {
+    pub name: String,
+    pub commit_sha: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct BranchDetails {
+    pub exists: bool,
+    pub name: String,
+    pub commit_sha: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ListBranchesResponse {
+    pub branches: Vec<Branch>,
+    pub truncated: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ListBranchesRequest {
+    pub agent: AgentIdentity,
+    pub repository: RepositoryRef,
+    pub prefix: Option<String>,
+    pub limit: Option<u32>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GetBranchRequest {
+    pub agent: AgentIdentity,
+    pub repository: RepositoryRef,
+    pub branch: String,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GetChangeRequestChecksRequest {
     pub agent: AgentIdentity,
@@ -1105,6 +1139,35 @@ pub trait RepositoryReadService: Send + Sync {
         request: ListIssuesRequest,
         credential: &ForgeCredential,
     ) -> Result<Vec<Issue>, ServiceError>;
+
+    /// Lists branches in a repository, optionally filtered by prefix and limit.
+    ///
+    /// When the pagination budget is exceeded before collecting the requested number
+    /// of results, the response will have `truncated: true` rather than returning an
+    /// error.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the upstream forge request fails or audit recording fails.
+    async fn list_branches(
+        &self,
+        request: ListBranchesRequest,
+        credential: &ForgeCredential,
+    ) -> Result<ListBranchesResponse, ServiceError>;
+
+    /// Retrieves branch details by name. Returns `exists: false` only when the
+    /// branch is confirmed missing on an accessible repository. Repository-not-found,
+    /// auth failures, and other upstream errors remain errors.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the repository is inaccessible, the upstream request
+    /// fails unexpectedly, or audit recording fails.
+    async fn get_branch(
+        &self,
+        request: GetBranchRequest,
+        credential: &ForgeCredential,
+    ) -> Result<BranchDetails, ServiceError>;
 
     /// Reads a single text file from a repository through the control plane.
     ///

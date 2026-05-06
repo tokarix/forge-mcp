@@ -23,6 +23,7 @@ use utoipa_scalar::{Scalar, Servable};
         handlers::add_issue_label,
         handlers::agent_events,
         handlers::close_pull,
+        handlers::get_branch,
         handlers::comment_on_issue,
         handlers::comment_on_pull,
         handlers::create_issue,
@@ -31,6 +32,7 @@ use utoipa_scalar::{Scalar, Servable};
         handlers::get_issue_comments,
         handlers::get_issue_dependencies,
         handlers::get_pull,
+        handlers::list_branches,
         handlers::get_pull_checks,
         handlers::get_pull_ci_details,
         handlers::get_pull_comments,
@@ -56,6 +58,8 @@ use utoipa_scalar::{Scalar, Servable};
         api::CiResolutionResult,
         api::CiProviderResult,
         api::CiFailureStepResult,
+        api::BranchDetailsResult,
+        api::BranchItem,
         api::CiLogExcerptResult,
         api::CommentBody,
         api::CommentOnIssueBody,
@@ -63,6 +67,7 @@ use utoipa_scalar::{Scalar, Servable};
         api::CommitPatchResult,
         api::ContentsResult,
         api::CreateIssueBody,
+        api::ListBranchesResponse,
         api::ErrorBody,
         api::OpenPullBody,
         api::RebaseBranchBody,
@@ -99,6 +104,7 @@ fn add_docs_routes(router: Router<AppState>) -> Router<AppState> {
 
 /// Builds the axum router with all API routes.
 /// When `enable_docs` is true, serves Scalar UI at `/api/v1/docs`.
+#[allow(clippy::too_many_lines)]
 pub fn build_router(state: AppState, enable_docs: bool) -> Router {
     let mut router = Router::new()
         .route("/api/v1/agent/info", get(handlers::agent_info))
@@ -181,6 +187,14 @@ pub fn build_router(state: AppState, enable_docs: bool) -> Router {
         .route(
             "/api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}/reviews",
             post(handlers::submit_pull_review),
+        )
+        .route(
+            "/api/v1/repos/{forge}/{owner}/{repo}/branches",
+            get(handlers::list_branches),
+        )
+        .route(
+            "/api/v1/repos/{forge}/{owner}/{repo}/branches/by-name",
+            get(handlers::get_branch),
         )
         .route(
             "/git/{forge}/{owner}/{repo}/git-receive-pack",

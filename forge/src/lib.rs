@@ -392,6 +392,25 @@ pub trait ForgeAdapter: Send + Sync {
         body: Option<&str>,
         credential: &ForgeCredential,
     ) -> Result<domain::Issue, ForgeError>;
+
+    /// Lists branches in a repository, optionally filtered by prefix.
+    async fn list_branches(
+        &self,
+        repository: &RepositoryRef,
+        prefix: Option<&str>,
+        limit: Option<u32>,
+        credential: &ForgeCredential,
+    ) -> Result<(Vec<domain::Branch>, bool), ForgeError>;
+
+    /// Gets branch details by name. Returns `(name, Some(sha), true)` for existing
+    /// branches, `(name, None, false)` for confirmed-missing branches.
+    /// Other errors propagate.
+    async fn get_branch(
+        &self,
+        repository: &RepositoryRef,
+        branch: &str,
+        credential: &ForgeCredential,
+    ) -> Result<(String, Option<String>, bool), ForgeError>;
 }
 
 pub trait ForgeWebhookAdapter: Send + Sync {
@@ -906,6 +925,18 @@ struct ForgejoCommitStatusResponse {
     description: Option<String>,
     status: String,
     target_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ForgejoBranchResponse {
+    #[serde(rename = "name")]
+    branch_name: String,
+    commit: ForgejoBranchCommit,
+}
+
+#[derive(Debug, Deserialize)]
+struct ForgejoBranchCommit {
+    id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2426,6 +2457,118 @@ impl ForgeAdapter for ForgejoAdapter {
         let issue: ForgejoIssueResponse = response.json().await?;
         Ok(issue.into_issue())
     }
+
+    async fn list_branches(
+        &self,
+        repository: &RepositoryRef,
+        prefix: Option<&str>,
+        limit: Option<u32>,
+        credential: &ForgeCredential,
+    ) -> Result<(Vec<domain::Branch>, bool), ForgeError> {
+        const PAGE_SIZE: usize = 30;
+        const MAX_PAGES: u32 = 5;
+        let target_limit = limit.unwrap_or(20).min(100) as usize;
+
+        let effective_token = credential.token.as_deref().or(self.config.token.as_deref());
+        let mut all_branches = Vec::new();
+        let mut page: u32 = 1;
+        let mut truncated = false;
+
+        loop {
+            if page > MAX_PAGES {
+                truncated = true;
+                break;
+            }
+            let mut url = format!(
+                "{}/api/v1/repos/{}/{}/branches?limit={PAGE_SIZE}&page={page}",
+                self.config.base_url.trim_end_matches('/'),
+                repository.owner,
+                repository.name,
+            );
+            if let Some(p) = prefix {
+                url.push_str("&pattern=");
+                url.push_str(&urlencoding::encode(p));
+            }
+            let mut req = self.client.get(&url);
+            if let Some(token) = effective_token {
+                req = req.bearer_auth(token);
+            }
+            let resp = Self::check_response(req.send().await?).await?;
+            let page_branches: Vec<ForgejoBranchResponse> = resp.json().await?;
+            let page_count = page_branches.len();
+
+            for b in page_branches {
+                if prefix.is_some_and(|p| !b.branch_name.starts_with(p)) {
+                    continue;
+                }
+                all_branches.push(domain::Branch {
+                    name: b.branch_name,
+                    commit_sha: b.commit.id,
+                });
+                if all_branches.len() >= target_limit {
+                    break;
+                }
+            }
+            if all_branches.len() >= target_limit {
+                break;
+            }
+            if page_count < PAGE_SIZE {
+                break;
+            }
+            page += 1;
+        }
+
+        let result: Vec<domain::Branch> = all_branches.into_iter().take(target_limit).collect();
+        Ok((result, truncated))
+    }
+
+    async fn get_branch(
+        &self,
+        repository: &RepositoryRef,
+        branch: &str,
+        credential: &ForgeCredential,
+    ) -> Result<(String, Option<String>, bool), ForgeError> {
+        let encoded = urlencoding::encode(branch);
+        let url = format!(
+            "{}/api/v1/repos/{}/{}/branches/{}",
+            self.config.base_url.trim_end_matches('/'),
+            repository.owner,
+            repository.name,
+            encoded,
+        );
+
+        let effective_token = credential.token.as_deref().or(self.config.token.as_deref());
+        let mut request = self.client.get(&url);
+        if let Some(token) = effective_token {
+            request = request.bearer_auth(token);
+        }
+
+        let response = request.send().await?;
+        let status = response.status();
+
+        if status == reqwest::StatusCode::NOT_FOUND {
+            let body = response.text().await.unwrap_or_default();
+            if let Some(msg) = parse_forge_error_message(&body) {
+                let msg_lower = msg.to_lowercase();
+                if msg_lower.contains("branch not found")
+                    || msg_lower.contains("no such branch")
+                    || msg_lower.contains("branch does not exist")
+                {
+                    return Ok((branch.to_string(), None, false));
+                }
+            }
+            return Err(ForgeError::NotFound {
+                status,
+                message: parse_forge_error_message(&body)
+                    .unwrap_or_else(|| "repository or resource not found".to_string()),
+            });
+        }
+
+        let response = Self::check_response(response).await?;
+        let branch_resp: ForgejoBranchResponse = response.json().await?;
+
+        Ok((branch_resp.branch_name, Some(branch_resp.commit.id), true))
+    }
 }
 
 impl ForgeWebhookAdapter for ForgejoAdapter {
@@ -2707,7 +2850,7 @@ mod tests {
     use sha2::Sha256;
 
     use domain::ForgeCredential;
-    use wiremock::matchers::{header, method, path_regex};
+    use wiremock::matchers::{header, method, path_regex, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
@@ -4902,6 +5045,636 @@ mod tests {
             adapter
                 .parse_woodpecker_url("https://ci.example.com/woodpecker/repos/1//pipeline/42")
                 .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn get_branch_returns_exists_false_for_branch_not_found() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/.+/.+/branches/.+"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "message": "Branch not found"
+            })))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let result = adapter
+            .get_branch(&test_repo(), "feature", &cred)
+            .await
+            .expect("should return exists false");
+
+        assert_eq!(result.0, "feature");
+        assert!(result.1.is_none());
+        assert!(!result.2);
+    }
+
+    #[tokio::test]
+    async fn get_branch_returns_exists_false_for_branch_does_not_exist() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/.+/.+/branches/.+"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "message": "404 Branch Does Not Exist"
+            })))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let result = adapter
+            .get_branch(&test_repo(), "feature", &cred)
+            .await
+            .expect("should return exists false");
+
+        assert_eq!(result.0, "feature");
+        assert!(result.1.is_none());
+        assert!(!result.2);
+    }
+
+    #[tokio::test]
+    async fn get_branch_returns_exists_false_for_no_such_branch() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/.+/.+/branches/.+"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "message": "no such branch: feature"
+            })))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let result = adapter
+            .get_branch(&test_repo(), "feature", &cred)
+            .await
+            .expect("should return exists false");
+
+        assert!(!result.2);
+    }
+
+    #[tokio::test]
+    async fn get_branch_returns_error_for_repo_not_found() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/.+/.+/branches/.+"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "message": "repository not found"
+            })))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let result = adapter.get_branch(&test_repo(), "main", &cred).await;
+
+        let err = result.expect_err("expected error");
+        match err {
+            ForgeError::NotFound { status, .. } => {
+                assert_eq!(status, reqwest::StatusCode::NOT_FOUND);
+            }
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn get_branch_returns_details_for_existing_branch() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/.+/.+/branches/.+"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "name": "feature",
+                "commit": {"id": "abc123def456"}
+            })))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let (name, sha, exists) = adapter
+            .get_branch(&test_repo(), "feature", &cred)
+            .await
+            .expect("should return branch details");
+
+        assert_eq!(name, "feature");
+        assert_eq!(sha, Some("abc123def456".to_string()));
+        assert!(exists);
+    }
+
+    #[tokio::test]
+    async fn get_branch_404_with_empty_body_is_error() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/.+/.+/branches/.+"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let result = adapter.get_branch(&test_repo(), "main", &cred).await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn get_branch_404_repo_with_branch_in_name_is_error() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/.+/.+/branches/.+"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "message": "repository branch-service not found"
+            })))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let result = adapter.get_branch(&test_repo(), "main", &cred).await;
+
+        let err = result.expect_err("repo-not-found should remain an error");
+        match err {
+            ForgeError::NotFound { status, .. } => {
+                assert_eq!(status, reqwest::StatusCode::NOT_FOUND);
+            }
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn get_branch_401_unauthorized_is_error() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/.+/.+/branches/.+"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "Unauthorized"
+            })))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let result = adapter.get_branch(&test_repo(), "main", &cred).await;
+
+        assert!(result.is_err(), "401 should propagate as error");
+    }
+
+    #[tokio::test]
+    async fn get_branch_403_forbidden_is_error() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/.+/.+/branches/.+"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "message": "forbidden"
+            })))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let result = adapter.get_branch(&test_repo(), "main", &cred).await;
+
+        assert!(result.is_err(), "403 should propagate as error");
+    }
+
+    #[tokio::test]
+    async fn get_branch_500_internal_error_is_error() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/.+/.+/branches/.+"))
+            .respond_with(ResponseTemplate::new(500).set_body_json(serde_json::json!({
+                "message": "internal server error"
+            })))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let result = adapter.get_branch(&test_repo(), "main", &cred).await;
+
+        assert!(result.is_err(), "500 should propagate as error");
+    }
+
+    #[tokio::test]
+    async fn list_branches_uses_limit_pagination_param() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/org/repo/branches"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        adapter
+            .list_branches(&test_repo(), None, None, &cred)
+            .await
+            .expect("list branches");
+
+        let requests = mock.received_requests().await.expect("received requests");
+        assert_eq!(requests.len(), 1);
+        let url = requests[0].url.to_string();
+        assert!(
+            url.contains("limit=30"),
+            "expected limit=30 in URL, got: {url}"
+        );
+        assert!(
+            !url.contains("per_page="),
+            "should not contain per_page, got: {url}"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_branches_respects_limit() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/.+/.+/branches"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"name": "main", "commit": {"id": "aaa"}},
+                {"name": "dev", "commit": {"id": "bbb"}},
+                {"name": "feature-1", "commit": {"id": "ccc"}},
+                {"name": "feature-2", "commit": {"id": "ddd"}},
+                {"name": "feature-3", "commit": {"id": "eee"}}
+            ])))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let (branches, truncated) = adapter
+            .list_branches(&test_repo(), None, Some(2), &cred)
+            .await
+            .expect("list branches");
+
+        assert_eq!(branches.len(), 2);
+        assert_eq!(branches[0].name, "main");
+        assert_eq!(branches[1].name, "dev");
+        assert!(!truncated);
+    }
+
+    #[tokio::test]
+    async fn list_branches_prefix_filter() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/.+/.+/branches"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"name": "main", "commit": {"id": "aaa"}},
+                {"name": "feature-a", "commit": {"id": "bbb"}},
+                {"name": "feature-b", "commit": {"id": "ccc"}},
+                {"name": "bugfix-1", "commit": {"id": "ddd"}}
+            ])))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let (branches, _truncated) = adapter
+            .list_branches(&test_repo(), Some("feature"), None, &cred)
+            .await
+            .expect("list branches");
+
+        assert_eq!(branches.len(), 2);
+        assert_eq!(branches[0].name, "feature-a");
+        assert_eq!(branches[1].name, "feature-b");
+    }
+
+    #[tokio::test]
+    async fn list_branches_multipage_pagination() {
+        fn branch_data(n: usize) -> serde_json::Value {
+            serde_json::json!(
+                (0..n)
+                    .map(|i| serde_json::json!({
+                        "name": format!("branch-{:02}", i),
+                        "commit": {"id": format!("sha{:02}", i)}
+                    }))
+                    .collect::<Vec<_>>()
+            )
+        }
+
+        let mock = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/.+/.+/branches"))
+            .and(query_param("page", "1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(branch_data(30)))
+            .mount(&mock)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/.+/.+/branches"))
+            .and(query_param("page", "2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(branch_data(5)))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let (branches, truncated) = adapter
+            .list_branches(&test_repo(), None, None, &cred)
+            .await
+            .expect("list branches");
+
+        // Default limit 20, page returns 30 so gets 20 from first page, stops
+        assert_eq!(branches.len(), 20);
+        assert!(!truncated);
+    }
+
+    #[tokio::test]
+    async fn list_branches_multipage_with_high_limit() {
+        fn branch_data(count: usize, offset: usize) -> serde_json::Value {
+            serde_json::json!(
+                (0..count)
+                    .map(|i| serde_json::json!({
+                        "name": format!("branch-{:02}", offset + i),
+                        "commit": {"id": format!("sha{:02}", offset + i)}
+                    }))
+                    .collect::<Vec<_>>()
+            )
+        }
+
+        let mock = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/.+/.+/branches"))
+            .and(query_param("page", "1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(branch_data(30, 0)))
+            .mount(&mock)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/.+/.+/branches"))
+            .and(query_param("page", "2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(branch_data(25, 30)))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let (branches, truncated) = adapter
+            .list_branches(&test_repo(), None, Some(50), &cred)
+            .await
+            .expect("list branches");
+
+        // 30 from page1 + 20 from page2 = 50 (target_limit capped at min(50, 100)=50)
+        assert_eq!(branches.len(), 50);
+        assert!(!truncated);
+    }
+
+    #[tokio::test]
+    async fn list_branches_truncated_when_pages_exceeded() {
+        fn branch_data(n: usize) -> serde_json::Value {
+            serde_json::json!(
+                (0..n)
+                    .map(|i| serde_json::json!({
+                        "name": format!("branch-{:02}", i),
+                        "commit": {"id": format!("sha{:02}", i)}
+                    }))
+                    .collect::<Vec<_>>()
+            )
+        }
+
+        let mock = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/.+/.+/branches"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(branch_data(30)))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let (branches, truncated) = adapter
+            .list_branches(&test_repo(), None, None, &cred)
+            .await
+            .expect("list branches");
+
+        // Default limit 20, first page returns 30, so gets 20 from one page
+        assert_eq!(branches.len(), 20);
+        assert!(!truncated);
+
+        // Verify multiple requests were received and check received request count
+        let requests = mock.received_requests().await.expect("received requests");
+        assert_eq!(requests.len(), 1, "should only fetch 1 page for limit=20");
+    }
+
+    #[tokio::test]
+    async fn list_branches_scan_budget_limit() {
+        fn branch_data(n: usize) -> serde_json::Value {
+            serde_json::json!(
+                (0..n)
+                    .map(|i| serde_json::json!({
+                        "name": format!("branch-{:02}", i),
+                        "commit": {"id": format!("sha{:02}", i)}
+                    }))
+                    .collect::<Vec<_>>()
+            )
+        }
+
+        let mock = MockServer::start().await;
+
+        // Return 30 per page (full page) so adapter keeps paginating
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/.+/.+/branches"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(branch_data(30)))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let (branches, truncated) = adapter
+            .list_branches(&test_repo(), None, Some(999), &cred)
+            .await
+            .expect("list branches");
+
+        // MAX_PAGES=5 * PAGE_SIZE=30 = 150, capped at target_limit=100 by min(999,100)
+        // Actually min(999, 100) = 100, so after page 4 we have 120 >= 100, stops without truncation
+        assert_eq!(branches.len(), 100);
+        assert!(!truncated);
+
+        let requests = mock.received_requests().await.expect("received requests");
+        // Should be 4 pages: 30*3=90, then 30 on page 4 brings to 120 >= 100
+        assert!(
+            requests.len() >= 2,
+            "should have made multiple page requests, got {}",
+            requests.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn list_branches_truncated_true_when_prefix_matches_none() {
+        fn branch_data(n: usize) -> serde_json::Value {
+            serde_json::json!(
+                (0..n)
+                    .map(|i| serde_json::json!({
+                        "name": format!("other-{:02}", i),
+                        "commit": {"id": format!("sha{:02}", i)}
+                    }))
+                    .collect::<Vec<_>>()
+            )
+        }
+
+        let mock = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/.+/.+/branches"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(branch_data(30)))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let (branches, truncated) = adapter
+            .list_branches(&test_repo(), Some("feature-"), Some(200), &cred)
+            .await
+            .expect("list branches");
+
+        // prefix "feature-" matches none of "other-XX" branches, so all 5 pages
+        // are fetched (MAX_PAGES=5, PAGE_SIZE=30) with zero matching results.
+        assert_eq!(branches.len(), 0);
+        assert!(
+            truncated,
+            "expected truncation when pages exhausted without matching prefix"
+        );
+
+        let requests = mock.received_requests().await.expect("received requests");
+        assert_eq!(
+            requests.len(),
+            5,
+            "should have exhausted all 5 pages before truncating"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_branch_encodes_special_branch_name() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/org/repo/branches/feature%2F"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "name": "feature/foo?bar",
+                "commit": {"id": "abc123def456"}
+            })))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let (name, sha, exists) = adapter
+            .get_branch(&test_repo(), "feature/foo?bar", &cred)
+            .await
+            .expect("should return branch details");
+
+        assert_eq!(name, "feature/foo?bar");
+        assert_eq!(sha, Some("abc123def456".to_string()));
+        assert!(exists);
+
+        // Verify the branch name was URL-encoded in the request
+        let requests = mock.received_requests().await.expect("received requests");
+        assert_eq!(requests.len(), 1);
+        let path = requests[0].url.path().to_string();
+        assert!(
+            path.contains("feature%2F"),
+            "branch name slash should be URL-encoded: {path}"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_branch_encodes_forward_slash_in_branch_name() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/org/repo/branches/feature"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "message": "Branch not found"
+            })))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let result = adapter
+            .get_branch(&test_repo(), "feature/test", &cred)
+            .await
+            .expect("should return exists false");
+
+        assert_eq!(result.0, "feature/test");
+        assert!(result.1.is_none());
+        assert!(!result.2);
+
+        // Verify URL-encoded branch name in request
+        let requests = mock.received_requests().await.expect("received requests");
+        let path = requests[0].url.path().to_string();
+        assert!(
+            path.ends_with("feature%2Ftest"),
+            "expected URL-encoded branch name, got: {path}"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_branch_with_slash_returns_error_for_repo_not_found() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/org/repo/branches/"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "message": "repository not found"
+            })))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let result = adapter
+            .get_branch(&test_repo(), "feature/test", &cred)
+            .await;
+
+        assert!(result.is_err(), "repo-not-found should be an error");
+    }
+
+    #[tokio::test]
+    async fn list_branches_encodes_prefix_with_special_chars() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/.+/.+/branches"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"name": "feature/foo?bar", "commit": {"id": "aaa"}}
+            ])))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let (branches, _truncated) = adapter
+            .list_branches(&test_repo(), Some("feature/foo?bar"), None, &cred)
+            .await
+            .expect("list branches");
+
+        assert_eq!(branches.len(), 1);
+
+        // Verify the prefix was URL-encoded in the query parameter
+        let requests = mock.received_requests().await.expect("received requests");
+        assert_eq!(requests.len(), 1);
+        let url = requests[0].url.to_string();
+        assert!(
+            url.contains("pattern=feature%2Ffoo%3Fbar")
+                || url.contains("pattern=feature%2ffoo%3fbar"),
+            "expected URL-encoded prefix in pattern param: {url}"
         );
     }
 }

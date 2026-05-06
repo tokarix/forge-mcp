@@ -384,6 +384,32 @@ pub struct GetIssueDependenciesTool {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct GetBranchTool {
+    /// Branch name to look up.
+    pub branch: String,
+    /// Forge alias -- use `forge_info` to discover available aliases.
+    pub forge: String,
+    /// Repository owner or organization.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ListBranchesTool {
+    /// Forge alias -- use `forge_info` to discover available aliases.
+    pub forge: String,
+    /// Maximum number of branches to return.
+    pub limit: Option<u32>,
+    /// Repository owner or organization.
+    pub owner: String,
+    /// Optional prefix to filter branches by name.
+    pub prefix: Option<String>,
+    /// Repository name.
+    pub repo: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct ListChangeRequestsTool {
     /// Forge alias -- use `forge_info` to discover available aliases.
     pub forge: String,
@@ -1810,6 +1836,65 @@ impl McpShim {
         self.gateway_get(url, &gw.token).await
     }
 
+    /// Get details about a specific branch, including whether it exists.
+    #[tool(
+        name = "get_branch",
+        description = "Get branch details by name. Returns branch information with an explicit `exists` flag. Returns `exists: false` only for a confirmed missing branch; repository, auth, or upstream errors remain errors."
+    )]
+    async fn get_branch(
+        &self,
+        Parameters(request): Parameters<GetBranchTool>,
+    ) -> Result<String, McpError> {
+        let gw = self.resolve_gateway(&request.forge).await?;
+        let mut url = Self::build_url(
+            &gw.url,
+            &[
+                "api",
+                "v1",
+                "repos",
+                &request.forge,
+                &request.owner,
+                &request.repo,
+                "branches",
+                "by-name",
+            ],
+        )?;
+        url.query_pairs_mut().append_pair("branch", &request.branch);
+        self.gateway_get(url, &gw.token).await
+    }
+
+    /// List branches in a repository, optionally filtered by prefix.
+    #[tool(
+        name = "list_branches",
+        description = "List branches in a repository. Accepts an optional `prefix` to filter branch names and a `limit` to cap results (default ~20, max ~100). Results may be truncated if the pagination budget is exceeded."
+    )]
+    async fn list_branches(
+        &self,
+        Parameters(request): Parameters<ListBranchesTool>,
+    ) -> Result<String, McpError> {
+        let gw = self.resolve_gateway(&request.forge).await?;
+        let mut url = Self::build_url(
+            &gw.url,
+            &[
+                "api",
+                "v1",
+                "repos",
+                &request.forge,
+                &request.owner,
+                &request.repo,
+                "branches",
+            ],
+        )?;
+        if let Some(prefix) = &request.prefix {
+            url.query_pairs_mut().append_pair("prefix", prefix);
+        }
+        if let Some(limit) = request.limit {
+            url.query_pairs_mut()
+                .append_pair("limit", &limit.to_string());
+        }
+        self.gateway_get(url, &gw.token).await
+    }
+
     /// List issues for a repository.
     #[tool(name = "list_issues", description = "List issues for a repository.")]
     async fn list_issues(
@@ -2648,6 +2733,105 @@ mod tests {
         let url = McpShim::build_url("https://example.com", &segments)
             .expect("build url with nested path");
         assert_eq!(url.path(), "/api/v1/repos/org/repo/contents/src/main.rs");
+    }
+
+    #[test]
+    fn get_branch_url_construction() {
+        let mut url = McpShim::build_url(
+            "https://gateway.example",
+            &[
+                "api",
+                "v1",
+                "repos",
+                "adlevio",
+                "tokarix",
+                "forge-mcp",
+                "branches",
+                "by-name",
+            ],
+        )
+        .expect("build url");
+        url.query_pairs_mut().append_pair("branch", "feature");
+        assert_eq!(
+            url.path(),
+            "/api/v1/repos/adlevio/tokarix/forge-mcp/branches/by-name"
+        );
+        let query = url.query().expect("should have query");
+        assert_eq!(query, "branch=feature");
+    }
+
+    #[test]
+    fn get_branch_url_encodes_special_branch_name_in_query() {
+        let mut url = McpShim::build_url(
+            "https://gateway.example",
+            &[
+                "api",
+                "v1",
+                "repos",
+                "adlevio",
+                "tokarix",
+                "forge-mcp",
+                "branches",
+                "by-name",
+            ],
+        )
+        .expect("build url");
+        url.query_pairs_mut()
+            .append_pair("branch", "feature/foo?bar&baz");
+        let query = url.query().expect("should have query");
+        assert!(
+            !query.contains("feature/foo"),
+            "slash in branch name should be encoded: {query}"
+        );
+        assert!(
+            query.contains("feature%2Ffoo%3Fbar%26baz")
+                || query.contains("feature%2ffoo%3fbar%26baz"),
+            "expected encoded branch name: {query}"
+        );
+    }
+
+    #[test]
+    fn list_branches_url_construction() {
+        let url = McpShim::build_url(
+            "https://gateway.example",
+            &[
+                "api",
+                "v1",
+                "repos",
+                "adlevio",
+                "tokarix",
+                "forge-mcp",
+                "branches",
+            ],
+        )
+        .expect("build url");
+        assert_eq!(
+            url.path(),
+            "/api/v1/repos/adlevio/tokarix/forge-mcp/branches"
+        );
+        assert!(url.query().is_none());
+    }
+
+    #[test]
+    fn list_branches_url_with_prefix_and_limit() {
+        let mut url = McpShim::build_url(
+            "https://gateway.example",
+            &[
+                "api",
+                "v1",
+                "repos",
+                "adlevio",
+                "tokarix",
+                "forge-mcp",
+                "branches",
+            ],
+        )
+        .expect("build url");
+        url.query_pairs_mut().append_pair("prefix", "feature");
+        url.query_pairs_mut().append_pair("limit", "50");
+        let query = url.query().expect("should have query");
+        assert!(query.contains("prefix=feature"));
+        assert!(query.contains("limit=50"));
     }
 
     #[test]

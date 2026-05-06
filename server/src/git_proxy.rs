@@ -714,6 +714,25 @@ mod tests {
         ) -> Result<domain::Issue, forge::ForgeError> {
             unimplemented!()
         }
+
+        async fn list_branches(
+            &self,
+            _: &domain::RepositoryRef,
+            _: Option<&str>,
+            _: Option<u32>,
+            _: &domain::ForgeCredential,
+        ) -> Result<(Vec<domain::Branch>, bool), forge::ForgeError> {
+            unimplemented!()
+        }
+
+        async fn get_branch(
+            &self,
+            _: &domain::RepositoryRef,
+            _: &str,
+            _: &domain::ForgeCredential,
+        ) -> Result<(String, Option<String>, bool), forge::ForgeError> {
+            unimplemented!()
+        }
     }
 
     struct FakeReadService;
@@ -820,6 +839,22 @@ mod tests {
                 title: "Fix".to_string(),
                 url: "https://example.com/pulls/1".to_string(),
             })
+        }
+
+        async fn list_branches(
+            &self,
+            _: domain::ListBranchesRequest,
+            _: &domain::ForgeCredential,
+        ) -> Result<domain::ListBranchesResponse, ServiceError> {
+            unimplemented!()
+        }
+
+        async fn get_branch(
+            &self,
+            _: domain::GetBranchRequest,
+            _: &domain::ForgeCredential,
+        ) -> Result<domain::BranchDetails, ServiceError> {
+            unimplemented!()
         }
     }
 

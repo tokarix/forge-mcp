@@ -305,6 +305,37 @@ pub struct ErrorBody {
     pub error: String,
 }
 
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ListBranchesResponse {
+    pub branches: Vec<BranchItem>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct BranchItem {
+    pub name: String,
+    pub commit_sha: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct BranchDetailsResult {
+    pub exists: bool,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit_sha: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ListBranchesQuery {
+    pub prefix: Option<String>,
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GetBranchQuery {
+    pub branch: String,
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {

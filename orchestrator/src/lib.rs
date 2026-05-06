@@ -5,14 +5,15 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use audit::{AuditRecord, AuditSink};
 use domain::{
-    AddIssueDependencyRequest, AddIssueLabelRequest, AssignIssueRequest, ChangeRequest,
-    ChangeRequestCiDetails, ChangeRequestComment, ChangeRequestCommentDetail, ChangeRequestDiff,
-    ChangeRequestReview, CloseChangeRequestRequest, CloseIssueRequest, CombinedCommitStatus,
-    CommentOnChangeRequestRequest, CommentOnIssueRequest, CreateIssueRequest, ForgeCredential,
-    GetChangeRequestChecksRequest, GetChangeRequestCiDetailsRequest,
-    GetChangeRequestCommentsRequest, GetChangeRequestDiffRequest, GetChangeRequestRequest,
-    GetIssueCommentsRequest, GetIssueDependenciesRequest, GetIssueRequest, Issue, IssueComment,
-    IssueDependencies, ListChangeRequestsRequest, ListIssuesRequest, ReadRepositoryFileRequest,
+    AddIssueDependencyRequest, AddIssueLabelRequest, AssignIssueRequest, BranchDetails,
+    ChangeRequest, ChangeRequestCiDetails, ChangeRequestComment, ChangeRequestCommentDetail,
+    ChangeRequestDiff, ChangeRequestReview, CloseChangeRequestRequest, CloseIssueRequest,
+    CombinedCommitStatus, CommentOnChangeRequestRequest, CommentOnIssueRequest, CreateIssueRequest,
+    ForgeCredential, GetBranchRequest, GetChangeRequestChecksRequest,
+    GetChangeRequestCiDetailsRequest, GetChangeRequestCommentsRequest, GetChangeRequestDiffRequest,
+    GetChangeRequestRequest, GetIssueCommentsRequest, GetIssueDependenciesRequest, GetIssueRequest,
+    Issue, IssueComment, IssueDependencies, ListBranchesRequest, ListBranchesResponse,
+    ListChangeRequestsRequest, ListIssuesRequest, ReadRepositoryFileRequest,
     ReadRepositoryFileResponse, RebaseBranchRequest, RebaseBranchResponse,
     RemoveIssueDependencyRequest, RemoveIssueLabelRequest, RepositoryReadService,
     ScheduleAutoMergeRequest, ServiceError, SubmitChangeRequestReviewRequest,
@@ -348,6 +349,66 @@ where
             .list_issues(&request.repository, request.state.as_deref(), credential)
             .await
             .map_err(|e| ServiceError::Upstream(e.to_string()))
+    }
+
+    async fn list_branches(
+        &self,
+        request: ListBranchesRequest,
+        credential: &ForgeCredential,
+    ) -> Result<ListBranchesResponse, ServiceError> {
+        self.audit_sink
+            .record(AuditRecord {
+                agent: request.agent.clone(),
+                action: "list_branches".to_string(),
+                repository: request.repository.clone(),
+                target: request.prefix.clone().unwrap_or_else(|| "*".to_string()),
+            })
+            .await
+            .map_err(|e| ServiceError::Audit(e.to_string()))?;
+
+        let (branches, truncated) = self
+            .adapter
+            .list_branches(
+                &request.repository,
+                request.prefix.as_deref(),
+                request.limit,
+                credential,
+            )
+            .await
+            .map_err(|e| ServiceError::Upstream(e.to_string()))?;
+
+        Ok(ListBranchesResponse {
+            branches,
+            truncated,
+        })
+    }
+
+    async fn get_branch(
+        &self,
+        request: GetBranchRequest,
+        credential: &ForgeCredential,
+    ) -> Result<BranchDetails, ServiceError> {
+        self.audit_sink
+            .record(AuditRecord {
+                agent: request.agent.clone(),
+                action: "get_branch".to_string(),
+                repository: request.repository.clone(),
+                target: request.branch.clone(),
+            })
+            .await
+            .map_err(|e| ServiceError::Audit(e.to_string()))?;
+
+        let (name, commit_sha, exists) = self
+            .adapter
+            .get_branch(&request.repository, &request.branch, credential)
+            .await
+            .map_err(|e| ServiceError::Upstream(e.to_string()))?;
+
+        Ok(BranchDetails {
+            name,
+            commit_sha,
+            exists,
+        })
     }
 }
 
@@ -1452,7 +1513,7 @@ mod tests {
 
     use audit::{AuditError, AuditRecord, AuditSink, InMemoryAuditSink};
     use domain::{
-        AgentIdentity, ChangeRequest, ChangeRequestCommentDetail, ChangeRequestState,
+        AgentIdentity, Branch, ChangeRequest, ChangeRequestCommentDetail, ChangeRequestState,
         CloseChangeRequestRequest, CloseIssueRequest, CommentOnChangeRequestRequest,
         CommitPatchRequest, ForgeCredential, ForgeKind, IssueComment, OpenChangeRequestRequest,
         ReadRepositoryFileRequest, RepositoryReadService, RepositoryRef, RepositoryWriteService,
@@ -1845,6 +1906,29 @@ mod tests {
                 "unimplemented in test fake".into(),
             ))
         }
+
+        async fn list_branches(
+            &self,
+            _: &RepositoryRef,
+            _: Option<&str>,
+            _: Option<u32>,
+            _: &ForgeCredential,
+        ) -> Result<(Vec<Branch>, bool), ForgeError> {
+            Err(forge::ForgeError::Unsupported(
+                "unimplemented in test fake".into(),
+            ))
+        }
+
+        async fn get_branch(
+            &self,
+            _: &RepositoryRef,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<(String, Option<String>, bool), ForgeError> {
+            Err(forge::ForgeError::Unsupported(
+                "unimplemented in test fake".into(),
+            ))
+        }
     }
 
     struct FailingForgeAdapter;
@@ -2200,6 +2284,29 @@ mod tests {
             _body: Option<&str>,
             _credential: &domain::ForgeCredential,
         ) -> Result<domain::Issue, ForgeError> {
+            Err(forge::ForgeError::Unsupported(
+                "unimplemented in test fake".into(),
+            ))
+        }
+
+        async fn list_branches(
+            &self,
+            _: &RepositoryRef,
+            _: Option<&str>,
+            _: Option<u32>,
+            _: &ForgeCredential,
+        ) -> Result<(Vec<Branch>, bool), ForgeError> {
+            Err(forge::ForgeError::Unsupported(
+                "unimplemented in test fake".into(),
+            ))
+        }
+
+        async fn get_branch(
+            &self,
+            _: &RepositoryRef,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<(String, Option<String>, bool), ForgeError> {
             Err(forge::ForgeError::Unsupported(
                 "unimplemented in test fake".into(),
             ))
@@ -2766,6 +2873,29 @@ mod tests {
             _: Option<&str>,
             _: &ForgeCredential,
         ) -> Result<domain::Issue, ForgeError> {
+            Err(forge::ForgeError::Unsupported(
+                "unimplemented in test fake".into(),
+            ))
+        }
+
+        async fn list_branches(
+            &self,
+            _: &RepositoryRef,
+            _: Option<&str>,
+            _: Option<u32>,
+            _: &ForgeCredential,
+        ) -> Result<(Vec<Branch>, bool), ForgeError> {
+            Err(forge::ForgeError::Unsupported(
+                "unimplemented in test fake".into(),
+            ))
+        }
+
+        async fn get_branch(
+            &self,
+            _: &RepositoryRef,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<(String, Option<String>, bool), ForgeError> {
             Err(forge::ForgeError::Unsupported(
                 "unimplemented in test fake".into(),
             ))
@@ -3396,6 +3526,29 @@ mod tests {
                     repository.owner, repository.name
                 ),
             })
+        }
+
+        async fn list_branches(
+            &self,
+            _: &RepositoryRef,
+            _: Option<&str>,
+            _: Option<u32>,
+            _: &ForgeCredential,
+        ) -> Result<(Vec<Branch>, bool), ForgeError> {
+            Err(forge::ForgeError::Unsupported(
+                "unimplemented in test fake".into(),
+            ))
+        }
+
+        async fn get_branch(
+            &self,
+            _: &RepositoryRef,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<(String, Option<String>, bool), ForgeError> {
+            Err(forge::ForgeError::Unsupported(
+                "unimplemented in test fake".into(),
+            ))
         }
     }
 
@@ -4158,6 +4311,29 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
                 "unimplemented in test fake".into(),
             ))
         }
+
+        async fn list_branches(
+            &self,
+            _: &RepositoryRef,
+            _: Option<&str>,
+            _: Option<u32>,
+            _: &ForgeCredential,
+        ) -> Result<(Vec<Branch>, bool), ForgeError> {
+            Err(forge::ForgeError::Unsupported(
+                "unimplemented in test fake".into(),
+            ))
+        }
+
+        async fn get_branch(
+            &self,
+            _: &RepositoryRef,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<(String, Option<String>, bool), ForgeError> {
+            Err(forge::ForgeError::Unsupported(
+                "unimplemented in test fake".into(),
+            ))
+        }
     }
 
     fn close_test_request(index: u64) -> CloseChangeRequestRequest {
@@ -4755,6 +4931,29 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
                 "unimplemented in test fake".into(),
             ))
         }
+
+        async fn list_branches(
+            &self,
+            _: &RepositoryRef,
+            _: Option<&str>,
+            _: Option<u32>,
+            _: &ForgeCredential,
+        ) -> Result<(Vec<Branch>, bool), ForgeError> {
+            Err(forge::ForgeError::Unsupported(
+                "unimplemented in test fake".into(),
+            ))
+        }
+
+        async fn get_branch(
+            &self,
+            _: &RepositoryRef,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<(String, Option<String>, bool), ForgeError> {
+            Err(forge::ForgeError::Unsupported(
+                "unimplemented in test fake".into(),
+            ))
+        }
     }
 
     #[tokio::test]
@@ -5199,6 +5398,29 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             _: Option<&str>,
             _: &domain::ForgeCredential,
         ) -> Result<domain::Issue, ForgeError> {
+            Err(forge::ForgeError::Unsupported(
+                "unimplemented in test fake".into(),
+            ))
+        }
+
+        async fn list_branches(
+            &self,
+            _: &RepositoryRef,
+            _: Option<&str>,
+            _: Option<u32>,
+            _: &ForgeCredential,
+        ) -> Result<(Vec<Branch>, bool), ForgeError> {
+            Err(forge::ForgeError::Unsupported(
+                "unimplemented in test fake".into(),
+            ))
+        }
+
+        async fn get_branch(
+            &self,
+            _: &RepositoryRef,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<(String, Option<String>, bool), ForgeError> {
             Err(forge::ForgeError::Unsupported(
                 "unimplemented in test fake".into(),
             ))
@@ -6386,6 +6608,25 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             _: Option<&str>,
             _: &ForgeCredential,
         ) -> Result<domain::Issue, ForgeError> {
+            Err(ForgeError::Unsupported("test fake".into()))
+        }
+
+        async fn list_branches(
+            &self,
+            _: &RepositoryRef,
+            _: Option<&str>,
+            _: Option<u32>,
+            _: &ForgeCredential,
+        ) -> Result<(Vec<Branch>, bool), ForgeError> {
+            Err(ForgeError::Unsupported("test fake".into()))
+        }
+
+        async fn get_branch(
+            &self,
+            _: &RepositoryRef,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<(String, Option<String>, bool), ForgeError> {
             Err(ForgeError::Unsupported("test fake".into()))
         }
     }
