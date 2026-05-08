@@ -702,6 +702,41 @@ impl ForgejoAdapter {
         }
     }
 
+    /// Verifies that the repository is accessible by hitting the repo endpoint.
+    /// Returns `Ok(true)` if the repo exists, `Ok(false)` if not found,
+    /// and `Err` for other failures (network, auth, etc.).
+    async fn verify_repo_exists(
+        &self,
+        repository: &RepositoryRef,
+        credential: &ForgeCredential,
+    ) -> Result<bool, ForgeError> {
+        let url = format!(
+            "{}/api/v1/repos/{}/{}",
+            self.config.base_url.trim_end_matches('/'),
+            repository.owner,
+            repository.name,
+        );
+        let effective_token = credential.token.as_deref().or(self.config.token.as_deref());
+        let mut request = self.client.get(&url);
+        if let Some(token) = effective_token {
+            request = request.bearer_auth(token);
+        }
+        let response = request.send().await?;
+        let status = response.status();
+        // Consume the body to free the response
+        let _ = response.text().await;
+        if status == reqwest::StatusCode::NOT_FOUND {
+            Ok(false)
+        } else if status.is_success() {
+            Ok(true)
+        } else {
+            Err(ForgeError::UnexpectedStatus {
+                status,
+                body: format!("unexpected status {status} while verifying repository"),
+            })
+        }
+    }
+
     /// # Errors
     ///
     /// Returns an error if the HTTP client cannot be built.
@@ -2548,19 +2583,49 @@ impl ForgeAdapter for ForgejoAdapter {
 
         if status == reqwest::StatusCode::NOT_FOUND {
             let body = response.text().await.unwrap_or_default();
-            if let Some(msg) = parse_forge_error_message(&body) {
-                let msg_lower = msg.to_lowercase();
+            let msg = parse_forge_error_message(&body);
+
+            if let Some(ref m) = msg {
+                let msg_lower = m.to_lowercase();
+                // Fast path: explicit branch-missing messages
                 if msg_lower.contains("branch not found")
                     || msg_lower.contains("no such branch")
                     || msg_lower.contains("branch does not exist")
                 {
                     return Ok((branch.to_string(), None, false));
                 }
+
+                // Ambiguous 404 — verify repository exists to distinguish
+                // between missing branch and missing repository.
+                if msg_lower.contains("the target couldn't be found") {
+                    match self.verify_repo_exists(repository, credential).await {
+                        Ok(true) => return Ok((branch.to_string(), None, false)),
+                        Ok(false) => {
+                            return Err(ForgeError::NotFound {
+                                status,
+                                message: m.clone(),
+                            });
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+            } else {
+                // Empty body — also verify repository exists.
+                match self.verify_repo_exists(repository, credential).await {
+                    Ok(true) => return Ok((branch.to_string(), None, false)),
+                    Ok(false) => {
+                        return Err(ForgeError::NotFound {
+                            status,
+                            message: "repository or resource not found".to_string(),
+                        });
+                    }
+                    Err(e) => return Err(e),
+                }
             }
+
             return Err(ForgeError::NotFound {
                 status,
-                message: parse_forge_error_message(&body)
-                    .unwrap_or_else(|| "repository or resource not found".to_string()),
+                message: msg.unwrap_or_else(|| "repository or resource not found".to_string()),
             });
         }
 
@@ -5676,5 +5741,162 @@ mod tests {
                 || url.contains("pattern=feature%2ffoo%3fbar"),
             "expected URL-encoded prefix in pattern param: {url}"
         );
+    }
+
+    #[tokio::test]
+    async fn get_branch_returns_exists_false_for_ambiguous_404_when_repo_exists() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/.+/branches/.+"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "message": "The target couldn't be found."
+            })))
+            .mount(&mock)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/org/repo$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": 1, "name": "repo", "full_name": "org/repo"
+            })))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let (name, sha, exists) = adapter
+            .get_branch(&test_repo(), "feature", &cred)
+            .await
+            .expect("should return exists false");
+
+        assert_eq!(name, "feature");
+        assert!(sha.is_none());
+        assert!(!exists);
+    }
+
+    #[tokio::test]
+    async fn get_branch_returns_exists_false_for_empty_404_when_repo_exists() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/.+/branches/.+"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&mock)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/org/repo$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": 1, "name": "repo", "full_name": "org/repo"
+            })))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let (name, sha, exists) = adapter
+            .get_branch(&test_repo(), "feature", &cred)
+            .await
+            .expect("should return exists false");
+
+        assert_eq!(name, "feature");
+        assert!(sha.is_none());
+        assert!(!exists);
+    }
+
+    #[tokio::test]
+    async fn get_branch_returns_error_for_ambiguous_404_when_repo_missing() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/.+/branches/.+"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "message": "The target couldn't be found."
+            })))
+            .mount(&mock)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/org/repo$"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "message": "Repository not found"
+            })))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let result = adapter.get_branch(&test_repo(), "feature", &cred).await;
+
+        let err = result.expect_err("should return error when repo is missing");
+        match err {
+            ForgeError::NotFound { status, .. } => {
+                assert_eq!(status, StatusCode::NOT_FOUND);
+            }
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn get_branch_returns_error_for_empty_404_when_repo_missing() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/.+/branches/.+"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&mock)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/org/repo$"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "message": "Repository not found"
+            })))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let result = adapter.get_branch(&test_repo(), "feature", &cred).await;
+
+        let err = result.expect_err("should return error when repo is missing");
+        match err {
+            ForgeError::NotFound { status, .. } => {
+                assert_eq!(status, StatusCode::NOT_FOUND);
+            }
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn get_branch_401_repo_verification_is_error() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/.+/branches/.+"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "message": "The target couldn't be found."
+            })))
+            .mount(&mock)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/org/repo$"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let result = adapter.get_branch(&test_repo(), "feature", &cred).await;
+
+        let err = result.expect_err("should return error on auth failure");
+        match err {
+            ForgeError::UnexpectedStatus { status, .. } => {
+                assert_eq!(status, StatusCode::UNAUTHORIZED);
+            }
+            other => panic!("expected UnexpectedStatus, got {other:?}"),
+        }
     }
 }

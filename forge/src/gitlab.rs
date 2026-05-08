@@ -1513,19 +1513,37 @@ impl crate::ForgeAdapter for GitLabAdapter {
 
         if status == StatusCode::NOT_FOUND {
             let body = response.text().await.unwrap_or_default();
-            if let Some(msg) = crate::parse_forge_error_message(&body) {
-                let msg_lower = msg.to_lowercase();
+            let msg = crate::parse_forge_error_message(&body);
+
+            if let Some(ref m) = msg {
+                let msg_lower = m.to_lowercase();
+                // Fast path: explicit branch-missing messages
                 if msg_lower.contains("branch not found")
                     || msg_lower.contains("no such branch")
                     || msg_lower.contains("branch does not exist")
                 {
                     return Ok((branch.to_string(), None, false));
                 }
+
+                // Ambiguous 404 — verify project exists to distinguish
+                // between missing branch and missing project.
+                if msg_lower.contains("the target couldn't be found") {
+                    match self.get_project(repository, credential).await {
+                        Ok(_) => return Ok((branch.to_string(), None, false)),
+                        Err(e) => return Err(e),
+                    }
+                }
+            } else {
+                // Empty body — also verify project exists.
+                match self.get_project(repository, credential).await {
+                    Ok(_) => return Ok((branch.to_string(), None, false)),
+                    Err(e) => return Err(e),
+                }
             }
+
             return Err(ForgeError::NotFound {
                 status,
-                message: crate::parse_forge_error_message(&body)
-                    .unwrap_or_else(|| "repository or resource not found".to_string()),
+                message: msg.unwrap_or_else(|| "repository or resource not found".to_string()),
             });
         }
         let response = Self::check_response(response).await?;
@@ -3022,5 +3040,154 @@ mod tests {
                 || url.contains("search=feature%2ffoo%3fbar"),
             "expected URL-encoded prefix in search param: {url}"
         );
+    }
+
+    #[tokio::test]
+    async fn gitlab_get_branch_exists_false_for_ambiguous_404_when_project_exists() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/projects/.+/repository/branches/.+"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "message": "The target couldn't be found."
+            })))
+            .mount(&mock)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v4/projects/group%2Fsubgroup%2Frepo$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": 1, "name": "repo", "path_with_namespace": "group/subgroup/repo"
+            })))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let result = adapter
+            .get_branch(&test_repo(), "feature", &cred)
+            .await
+            .expect("should return exists false");
+
+        assert_eq!(result.0, "feature");
+        assert!(result.1.is_none());
+        assert!(!result.2);
+    }
+
+    #[tokio::test]
+    async fn gitlab_get_branch_exists_false_for_empty_404_when_project_exists() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/projects/.+/repository/branches/.+"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&mock)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v4/projects/group%2Fsubgroup%2Frepo$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": 1, "name": "repo", "path_with_namespace": "group/subgroup/repo"
+            })))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let result = adapter
+            .get_branch(&test_repo(), "feature", &cred)
+            .await
+            .expect("should return exists false");
+
+        assert_eq!(result.0, "feature");
+        assert!(!result.2);
+    }
+
+    #[tokio::test]
+    async fn gitlab_get_branch_error_for_ambiguous_404_when_project_missing() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/projects/.+/repository/branches/.+"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "message": "The target couldn't be found."
+            })))
+            .mount(&mock)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v4/projects/group%2Fsubgroup%2Frepo$"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "message": "404 Project Not Found"
+            })))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let result = adapter.get_branch(&test_repo(), "feature", &cred).await;
+
+        let err = result.expect_err("should return error when project is missing");
+        match err {
+            ForgeError::NotFound { status, .. } => {
+                assert_eq!(status, StatusCode::NOT_FOUND);
+            }
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn gitlab_get_branch_error_for_empty_404_when_project_missing() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/projects/.+/repository/branches/.+"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&mock)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v4/projects/group%2Fsubgroup%2Frepo$"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "message": "404 Project Not Found"
+            })))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let result = adapter.get_branch(&test_repo(), "feature", &cred).await;
+
+        let err = result.expect_err("should return error when project is missing");
+        match err {
+            ForgeError::NotFound { status, .. } => {
+                assert_eq!(status, StatusCode::NOT_FOUND);
+            }
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn gitlab_get_branch_exists_false_for_no_such_branch() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/projects/.+/repository/branches/.+"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "message": "No such branch"
+            })))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let result = adapter
+            .get_branch(&test_repo(), "feature", &cred)
+            .await
+            .expect("should return exists false");
+
+        assert_eq!(result.0, "feature");
+        assert!(result.1.is_none());
+        assert!(!result.2);
     }
 }
