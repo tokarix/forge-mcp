@@ -447,6 +447,7 @@ mod tests {
             &self,
             _: &domain::RepositoryRef,
             _: u64,
+            _: &domain::RepositoryRef,
             _: u64,
             _: &domain::ForgeCredential,
         ) -> Result<domain::Issue, forge::ForgeError> {
@@ -551,6 +552,7 @@ mod tests {
             &self,
             _: &domain::RepositoryRef,
             _: u64,
+            _: &domain::RepositoryRef,
             _: u64,
             _: &domain::ForgeCredential,
         ) -> Result<domain::Issue, forge::ForgeError> {

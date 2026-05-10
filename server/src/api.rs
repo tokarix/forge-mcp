@@ -7,6 +7,14 @@ use utoipa::ToSchema;
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct AddIssueDependencyBody {
     pub dependency: u64,
+    /// Override owner for the dependency issue (cross-repository dependency).
+    /// Must be provided together with `dependency_repo` or both omitted.
+    #[serde(default)]
+    pub dependency_owner: Option<String>,
+    /// Override repository for the dependency issue (cross-repository dependency).
+    /// Must be provided together with `dependency_owner` or both omitted.
+    #[serde(default)]
+    pub dependency_repo: Option<String>,
 }
 
 /// POST /api/v1/repos/{forge}/{owner}/{repo}/issues/{index}/labels
@@ -153,6 +161,15 @@ pub struct IssueDependencyPath {
     pub index: u64,
     pub owner: String,
     pub repo: String,
+}
+
+/// Query parameters for removing cross-repository issue dependencies.
+#[derive(Debug, Deserialize)]
+pub struct RemoveIssueDependencyQuery {
+    /// Override owner for the dependency issue (cross-repository dependency).
+    pub dependency_owner: Option<String>,
+    /// Override repository for the dependency issue (cross-repository dependency).
+    pub dependency_repo: Option<String>,
 }
 
 /// Path parameters for issue endpoints.

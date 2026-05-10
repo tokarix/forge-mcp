@@ -32,8 +32,8 @@ use crate::api::{
     ForgePath, GetBranchQuery, IssueDependencyPath, IssueLabelPath, IssuePath, ListBranchesQuery,
     ListBranchesResponse as ApiListBranchesResponse, ListIssuesQuery, ListPullsQuery,
     ListRepositoriesQuery, OpenPullBody, PullPath, RebaseBranchBody, RebaseBranchResult,
-    RebaseOperationBody, RepoPath, ScheduleAutoMergeBody, SubmitReviewBody,
-    UpdateChangeRequestBody, UpdateIssueBody,
+    RebaseOperationBody, RemoveIssueDependencyQuery, RepoPath, ScheduleAutoMergeBody,
+    SubmitReviewBody, UpdateChangeRequestBody, UpdateIssueBody,
 };
 use crate::auth::{AgentRegistry, extract_bearer_token};
 use tokio_stream::StreamExt;
@@ -1872,7 +1872,9 @@ pub async fn update_issue(
     request_body = AddIssueDependencyBody,
     responses(
         (status = 200, description = "Dependency added"),
+        (status = 400, description = "Bad Request", body = ErrorBody),
         (status = 401, description = "Unauthorized", body = ErrorBody),
+        (status = 403, description = "Forbidden", body = ErrorBody),
     ),
     security(("bearer" = []))
 )]
@@ -1883,6 +1885,21 @@ pub async fn add_issue_dependency(
     headers: HeaderMap,
     Json(body): Json<AddIssueDependencyBody>,
 ) -> impl IntoResponse {
+    // Validate dependency_owner/dependency_repo are both provided or both omitted
+    match (&body.dependency_owner, &body.dependency_repo) {
+        (Some(_), None) | (None, Some(_)) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorBody {
+                    error:
+                        "dependency_owner and dependency_repo must both be provided or both omitted"
+                            .to_string(),
+                }),
+            ));
+        }
+        _ => {}
+    }
+
     let forge = resolve_forge(&state.forge_registry, &path.forge)?;
     let agent = resolve_agent(
         &headers,
@@ -1891,6 +1908,29 @@ pub async fn add_issue_dependency(
         &path.owner,
         &path.repo,
     )?;
+
+    // Check authorization for the dependency repository if cross-repo
+    let dependency_repository = match (&body.dependency_owner, &body.dependency_repo) {
+        (Some(dep_owner), Some(dep_repo)) => {
+            if !agent
+                .policy_config
+                .is_repo_allowed(&path.forge, dep_owner, dep_repo)
+            {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    Json(ErrorBody {
+                        error: format!(
+                            "agent '{}' is not authorized for dependency repository '{}/{}'",
+                            agent.identity.agent_id, dep_owner, dep_repo
+                        ),
+                    }),
+                ));
+            }
+            Some(repo_ref(&path.forge, dep_owner, dep_repo, forge))
+        }
+        _ => None,
+    };
+
     let credential = resolve_credential(agent, &path.forge, forge);
     let authorized = domain::policy::AuthorizedWrite {
         policy: agent.policy.clone(),
@@ -1902,6 +1942,7 @@ pub async fn add_issue_dependency(
             domain::AddIssueDependencyRequest {
                 agent: agent.identity.clone(),
                 dependency: body.dependency,
+                dependency_repository,
                 index: path.index,
                 repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
             },
@@ -1977,10 +2018,14 @@ pub async fn add_issue_label(
         ("repo" = String, Path, description = "Repository name"),
         ("index" = u64, Path, description = "Issue index"),
         ("dependency" = u64, Path, description = "Dependency issue index"),
+        ("dependency_owner" = Option<String>, Query, description = "Override owner for cross-repo dependency"),
+        ("dependency_repo" = Option<String>, Query, description = "Override repository for cross-repo dependency"),
     ),
     responses(
         (status = 200, description = "Dependency removed"),
+        (status = 400, description = "Bad Request", body = ErrorBody),
         (status = 401, description = "Unauthorized", body = ErrorBody),
+        (status = 403, description = "Forbidden", body = ErrorBody),
     ),
     security(("bearer" = []))
 )]
@@ -1988,8 +2033,24 @@ pub async fn add_issue_label(
 pub async fn remove_issue_dependency(
     State(state): State<AppState>,
     Path(path): Path<IssueDependencyPath>,
+    Query(query): Query<RemoveIssueDependencyQuery>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
+    // Validate dependency_owner/dependency_repo are both provided or both omitted
+    match (&query.dependency_owner, &query.dependency_repo) {
+        (Some(_), None) | (None, Some(_)) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorBody {
+                    error:
+                        "dependency_owner and dependency_repo must both be provided or both omitted"
+                            .to_string(),
+                }),
+            ));
+        }
+        _ => {}
+    }
+
     let forge = resolve_forge(&state.forge_registry, &path.forge)?;
     let agent = resolve_agent(
         &headers,
@@ -1998,6 +2059,29 @@ pub async fn remove_issue_dependency(
         &path.owner,
         &path.repo,
     )?;
+
+    // Check authorization for the dependency repository if cross-repo
+    let dependency_repository = match (&query.dependency_owner, &query.dependency_repo) {
+        (Some(dep_owner), Some(dep_repo)) => {
+            if !agent
+                .policy_config
+                .is_repo_allowed(&path.forge, dep_owner, dep_repo)
+            {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    Json(ErrorBody {
+                        error: format!(
+                            "agent '{}' is not authorized for dependency repository '{}/{}'",
+                            agent.identity.agent_id, dep_owner, dep_repo
+                        ),
+                    }),
+                ));
+            }
+            Some(repo_ref(&path.forge, dep_owner, dep_repo, forge))
+        }
+        _ => None,
+    };
+
     let credential = resolve_credential(agent, &path.forge, forge);
     let authorized = domain::policy::AuthorizedWrite {
         policy: agent.policy.clone(),
@@ -2009,6 +2093,7 @@ pub async fn remove_issue_dependency(
             domain::RemoveIssueDependencyRequest {
                 agent: agent.identity.clone(),
                 dependency: path.dependency,
+                dependency_repository,
                 index: path.index,
                 repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
             },
@@ -2332,6 +2417,7 @@ mod tests {
             &self,
             _: &domain::RepositoryRef,
             _: u64,
+            _: &domain::RepositoryRef,
             _: u64,
             _: &domain::ForgeCredential,
         ) -> Result<domain::Issue, forge::ForgeError> {
@@ -2460,6 +2546,7 @@ mod tests {
             &self,
             _: &domain::RepositoryRef,
             _: u64,
+            _: &domain::RepositoryRef,
             _: u64,
             _: &domain::ForgeCredential,
         ) -> Result<domain::Issue, forge::ForgeError> {
@@ -2882,14 +2969,19 @@ mod tests {
         }
     }
 
+    #[allow(clippy::struct_field_names)]
     struct FakeWriteService {
         captured_close_msg: Arc<Mutex<Option<String>>>,
+        captured_add_dep: Arc<Mutex<Option<domain::AddIssueDependencyRequest>>>,
+        captured_remove_dep: Arc<Mutex<Option<domain::RemoveIssueDependencyRequest>>>,
     }
 
     impl FakeWriteService {
         fn new() -> Self {
             Self {
                 captured_close_msg: Arc::new(Mutex::new(None)),
+                captured_add_dep: Arc::new(Mutex::new(None)),
+                captured_remove_dep: Arc::new(Mutex::new(None)),
             }
         }
     }
@@ -2898,11 +2990,20 @@ mod tests {
     impl domain::RepositoryWriteService for FakeWriteService {
         async fn add_issue_dependency(
             &self,
-            _: domain::AddIssueDependencyRequest,
+            request: domain::AddIssueDependencyRequest,
             _: domain::policy::AuthorizedWrite,
             _: &domain::ForgeCredential,
         ) -> Result<domain::Issue, ServiceError> {
-            todo!()
+            *self.captured_add_dep.lock().expect("poisoned") = Some(request);
+            Ok(domain::Issue {
+                assignees: vec![],
+                body: String::new(),
+                index: 1,
+                labels: vec![],
+                state: "open".to_string(),
+                title: "Issue".to_string(),
+                url: "https://example.com/issues/1".to_string(),
+            })
         }
         async fn add_issue_label(
             &self,
@@ -3053,11 +3154,21 @@ mod tests {
 
         async fn remove_issue_dependency(
             &self,
-            _: domain::RemoveIssueDependencyRequest,
+            request: domain::RemoveIssueDependencyRequest,
             _: domain::policy::AuthorizedWrite,
             _: &domain::ForgeCredential,
         ) -> Result<domain::Issue, ServiceError> {
-            todo!()
+            let idx = request.index;
+            *self.captured_remove_dep.lock().expect("poisoned") = Some(request);
+            Ok(domain::Issue {
+                assignees: vec![],
+                body: String::new(),
+                index: idx,
+                labels: vec![],
+                state: "open".to_string(),
+                title: "Issue".to_string(),
+                url: "https://example.com/issues/1".to_string(),
+            })
         }
         async fn remove_issue_label(
             &self,
@@ -4241,5 +4352,345 @@ mod tests {
             .expect("request should succeed");
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn add_issue_dependency_rejects_owner_only() {
+        let state = test_state();
+        let app = crate::build_router(state, false);
+        let body = serde_json::json!({
+            "dependency": 2,
+            "dependency_owner": "other-org"
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos/test-forge/org/repo/issues/1/dependencies")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&body).expect("serialize JSON body"),
+                    ))
+                    .expect("build request"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read response body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("parse JSON response");
+        assert!(
+            json["error"]
+                .as_str()
+                .expect("error field")
+                .contains("must both be provided or both omitted")
+        );
+    }
+
+    #[tokio::test]
+    async fn add_issue_dependency_rejects_repo_only() {
+        let state = test_state();
+        let app = crate::build_router(state, false);
+        let body = serde_json::json!({
+            "dependency": 2,
+            "dependency_repo": "other-repo"
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos/test-forge/org/repo/issues/1/dependencies")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&body).expect("serialize JSON body"),
+                    ))
+                    .expect("build request"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn remove_issue_dependency_rejects_owner_only() {
+        let state = test_state();
+        let app = crate::build_router(state, false);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/repos/test-forge/org/repo/issues/1/dependencies/2?dependency_owner=other-org")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read response body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("parse JSON response");
+        assert!(
+            json["error"]
+                .as_str()
+                .expect("error field")
+                .contains("must both be provided or both omitted")
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_issue_dependency_rejects_repo_only() {
+        let state = test_state();
+        let app = crate::build_router(state, false);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/repos/test-forge/org/repo/issues/1/dependencies/2?dependency_repo=other-repo")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn add_issue_dependency_forbidden_cross_repo() {
+        // Agent is authorized for org/repo but NOT for other-org/other-repo
+        let configs = vec![crate::config::AgentConfig {
+            agent_id: "codex".to_string(),
+            forge_identity: std::collections::HashMap::new(),
+            policy: AgentPolicyConfig {
+                allowed_repos: vec!["test-forge/org/repo".to_string()],
+                branch_prefix: Some("agent/".to_string()),
+                protected_paths: vec![],
+            },
+            session_id: "default".to_string(),
+            token: "test-token".to_string(),
+        }];
+
+        let mut forges = std::collections::HashMap::new();
+        forges.insert(
+            "test-forge".to_string(),
+            test_forge_instance(
+                "test-forge",
+                "https://forge.example",
+                Arc::new(FakeWriteService::new()),
+            ),
+        );
+
+        let state = AppState {
+            agent_registry: AgentRegistry::from_configs(&configs),
+            audit_sink: Arc::new(audit::InMemoryAuditSink::new()),
+            auto_merge_service: test_auto_merge_service(),
+            event_bus: crate::events::EventBus::new(),
+            forge_registry: Arc::new(crate::registry::ForgeRegistry::new(forges)),
+        };
+        let app = crate::build_router(state, false);
+        let body = serde_json::json!({
+            "dependency": 5,
+            "dependency_owner": "other-org",
+            "dependency_repo": "other-repo"
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos/test-forge/org/repo/issues/1/dependencies")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&body).expect("serialize JSON body"),
+                    ))
+                    .expect("build request"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn remove_issue_dependency_forbidden_cross_repo() {
+        // Agent is authorized for org/repo but NOT for other-org/other-repo
+        let configs = vec![crate::config::AgentConfig {
+            agent_id: "codex".to_string(),
+            forge_identity: std::collections::HashMap::new(),
+            policy: AgentPolicyConfig {
+                allowed_repos: vec!["test-forge/org/repo".to_string()],
+                branch_prefix: Some("agent/".to_string()),
+                protected_paths: vec![],
+            },
+            session_id: "default".to_string(),
+            token: "test-token".to_string(),
+        }];
+
+        let mut forges = std::collections::HashMap::new();
+        forges.insert(
+            "test-forge".to_string(),
+            test_forge_instance(
+                "test-forge",
+                "https://forge.example",
+                Arc::new(FakeWriteService::new()),
+            ),
+        );
+
+        let state = AppState {
+            agent_registry: AgentRegistry::from_configs(&configs),
+            audit_sink: Arc::new(audit::InMemoryAuditSink::new()),
+            auto_merge_service: test_auto_merge_service(),
+            event_bus: crate::events::EventBus::new(),
+            forge_registry: Arc::new(crate::registry::ForgeRegistry::new(forges)),
+        };
+        let app = crate::build_router(state, false);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/repos/test-forge/org/repo/issues/1/dependencies/5?dependency_owner=other-org&dependency_repo=other-repo")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn add_issue_dependency_allowed_cross_repo() {
+        // Agent is authorized for both repos
+        let configs = vec![crate::config::AgentConfig {
+            agent_id: "codex".to_string(),
+            forge_identity: std::collections::HashMap::new(),
+            policy: AgentPolicyConfig {
+                allowed_repos: vec![
+                    "test-forge/org/repo".to_string(),
+                    "test-forge/other-org/other-repo".to_string(),
+                ],
+                branch_prefix: Some("agent/".to_string()),
+                protected_paths: vec![],
+            },
+            session_id: "default".to_string(),
+            token: "test-token".to_string(),
+        }];
+
+        let write_svc = Arc::new(FakeWriteService::new());
+        let mut forges = std::collections::HashMap::new();
+        forges.insert(
+            "test-forge".to_string(),
+            test_forge_instance(
+                "test-forge",
+                "https://forge.example",
+                Arc::clone(&write_svc),
+            ),
+        );
+
+        let state = AppState {
+            agent_registry: AgentRegistry::from_configs(&configs),
+            audit_sink: Arc::new(audit::InMemoryAuditSink::new()),
+            auto_merge_service: test_auto_merge_service(),
+            event_bus: crate::events::EventBus::new(),
+            forge_registry: Arc::new(crate::registry::ForgeRegistry::new(forges)),
+        };
+        let app = crate::build_router(state, false);
+        let body = serde_json::json!({
+            "dependency": 5,
+            "dependency_owner": "other-org",
+            "dependency_repo": "other-repo"
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos/test-forge/org/repo/issues/1/dependencies")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&body).expect("serialize JSON body"),
+                    ))
+                    .expect("build request"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        // Verify dependency_repository reached the write service
+        let captured = write_svc.captured_add_dep.lock().expect("poisoned");
+        let req = captured.as_ref().expect("request should be captured");
+        let dep_repo = req.dependency_repository.as_ref().expect("dep repo set");
+        assert_eq!(dep_repo.owner, "other-org");
+        assert_eq!(dep_repo.name, "other-repo");
+    }
+
+    #[tokio::test]
+    async fn remove_issue_dependency_allowed_cross_repo() {
+        // Agent is authorized for both repos
+        let configs = vec![crate::config::AgentConfig {
+            agent_id: "codex".to_string(),
+            forge_identity: std::collections::HashMap::new(),
+            policy: AgentPolicyConfig {
+                allowed_repos: vec![
+                    "test-forge/org/repo".to_string(),
+                    "test-forge/other-org/other-repo".to_string(),
+                ],
+                branch_prefix: Some("agent/".to_string()),
+                protected_paths: vec![],
+            },
+            session_id: "default".to_string(),
+            token: "test-token".to_string(),
+        }];
+
+        let write_svc = Arc::new(FakeWriteService::new());
+        let mut forges = std::collections::HashMap::new();
+        forges.insert(
+            "test-forge".to_string(),
+            test_forge_instance(
+                "test-forge",
+                "https://forge.example",
+                Arc::clone(&write_svc),
+            ),
+        );
+
+        let state = AppState {
+            agent_registry: AgentRegistry::from_configs(&configs),
+            audit_sink: Arc::new(audit::InMemoryAuditSink::new()),
+            auto_merge_service: test_auto_merge_service(),
+            event_bus: crate::events::EventBus::new(),
+            forge_registry: Arc::new(crate::registry::ForgeRegistry::new(forges)),
+        };
+        let app = crate::build_router(state, false);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/repos/test-forge/org/repo/issues/1/dependencies/5?dependency_owner=other-org&dependency_repo=other-repo")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        // Verify dependency_repository reached the write service
+        let captured = write_svc.captured_remove_dep.lock().expect("poisoned");
+        let req = captured.as_ref().expect("request should be captured");
+        let dep_repo = req.dependency_repository.as_ref().expect("dep repo set");
+        assert_eq!(dep_repo.owner, "other-org");
+        assert_eq!(dep_repo.name, "other-repo");
     }
 }

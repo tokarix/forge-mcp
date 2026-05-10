@@ -565,12 +565,24 @@ where
         _authorized: domain::policy::AuthorizedWrite,
         credential: &ForgeCredential,
     ) -> Result<Issue, ServiceError> {
+        let dep_repo = request
+            .dependency_repository
+            .as_ref()
+            .unwrap_or(&request.repository);
+        let audit_target = if dep_repo == &request.repository {
+            format!("#{} depends on #{}", request.index, request.dependency)
+        } else {
+            format!(
+                "#{} depends on {}/{}#{}",
+                request.index, dep_repo.owner, dep_repo.name, request.dependency
+            )
+        };
         self.audit_sink
             .record(AuditRecord {
                 agent: request.agent,
                 action: "add_issue_dependency".to_string(),
                 repository: request.repository.clone(),
-                target: format!("#{} depends on #{}", request.index, request.dependency),
+                target: audit_target,
             })
             .await
             .map_err(|e| ServiceError::Audit(e.to_string()))?;
@@ -579,6 +591,7 @@ where
             .add_issue_dependency(
                 &request.repository,
                 request.index,
+                dep_repo,
                 request.dependency,
                 credential,
             )
@@ -1202,15 +1215,27 @@ where
         _authorized: domain::policy::AuthorizedWrite,
         credential: &ForgeCredential,
     ) -> Result<Issue, ServiceError> {
+        let dep_repo = request
+            .dependency_repository
+            .as_ref()
+            .unwrap_or(&request.repository);
+        let audit_target = if dep_repo == &request.repository {
+            format!(
+                "#{} no longer depends on #{}",
+                request.index, request.dependency
+            )
+        } else {
+            format!(
+                "#{} no longer depends on {}/{}#{}",
+                request.index, dep_repo.owner, dep_repo.name, request.dependency
+            )
+        };
         self.audit_sink
             .record(AuditRecord {
                 agent: request.agent,
                 action: "remove_issue_dependency".to_string(),
                 repository: request.repository.clone(),
-                target: format!(
-                    "#{} no longer depends on #{}",
-                    request.index, request.dependency
-                ),
+                target: audit_target,
             })
             .await
             .map_err(|e| ServiceError::Audit(e.to_string()))?;
@@ -1219,6 +1244,7 @@ where
             .remove_issue_dependency(
                 &request.repository,
                 request.index,
+                dep_repo,
                 request.dependency,
                 credential,
             )
@@ -1513,11 +1539,12 @@ mod tests {
 
     use audit::{AuditError, AuditRecord, AuditSink, InMemoryAuditSink};
     use domain::{
-        AgentIdentity, Branch, ChangeRequest, ChangeRequestCommentDetail, ChangeRequestState,
-        CloseChangeRequestRequest, CloseIssueRequest, CommentOnChangeRequestRequest,
-        CommitPatchRequest, ForgeCredential, ForgeKind, IssueComment, OpenChangeRequestRequest,
-        ReadRepositoryFileRequest, RepositoryReadService, RepositoryRef, RepositoryWriteService,
-        ServiceError, SubmitChangeRequestReviewRequest, UpdateChangeRequestRequest,
+        AgentIdentity, Branch, ChangeRequest, ChangeRequestComment, ChangeRequestCommentDetail,
+        ChangeRequestState, CloseChangeRequestRequest, CloseIssueRequest,
+        CommentOnChangeRequestRequest, CommitPatchRequest, ForgeCredential, ForgeKind,
+        IssueComment, OpenChangeRequestRequest, ReadRepositoryFileRequest, RepositoryReadService,
+        RepositoryRef, RepositoryWriteService, ServiceError, SubmitChangeRequestReviewRequest,
+        UpdateChangeRequestRequest,
     };
     use forge::{ForgeAdapter, ForgeError};
 
@@ -1552,6 +1579,7 @@ mod tests {
             &self,
             _: &RepositoryRef,
             _: u64,
+            _: &RepositoryRef,
             _: u64,
             _: &ForgeCredential,
         ) -> Result<domain::Issue, ForgeError> {
@@ -1710,6 +1738,7 @@ mod tests {
             &self,
             _: &RepositoryRef,
             _: u64,
+            _: &RepositoryRef,
             _: u64,
             _: &ForgeCredential,
         ) -> Result<domain::Issue, ForgeError> {
@@ -1939,6 +1968,7 @@ mod tests {
             &self,
             _: &RepositoryRef,
             _: u64,
+            _: &RepositoryRef,
             _: u64,
             _: &ForgeCredential,
         ) -> Result<domain::Issue, ForgeError> {
@@ -2097,6 +2127,7 @@ mod tests {
             &self,
             _: &RepositoryRef,
             _: u64,
+            _: &RepositoryRef,
             _: u64,
             _: &ForgeCredential,
         ) -> Result<domain::Issue, ForgeError> {
@@ -2535,6 +2566,7 @@ mod tests {
             &self,
             _: &RepositoryRef,
             _: u64,
+            _: &RepositoryRef,
             _: u64,
             _: &ForgeCredential,
         ) -> Result<domain::Issue, ForgeError> {
@@ -2810,6 +2842,7 @@ mod tests {
             &self,
             _: &RepositoryRef,
             _: u64,
+            _: &RepositoryRef,
             _: u64,
             _: &ForgeCredential,
         ) -> Result<domain::Issue, ForgeError> {
@@ -3086,6 +3119,7 @@ mod tests {
             &self,
             _: &RepositoryRef,
             _: u64,
+            _: &RepositoryRef,
             _: u64,
             _: &ForgeCredential,
         ) -> Result<domain::Issue, ForgeError> {
@@ -3262,6 +3296,7 @@ mod tests {
             &self,
             _: &RepositoryRef,
             _: u64,
+            _: &RepositoryRef,
             _: u64,
             _: &ForgeCredential,
         ) -> Result<domain::Issue, ForgeError> {
@@ -3937,6 +3972,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             &self,
             _: &RepositoryRef,
             _: u64,
+            _: &RepositoryRef,
             _: u64,
             _: &ForgeCredential,
         ) -> Result<domain::Issue, ForgeError> {
@@ -4095,6 +4131,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             &self,
             _: &RepositoryRef,
             _: u64,
+            _: &RepositoryRef,
             _: u64,
             _: &ForgeCredential,
         ) -> Result<domain::Issue, ForgeError> {
@@ -4573,6 +4610,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             &self,
             _: &RepositoryRef,
             _: u64,
+            _: &RepositoryRef,
             _: u64,
             _: &ForgeCredential,
         ) -> Result<domain::Issue, ForgeError> {
@@ -4731,6 +4769,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             &self,
             _: &RepositoryRef,
             _: u64,
+            _: &RepositoryRef,
             _: u64,
             _: &ForgeCredential,
         ) -> Result<domain::Issue, ForgeError> {
@@ -5039,6 +5078,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             &self,
             _: &RepositoryRef,
             _: u64,
+            _: &RepositoryRef,
             _: u64,
             _: &ForgeCredential,
         ) -> Result<domain::Issue, ForgeError> {
@@ -5197,6 +5237,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             &self,
             _: &RepositoryRef,
             _: u64,
+            _: &RepositoryRef,
             _: u64,
             _: &ForgeCredential,
         ) -> Result<domain::Issue, ForgeError> {
@@ -6315,6 +6356,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             &self,
             _: &RepositoryRef,
             _: u64,
+            _: &RepositoryRef,
             _: u64,
             _: &ForgeCredential,
         ) -> Result<domain::Issue, ForgeError> {
@@ -6466,6 +6508,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             &self,
             _: &RepositoryRef,
             _: u64,
+            _: &RepositoryRef,
             _: u64,
             _: &ForgeCredential,
         ) -> Result<domain::Issue, ForgeError> {
@@ -6842,5 +6885,631 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
         let state = adapter.state.lock().expect("poisoned");
         assert_eq!(state.call_order, vec!["comment_on_issue"]);
         assert_eq!(state.comment_body, Some("fixes done".to_string()));
+    }
+
+    struct DependencyTestAdapter {
+        state: Mutex<DependencyAdapterState>,
+    }
+
+    struct DependencyAdapterState {
+        captured_dep_repo: Option<RepositoryRef>,
+        captured_dep_for_remove: Option<RepositoryRef>,
+    }
+
+    #[async_trait::async_trait]
+    impl ForgeAdapter for DependencyTestAdapter {
+        async fn add_issue_dependency(
+            &self,
+            repository: &RepositoryRef,
+            index: u64,
+            dependency_repository: &RepositoryRef,
+            _dependency: u64,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            let mut state = self.state.lock().expect("poisoned");
+            state.captured_dep_repo = Some(dependency_repository.clone());
+            Ok(domain::Issue {
+                assignees: vec![],
+                body: String::new(),
+                index,
+                labels: vec![],
+                state: "open".to_string(),
+                title: "Issue".to_string(),
+                url: format!(
+                    "https://{}/{}/{}/issues/{}",
+                    repository.host, repository.owner, repository.name, index
+                ),
+            })
+        }
+        async fn add_issue_label(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            Err(forge::ForgeError::Unsupported("test fake".into()))
+        }
+        async fn assign_issue(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            Err(forge::ForgeError::Unsupported("test fake".into()))
+        }
+        async fn close_issue(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            Err(forge::ForgeError::Unsupported("test fake".into()))
+        }
+        async fn comment_on_issue(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<domain::IssueComment, ForgeError> {
+            Err(forge::ForgeError::Unsupported("test fake".into()))
+        }
+        async fn create_commit_status(
+            &self,
+            _: &RepositoryRef,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<(), ForgeError> {
+            Err(forge::ForgeError::Unsupported("test fake".into()))
+        }
+        async fn create_issue(
+            &self,
+            _: &RepositoryRef,
+            _: &str,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            Err(forge::ForgeError::Unsupported("test fake".into()))
+        }
+        async fn get_combined_commit_status(
+            &self,
+            _: &RepositoryRef,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<domain::CombinedCommitStatus, ForgeError> {
+            Err(forge::ForgeError::Unsupported("test fake".into()))
+        }
+        async fn get_change_request_ci_details(
+            &self,
+            _: &RepositoryRef,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<domain::ChangeRequestCiDetails, ForgeError> {
+            Err(forge::ForgeError::Unsupported("test fake".into()))
+        }
+        async fn get_allowed_merge_styles(
+            &self,
+            _: &RepositoryRef,
+            _: &ForgeCredential,
+        ) -> Result<Vec<String>, ForgeError> {
+            Err(forge::ForgeError::Unsupported("test fake".into()))
+        }
+        async fn get_issue(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            Err(forge::ForgeError::Unsupported("test fake".into()))
+        }
+        async fn get_issue_comments(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<Vec<domain::IssueComment>, ForgeError> {
+            Err(forge::ForgeError::Unsupported("test fake".into()))
+        }
+        async fn get_issue_dependencies(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<domain::IssueDependencies, ForgeError> {
+            Err(forge::ForgeError::Unsupported("test fake".into()))
+        }
+        async fn list_issues(
+            &self,
+            _: &RepositoryRef,
+            _: Option<&str>,
+            _: &ForgeCredential,
+        ) -> Result<Vec<domain::Issue>, ForgeError> {
+            Err(forge::ForgeError::Unsupported("test fake".into()))
+        }
+        async fn list_repositories(
+            &self,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: &ForgeCredential,
+        ) -> Result<Vec<domain::Repository>, ForgeError> {
+            Err(forge::ForgeError::Unsupported("test fake".into()))
+        }
+        async fn remove_issue_dependency(
+            &self,
+            repository: &RepositoryRef,
+            index: u64,
+            dependency_repository: &RepositoryRef,
+            _dependency: u64,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            let mut state = self.state.lock().expect("poisoned");
+            state.captured_dep_for_remove = Some(dependency_repository.clone());
+            Ok(domain::Issue {
+                assignees: vec![],
+                body: String::new(),
+                index,
+                labels: vec![],
+                state: "open".to_string(),
+                title: "Issue".to_string(),
+                url: format!(
+                    "https://{}/{}/{}/issues/{}",
+                    repository.host, repository.owner, repository.name, index
+                ),
+            })
+        }
+        async fn remove_issue_label(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            Err(forge::ForgeError::Unsupported("test fake".into()))
+        }
+        async fn get_authenticated_user(
+            &self,
+            _: &ForgeCredential,
+        ) -> Result<domain::ForgeUser, ForgeError> {
+            Ok(domain::ForgeUser {
+                email: "test@test".to_string(),
+                username: "test".to_string(),
+            })
+        }
+        async fn close_change_request(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<ChangeRequest, ForgeError> {
+            Err(forge::ForgeError::Unsupported("test fake".into()))
+        }
+        async fn comment_on_change_request(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<ChangeRequestComment, ForgeError> {
+            Err(forge::ForgeError::Unsupported("test fake".into()))
+        }
+        async fn create_change_request(
+            &self,
+            _: &RepositoryRef,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<ChangeRequest, ForgeError> {
+            Err(forge::ForgeError::Unsupported("test fake".into()))
+        }
+        async fn get_change_request_comments(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<Vec<ChangeRequestCommentDetail>, ForgeError> {
+            Err(forge::ForgeError::Unsupported("test fake".into()))
+        }
+        async fn get_change_request(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<ChangeRequest, ForgeError> {
+            Err(forge::ForgeError::Unsupported("test fake".into()))
+        }
+        async fn get_change_request_diff(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<String, ForgeError> {
+            Err(forge::ForgeError::Unsupported("test fake".into()))
+        }
+        async fn list_change_requests(
+            &self,
+            _: &RepositoryRef,
+            _: Option<&ChangeRequestState>,
+            _: &ForgeCredential,
+        ) -> Result<Vec<ChangeRequest>, ForgeError> {
+            Err(forge::ForgeError::Unsupported("test fake".into()))
+        }
+        async fn schedule_auto_merge(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &str,
+            _: &str,
+            _: Option<bool>,
+            _: &ForgeCredential,
+        ) -> Result<(), ForgeError> {
+            Err(forge::ForgeError::Unsupported("test fake".into()))
+        }
+        async fn submit_change_request_review(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &str,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<domain::ChangeRequestReview, ForgeError> {
+            Err(forge::ForgeError::Unsupported("test fake".into()))
+        }
+        async fn update_change_request(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: &ForgeCredential,
+        ) -> Result<ChangeRequest, ForgeError> {
+            Err(forge::ForgeError::Unsupported("test fake".into()))
+        }
+        async fn update_issue(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: &ForgeCredential,
+        ) -> Result<domain::Issue, ForgeError> {
+            Err(forge::ForgeError::Unsupported("test fake".into()))
+        }
+        async fn read_repository_file(
+            &self,
+            _: &RepositoryRef,
+            _: &str,
+            _: Option<&str>,
+            _: &ForgeCredential,
+        ) -> Result<domain::ReadRepositoryFileResponse, ForgeError> {
+            Err(forge::ForgeError::Unsupported("test fake".into()))
+        }
+        async fn list_branches(
+            &self,
+            _: &RepositoryRef,
+            _: Option<&str>,
+            _: Option<u32>,
+            _: &ForgeCredential,
+        ) -> Result<(Vec<domain::Branch>, bool), ForgeError> {
+            Err(forge::ForgeError::Unsupported("test fake".into()))
+        }
+        async fn get_branch(
+            &self,
+            _: &RepositoryRef,
+            _: &str,
+            _: &ForgeCredential,
+        ) -> Result<(String, Option<String>, bool), ForgeError> {
+            Err(forge::ForgeError::Unsupported("test fake".into()))
+        }
+        async fn get_default_merge_style(
+            &self,
+            _: &RepositoryRef,
+            _: &ForgeCredential,
+        ) -> Result<Option<String>, ForgeError> {
+            Err(forge::ForgeError::Unsupported("test fake".into()))
+        }
+        async fn get_repository_merge_settings(
+            &self,
+            _: &RepositoryRef,
+            _: &ForgeCredential,
+        ) -> Result<domain::RepositoryMergeSettings, ForgeError> {
+            Err(forge::ForgeError::Unsupported("test fake".into()))
+        }
+    }
+
+    fn base_repository_ref() -> RepositoryRef {
+        RepositoryRef {
+            alias: "test".to_string(),
+            forge: ForgeKind::Forgejo,
+            host: "https://forge.example".to_string(),
+            name: "repo".to_string(),
+            owner: "org".to_string(),
+        }
+    }
+
+    fn cross_repo_repository_ref() -> RepositoryRef {
+        RepositoryRef {
+            alias: "test".to_string(),
+            forge: ForgeKind::Forgejo,
+            host: "https://forge.example".to_string(),
+            name: "other-repo".to_string(),
+            owner: "other-org".to_string(),
+        }
+    }
+
+    fn test_agent() -> AgentIdentity {
+        AgentIdentity {
+            agent_id: "test-agent".to_string(),
+            session_id: "test-session".to_string(),
+        }
+    }
+
+    // --- Cross-repo audit tests ---
+
+    #[tokio::test]
+    async fn add_issue_dependency_audit_same_repo_format() {
+        let adapter = DependencyTestAdapter {
+            state: Mutex::new(DependencyAdapterState {
+                captured_dep_repo: None,
+                captured_dep_for_remove: None,
+            }),
+        };
+        let audit = Arc::new(InMemoryAuditSink::new());
+        let orchestrator = WriteOrchestrator::new(Arc::new(adapter), Arc::clone(&audit));
+
+        let repo = base_repository_ref();
+        let req = domain::AddIssueDependencyRequest {
+            agent: test_agent(),
+            dependency: 42,
+            dependency_repository: None,
+            index: 10,
+            repository: repo,
+        };
+
+        orchestrator
+            .add_issue_dependency(req, default_authorized(), &ForgeCredential { token: None })
+            .await
+            .expect("should succeed");
+
+        let records = audit.records().expect("audit records");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].action, "add_issue_dependency");
+        assert_eq!(records[0].target, "#10 depends on #42");
+    }
+
+    #[tokio::test]
+    async fn add_issue_dependency_audit_cross_repo_format() {
+        let adapter = DependencyTestAdapter {
+            state: Mutex::new(DependencyAdapterState {
+                captured_dep_repo: None,
+                captured_dep_for_remove: None,
+            }),
+        };
+        let audit = Arc::new(InMemoryAuditSink::new());
+        let orchestrator = WriteOrchestrator::new(Arc::new(adapter), Arc::clone(&audit));
+
+        let repo = base_repository_ref();
+        let dep_repo = cross_repo_repository_ref();
+        let req = domain::AddIssueDependencyRequest {
+            agent: test_agent(),
+            dependency: 42,
+            dependency_repository: Some(dep_repo),
+            index: 10,
+            repository: repo,
+        };
+
+        orchestrator
+            .add_issue_dependency(req, default_authorized(), &ForgeCredential { token: None })
+            .await
+            .expect("should succeed");
+
+        let records = audit.records().expect("audit records");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].action, "add_issue_dependency");
+        assert_eq!(records[0].target, "#10 depends on other-org/other-repo#42");
+    }
+
+    #[tokio::test]
+    async fn remove_issue_dependency_audit_same_repo_format() {
+        let adapter = DependencyTestAdapter {
+            state: Mutex::new(DependencyAdapterState {
+                captured_dep_repo: None,
+                captured_dep_for_remove: None,
+            }),
+        };
+        let audit = Arc::new(InMemoryAuditSink::new());
+        let orchestrator = WriteOrchestrator::new(Arc::new(adapter), Arc::clone(&audit));
+
+        let repo = base_repository_ref();
+        let req = domain::RemoveIssueDependencyRequest {
+            agent: test_agent(),
+            dependency: 42,
+            dependency_repository: None,
+            index: 10,
+            repository: repo,
+        };
+
+        orchestrator
+            .remove_issue_dependency(req, default_authorized(), &ForgeCredential { token: None })
+            .await
+            .expect("should succeed");
+
+        let records = audit.records().expect("audit records");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].action, "remove_issue_dependency");
+        assert_eq!(records[0].target, "#10 no longer depends on #42");
+    }
+
+    #[tokio::test]
+    async fn remove_issue_dependency_audit_cross_repo_format() {
+        let adapter = DependencyTestAdapter {
+            state: Mutex::new(DependencyAdapterState {
+                captured_dep_repo: None,
+                captured_dep_for_remove: None,
+            }),
+        };
+        let audit = Arc::new(InMemoryAuditSink::new());
+        let orchestrator = WriteOrchestrator::new(Arc::new(adapter), Arc::clone(&audit));
+
+        let repo = base_repository_ref();
+        let dep_repo = cross_repo_repository_ref();
+        let req = domain::RemoveIssueDependencyRequest {
+            agent: test_agent(),
+            dependency: 42,
+            dependency_repository: Some(dep_repo.clone()),
+            index: 10,
+            repository: repo,
+        };
+
+        orchestrator
+            .remove_issue_dependency(req, default_authorized(), &ForgeCredential { token: None })
+            .await
+            .expect("should succeed");
+
+        let records = audit.records().expect("audit records");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].action, "remove_issue_dependency");
+        assert_eq!(
+            records[0].target,
+            "#10 no longer depends on other-org/other-repo#42"
+        );
+    }
+
+    #[tokio::test]
+    async fn add_issue_dependency_passes_dep_repo_to_adapter() {
+        let adapter = Arc::new(DependencyTestAdapter {
+            state: Mutex::new(DependencyAdapterState {
+                captured_dep_repo: None,
+                captured_dep_for_remove: None,
+            }),
+        });
+        let audit = Arc::new(InMemoryAuditSink::new());
+        let orchestrator = WriteOrchestrator::new(Arc::clone(&adapter), Arc::clone(&audit));
+
+        let repo = base_repository_ref();
+        let dep_repo = cross_repo_repository_ref();
+        let req = domain::AddIssueDependencyRequest {
+            agent: test_agent(),
+            dependency: 42,
+            dependency_repository: Some(dep_repo.clone()),
+            index: 10,
+            repository: repo,
+        };
+
+        orchestrator
+            .add_issue_dependency(req, default_authorized(), &ForgeCredential { token: None })
+            .await
+            .expect("should succeed");
+
+        let state = adapter.state.lock().expect("poisoned");
+        let captured = state.captured_dep_repo.as_ref().expect("captured dep repo");
+        assert_eq!(captured.owner, "other-org");
+        assert_eq!(captured.name, "other-repo");
+    }
+
+    #[tokio::test]
+    async fn add_issue_dependency_same_repo_uses_base_repo_for_adapter() {
+        let adapter = Arc::new(DependencyTestAdapter {
+            state: Mutex::new(DependencyAdapterState {
+                captured_dep_repo: None,
+                captured_dep_for_remove: None,
+            }),
+        });
+        let audit = Arc::new(InMemoryAuditSink::new());
+        let orchestrator = WriteOrchestrator::new(Arc::clone(&adapter), Arc::clone(&audit));
+
+        let repo = base_repository_ref();
+        let req = domain::AddIssueDependencyRequest {
+            agent: test_agent(),
+            dependency: 42,
+            dependency_repository: None,
+            index: 10,
+            repository: repo,
+        };
+
+        orchestrator
+            .add_issue_dependency(req, default_authorized(), &ForgeCredential { token: None })
+            .await
+            .expect("should succeed");
+
+        let state = adapter.state.lock().expect("poisoned");
+        let captured = state.captured_dep_repo.as_ref().expect("captured dep repo");
+        assert_eq!(captured.owner, "org");
+        assert_eq!(captured.name, "repo");
+    }
+
+    #[tokio::test]
+    async fn remove_issue_dependency_passes_dep_repo_to_adapter() {
+        let adapter = Arc::new(DependencyTestAdapter {
+            state: Mutex::new(DependencyAdapterState {
+                captured_dep_repo: None,
+                captured_dep_for_remove: None,
+            }),
+        });
+        let audit = Arc::new(InMemoryAuditSink::new());
+        let orchestrator = WriteOrchestrator::new(Arc::clone(&adapter), Arc::clone(&audit));
+
+        let repo = base_repository_ref();
+        let dep_repo = cross_repo_repository_ref();
+        let req = domain::RemoveIssueDependencyRequest {
+            agent: test_agent(),
+            dependency: 42,
+            dependency_repository: Some(dep_repo.clone()),
+            index: 10,
+            repository: repo,
+        };
+
+        orchestrator
+            .remove_issue_dependency(req, default_authorized(), &ForgeCredential { token: None })
+            .await
+            .expect("should succeed");
+
+        let state = adapter.state.lock().expect("poisoned");
+        let captured = state
+            .captured_dep_for_remove
+            .as_ref()
+            .expect("captured dep repo");
+        assert_eq!(captured.owner, "other-org");
+        assert_eq!(captured.name, "other-repo");
+    }
+
+    #[tokio::test]
+    async fn remove_issue_dependency_same_repo_uses_base_repo_for_adapter() {
+        let adapter = Arc::new(DependencyTestAdapter {
+            state: Mutex::new(DependencyAdapterState {
+                captured_dep_repo: None,
+                captured_dep_for_remove: None,
+            }),
+        });
+        let audit = Arc::new(InMemoryAuditSink::new());
+        let orchestrator = WriteOrchestrator::new(Arc::clone(&adapter), Arc::clone(&audit));
+
+        let repo = base_repository_ref();
+        let req = domain::RemoveIssueDependencyRequest {
+            agent: test_agent(),
+            dependency: 42,
+            dependency_repository: None,
+            index: 10,
+            repository: repo,
+        };
+
+        orchestrator
+            .remove_issue_dependency(req, default_authorized(), &ForgeCredential { token: None })
+            .await
+            .expect("should succeed");
+
+        let state = adapter.state.lock().expect("poisoned");
+        let captured = state
+            .captured_dep_for_remove
+            .as_ref()
+            .expect("captured dep repo");
+        assert_eq!(captured.owner, "org");
+        assert_eq!(captured.name, "repo");
     }
 }

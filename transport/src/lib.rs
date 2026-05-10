@@ -66,6 +66,12 @@ pub struct AddIssueDependencyTool {
     /// Index of the issue that this issue depends on (the blocking issue).
     #[serde(deserialize_with = "serde_aux::field_attributes::deserialize_number_from_string")]
     pub dependency: u64,
+    /// Override owner for the dependency issue (cross-repository dependency).
+    /// Must be provided together with `dependency_repo` or both omitted.
+    pub dependency_owner: Option<String>,
+    /// Override repository for the dependency issue (cross-repository dependency).
+    /// Must be provided together with `dependency_owner` or both omitted.
+    pub dependency_repo: Option<String>,
     /// Forge alias -- use `forge_info` to discover available aliases.
     pub forge: String,
     /// Issue index number.
@@ -518,6 +524,12 @@ pub struct RemoveIssueDependencyTool {
     /// Index of the dependency issue to remove.
     #[serde(deserialize_with = "serde_aux::field_attributes::deserialize_number_from_string")]
     pub dependency: u64,
+    /// Override owner for the dependency issue (cross-repository dependency).
+    /// Must be provided together with `dependency_repo` or both omitted.
+    pub dependency_owner: Option<String>,
+    /// Override repository for the dependency issue (cross-repository dependency).
+    /// Must be provided together with `dependency_owner` or both omitted.
+    pub dependency_repo: Option<String>,
     /// Forge alias -- use `forge_info` to discover available aliases.
     pub forge: String,
     /// Issue index number.
@@ -1309,6 +1321,16 @@ impl McpShim {
         Parameters(request): Parameters<AddIssueDependencyTool>,
     ) -> Result<String, McpError> {
         self.ensure_writable()?;
+        match (&request.dependency_owner, &request.dependency_repo) {
+            (Some(_), None) | (None, Some(_)) => {
+                return Err(McpError::invalid_params(
+                    "dependency_owner and dependency_repo must both be provided or both omitted"
+                        .to_string(),
+                    None,
+                ));
+            }
+            _ => {}
+        }
         let gw = self.resolve_gateway(&request.forge).await?;
         let url = Self::build_url(
             &gw.url,
@@ -1324,7 +1346,11 @@ impl McpShim {
                 "dependencies",
             ],
         )?;
-        let body = serde_json::json!({"dependency": request.dependency});
+        let body = serde_json::json!({
+            "dependency": request.dependency,
+            "dependency_owner": request.dependency_owner,
+            "dependency_repo": request.dependency_repo,
+        });
         self.gateway_post(url, &gw.token, &body).await
     }
 
@@ -2134,8 +2160,18 @@ impl McpShim {
         Parameters(request): Parameters<RemoveIssueDependencyTool>,
     ) -> Result<String, McpError> {
         self.ensure_writable()?;
+        match (&request.dependency_owner, &request.dependency_repo) {
+            (Some(_), None) | (None, Some(_)) => {
+                return Err(McpError::invalid_params(
+                    "dependency_owner and dependency_repo must both be provided or both omitted"
+                        .to_string(),
+                    None,
+                ));
+            }
+            _ => {}
+        }
         let gw = self.resolve_gateway(&request.forge).await?;
-        let url = Self::build_url(
+        let mut url = Self::build_url(
             &gw.url,
             &[
                 "api",
@@ -2150,6 +2186,12 @@ impl McpShim {
                 &request.dependency.to_string(),
             ],
         )?;
+        if let Some(ref owner) = request.dependency_owner {
+            url.query_pairs_mut().append_pair("dependency_owner", owner);
+        }
+        if let Some(ref repo) = request.dependency_repo {
+            url.query_pairs_mut().append_pair("dependency_repo", repo);
+        }
         self.gateway_delete(url, &gw.token).await
     }
 
@@ -2970,6 +3012,8 @@ mod tests {
 
         let request = RemoveIssueDependencyTool {
             dependency: 2,
+            dependency_owner: None,
+            dependency_repo: None,
             forge: "test".to_string(),
             index: 1,
             owner: "owner".to_string(),
@@ -3032,6 +3076,8 @@ mod tests {
 
         let request = AddIssueDependencyTool {
             dependency: 2,
+            dependency_owner: None,
+            dependency_repo: None,
             forge: "test".to_string(),
             index: 1,
             owner: "owner".to_string(),
@@ -3052,6 +3098,272 @@ mod tests {
             requests.is_empty(),
             "no requests should reach the gateway in read-only mode"
         );
+    }
+
+    #[tokio::test]
+    async fn add_issue_dependency_rejects_partial_cross_repo_owner_only() {
+        let mock_server = wiremock::MockServer::start().await;
+        let config = test_config(&mock_server.uri());
+        let shim = McpShim::new(config);
+
+        let request = AddIssueDependencyTool {
+            dependency: 2,
+            dependency_owner: Some("other-org".to_string()),
+            dependency_repo: None,
+            forge: "test".to_string(),
+            index: 1,
+            owner: "owner".to_string(),
+            repo: "repo".to_string(),
+        };
+
+        let err = shim
+            .add_issue_dependency(Parameters(request))
+            .await
+            .expect_err("should fail on partial input");
+        assert!(
+            err.message
+                .contains("must both be provided or both omitted"),
+            "unexpected error: {}",
+            err.message
+        );
+
+        let requests = mock_server
+            .received_requests()
+            .await
+            .expect("received requests");
+        assert!(requests.is_empty(), "no requests should reach the gateway");
+    }
+
+    #[tokio::test]
+    async fn add_issue_dependency_rejects_partial_cross_repo_repo_only() {
+        let mock_server = wiremock::MockServer::start().await;
+        let config = test_config(&mock_server.uri());
+        let shim = McpShim::new(config);
+
+        let request = AddIssueDependencyTool {
+            dependency: 2,
+            dependency_owner: None,
+            dependency_repo: Some("other-repo".to_string()),
+            forge: "test".to_string(),
+            index: 1,
+            owner: "owner".to_string(),
+            repo: "repo".to_string(),
+        };
+
+        let err = shim
+            .add_issue_dependency(Parameters(request))
+            .await
+            .expect_err("should fail on partial input");
+        assert!(
+            err.message
+                .contains("must both be provided or both omitted"),
+            "unexpected error: {}",
+            err.message
+        );
+    }
+
+    #[tokio::test]
+    async fn add_issue_dependency_accepts_full_cross_repo() {
+        let mock_server = wiremock::MockServer::start().await;
+
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path(
+                "/api/v1/repos/test/owner/repo/issues/1/dependencies",
+            ))
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "dependency": 2,
+                "dependency_owner": "other-org",
+                "dependency_repo": "other-repo"
+            })))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_string("{}"))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let config = test_config(&mock_server.uri());
+        let shim = McpShim::new(config);
+
+        let request = AddIssueDependencyTool {
+            dependency: 2,
+            dependency_owner: Some("other-org".to_string()),
+            dependency_repo: Some("other-repo".to_string()),
+            forge: "test".to_string(),
+            index: 1,
+            owner: "owner".to_string(),
+            repo: "repo".to_string(),
+        };
+
+        shim.add_issue_dependency(Parameters(request))
+            .await
+            .expect("should succeed");
+    }
+
+    #[tokio::test]
+    async fn add_issue_dependency_accepts_no_cross_repo() {
+        let mock_server = wiremock::MockServer::start().await;
+
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path(
+                "/api/v1/repos/test/owner/repo/issues/1/dependencies",
+            ))
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "dependency": 2,
+                "dependency_owner": null,
+                "dependency_repo": null
+            })))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_string("{}"))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let config = test_config(&mock_server.uri());
+        let shim = McpShim::new(config);
+
+        let request = AddIssueDependencyTool {
+            dependency: 2,
+            dependency_owner: None,
+            dependency_repo: None,
+            forge: "test".to_string(),
+            index: 1,
+            owner: "owner".to_string(),
+            repo: "repo".to_string(),
+        };
+
+        shim.add_issue_dependency(Parameters(request))
+            .await
+            .expect("should succeed");
+    }
+
+    #[tokio::test]
+    async fn remove_issue_dependency_rejects_partial_cross_repo_owner_only() {
+        let mock_server = wiremock::MockServer::start().await;
+        let config = test_config(&mock_server.uri());
+        let shim = McpShim::new(config);
+
+        let request = RemoveIssueDependencyTool {
+            dependency: 2,
+            dependency_owner: Some("other-org".to_string()),
+            dependency_repo: None,
+            forge: "test".to_string(),
+            index: 1,
+            owner: "owner".to_string(),
+            repo: "repo".to_string(),
+        };
+
+        let err = shim
+            .remove_issue_dependency(Parameters(request))
+            .await
+            .expect_err("should fail on partial input");
+        assert!(
+            err.message
+                .contains("must both be provided or both omitted"),
+            "unexpected error: {}",
+            err.message
+        );
+
+        let requests = mock_server
+            .received_requests()
+            .await
+            .expect("received requests");
+        assert!(requests.is_empty(), "no requests should reach the gateway");
+    }
+
+    #[tokio::test]
+    async fn remove_issue_dependency_rejects_partial_cross_repo_repo_only() {
+        let mock_server = wiremock::MockServer::start().await;
+        let config = test_config(&mock_server.uri());
+        let shim = McpShim::new(config);
+
+        let request = RemoveIssueDependencyTool {
+            dependency: 2,
+            dependency_owner: None,
+            dependency_repo: Some("other-repo".to_string()),
+            forge: "test".to_string(),
+            index: 1,
+            owner: "owner".to_string(),
+            repo: "repo".to_string(),
+        };
+
+        let err = shim
+            .remove_issue_dependency(Parameters(request))
+            .await
+            .expect_err("should fail on partial input");
+        assert!(
+            err.message
+                .contains("must both be provided or both omitted"),
+            "unexpected error: {}",
+            err.message
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_issue_dependency_accepts_full_cross_repo() {
+        let mock_server = wiremock::MockServer::start().await;
+
+        wiremock::Mock::given(wiremock::matchers::method("DELETE"))
+            .and(wiremock::matchers::path(
+                "/api/v1/repos/test/owner/repo/issues/1/dependencies/2",
+            ))
+            .and(wiremock::matchers::query_param(
+                "dependency_owner",
+                "other-org",
+            ))
+            .and(wiremock::matchers::query_param(
+                "dependency_repo",
+                "other-repo",
+            ))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_string(""))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let config = test_config(&mock_server.uri());
+        let shim = McpShim::new(config);
+
+        let request = RemoveIssueDependencyTool {
+            dependency: 2,
+            dependency_owner: Some("other-org".to_string()),
+            dependency_repo: Some("other-repo".to_string()),
+            forge: "test".to_string(),
+            index: 1,
+            owner: "owner".to_string(),
+            repo: "repo".to_string(),
+        };
+
+        shim.remove_issue_dependency(Parameters(request))
+            .await
+            .expect("should succeed");
+    }
+
+    #[tokio::test]
+    async fn remove_issue_dependency_accepts_no_cross_repo() {
+        let mock_server = wiremock::MockServer::start().await;
+
+        wiremock::Mock::given(wiremock::matchers::method("DELETE"))
+            .and(wiremock::matchers::path(
+                "/api/v1/repos/test/owner/repo/issues/1/dependencies/2",
+            ))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_string(""))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let config = test_config(&mock_server.uri());
+        let shim = McpShim::new(config);
+
+        let request = RemoveIssueDependencyTool {
+            dependency: 2,
+            dependency_owner: None,
+            dependency_repo: None,
+            forge: "test".to_string(),
+            index: 1,
+            owner: "owner".to_string(),
+            repo: "repo".to_string(),
+        };
+
+        shim.remove_issue_dependency(Parameters(request))
+            .await
+            .expect("should succeed");
     }
 
     #[tokio::test]

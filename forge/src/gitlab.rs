@@ -487,6 +487,7 @@ impl crate::ForgeAdapter for GitLabAdapter {
         &self,
         _repository: &RepositoryRef,
         _index: u64,
+        _dependency_repository: &RepositoryRef,
         _dependency: u64,
         _credential: &ForgeCredential,
     ) -> Result<domain::Issue, ForgeError> {
@@ -1156,6 +1157,7 @@ impl crate::ForgeAdapter for GitLabAdapter {
         &self,
         _repository: &RepositoryRef,
         _index: u64,
+        _dependency_repository: &RepositoryRef,
         _dependency: u64,
         _credential: &ForgeCredential,
     ) -> Result<domain::Issue, ForgeError> {

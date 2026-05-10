@@ -115,6 +115,7 @@ pub trait ForgeAdapter: Send + Sync {
         &self,
         repository: &RepositoryRef,
         index: u64,
+        dependency_repository: &RepositoryRef,
         dependency: u64,
         credential: &ForgeCredential,
     ) -> Result<domain::Issue, ForgeError>;
@@ -336,6 +337,7 @@ pub trait ForgeAdapter: Send + Sync {
         &self,
         repository: &RepositoryRef,
         index: u64,
+        dependency_repository: &RepositoryRef,
         dependency: u64,
         credential: &ForgeCredential,
     ) -> Result<domain::Issue, ForgeError>;
@@ -1324,13 +1326,15 @@ impl ForgeAdapter for ForgejoAdapter {
         &self,
         repository: &RepositoryRef,
         index: u64,
+        dependency_repository: &RepositoryRef,
         dependency: u64,
         credential: &ForgeCredential,
     ) -> Result<domain::Issue, ForgeError> {
         // Forgejo's dependency API expects the internal database ID, not the
-        // visible issue number.  Fetch the dependency issue first.
+        // visible issue number.  Fetch the dependency issue from the correct
+        // repository — for cross-repo dependencies this differs from repository.
         let dep_issue = self
-            .fetch_issue_raw(repository, dependency, credential)
+            .fetch_issue_raw(dependency_repository, dependency, credential)
             .await?;
 
         let url = format!(
@@ -2151,13 +2155,15 @@ impl ForgeAdapter for ForgejoAdapter {
         &self,
         repository: &RepositoryRef,
         index: u64,
+        dependency_repository: &RepositoryRef,
         dependency: u64,
         credential: &ForgeCredential,
     ) -> Result<domain::Issue, ForgeError> {
         // Forgejo's dependency API expects the internal database ID, not the
-        // visible issue number.  Fetch the dependency issue first.
+        // visible issue number.  Fetch the dependency issue from the correct
+        // repository — for cross-repo dependencies this differs from repository.
         let dep_issue = self
-            .fetch_issue_raw(repository, dependency, credential)
+            .fetch_issue_raw(dependency_repository, dependency, credential)
             .await?;
 
         let url = format!(
@@ -2915,7 +2921,7 @@ mod tests {
     use sha2::Sha256;
 
     use domain::ForgeCredential;
-    use wiremock::matchers::{header, method, path_regex, query_param};
+    use wiremock::matchers::{body_json, header, method, path_regex, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
@@ -5898,5 +5904,232 @@ mod tests {
             }
             other => panic!("expected UnexpectedStatus, got {other:?}"),
         }
+    }
+
+    fn test_cross_repo() -> RepositoryRef {
+        RepositoryRef {
+            alias: "test".to_string(),
+            forge: domain::ForgeKind::Forgejo,
+            host: "https://forge.example".to_string(),
+            name: "other-repo".to_string(),
+            owner: "other-org".to_string(),
+        }
+    }
+
+    /// Same-repo: the dependency is fetched from the base repo, `POST`ed to base repo.
+    #[tokio::test]
+    async fn add_issue_dependency_same_repo_single_request_to_base_repo() {
+        let mock = MockServer::start().await;
+
+        // Mock: fetch dependency issue from base repo (same as target repo)
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/org/repo/issues/20"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": 2000,
+                "number": 20,
+                "title": "Dependency Issue",
+                "state": "open",
+                "body": "",
+                "html_url": "https://forge.example/org/repo/issues/20"
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        // Mock: POST dependency to base repo
+        Mock::given(method("POST"))
+            .and(path_regex(r"/api/v1/repos/org/repo/issues/10/dependencies"))
+            .and(body_json(serde_json::json!({"dependsOn": 2000})))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        // Mock: GET base issue after
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/org/repo/issues/10"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": 1000,
+                "number": 10,
+                "title": "Base Issue",
+                "state": "open",
+                "body": "",
+                "html_url": "https://forge.example/org/repo/issues/10"
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let repo = test_repo();
+        adapter
+            .add_issue_dependency(&repo, 10, &repo, 20, &cred)
+            .await
+            .expect("should succeed");
+    }
+
+    /// Cross-repo add: the dependency is fetched from the dependency repo,
+    /// then the POST goes to the base repo's dependencies endpoint.
+    #[tokio::test]
+    async fn add_issue_dependency_cross_repo_fetches_from_dep_repo_and_posts_to_base_repo() {
+        let mock = MockServer::start().await;
+
+        // Mock: fetch dependency issue from the CROSS-repo
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/other-org/other-repo/issues/20"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": 3000,
+                "number": 20,
+                "title": "Dependency Issue",
+                "state": "open",
+                "body": "",
+                "html_url": "https://forge.example/other-org/other-repo/issues/20"
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        // Mock: POST dependency to BASE repo (not cross-repo)
+        Mock::given(method("POST"))
+            .and(path_regex(r"/api/v1/repos/org/repo/issues/10/dependencies"))
+            .and(body_json(serde_json::json!({"dependsOn": 3000})))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        // Mock: GET base issue after
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/org/repo/issues/10"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": 1000,
+                "number": 10,
+                "title": "Base Issue",
+                "state": "open",
+                "body": "",
+                "html_url": "https://forge.example/org/repo/issues/10"
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let base_repo = test_repo();
+        let dep_repo = test_cross_repo();
+        adapter
+            .add_issue_dependency(&base_repo, 10, &dep_repo, 20, &cred)
+            .await
+            .expect("should succeed");
+    }
+
+    /// Cross-repo remove: the dependency is fetched from the dependency repo,
+    /// then the DELETE goes to the base repo's dependencies endpoint.
+    #[tokio::test]
+    async fn remove_issue_dependency_cross_repo_fetches_from_dep_repo_and_deletes_on_base_repo() {
+        let mock = MockServer::start().await;
+
+        // Mock: fetch dependency issue from the CROSS-repo
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/other-org/other-repo/issues/20"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": 3000,
+                "number": 20,
+                "title": "Dependency Issue",
+                "state": "open",
+                "body": "",
+                "html_url": "https://forge.example/other-org/other-repo/issues/20"
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        // Mock: DELETE dependency on BASE repo (not cross-repo)
+        Mock::given(method("DELETE"))
+            .and(path_regex(r"/api/v1/repos/org/repo/issues/10/dependencies"))
+            .and(body_json(serde_json::json!({"dependsOn": 3000})))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        // Mock: GET base issue after
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/org/repo/issues/10"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": 1000,
+                "number": 10,
+                "title": "Base Issue",
+                "state": "open",
+                "body": "",
+                "html_url": "https://forge.example/org/repo/issues/10"
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let base_repo = test_repo();
+        let dep_repo = test_cross_repo();
+        adapter
+            .remove_issue_dependency(&base_repo, 10, &dep_repo, 20, &cred)
+            .await
+            .expect("should succeed");
+    }
+
+    /// Verify same-repo backward compatibility: when base and dep repo are identical,
+    /// the adapter behaves identically to before the cross-repo support was added.
+    #[tokio::test]
+    async fn remove_issue_dependency_same_repo_backward_compatible() {
+        let mock = MockServer::start().await;
+
+        // Mock: fetch dependency issue from base repo
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/org/repo/issues/20"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": 2000,
+                "number": 20,
+                "title": "Dependency Issue",
+                "state": "open",
+                "body": "",
+                "html_url": "https://forge.example/org/repo/issues/20"
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        // Mock: DELETE dependency from base repo
+        Mock::given(method("DELETE"))
+            .and(path_regex(r"/api/v1/repos/org/repo/issues/10/dependencies"))
+            .and(body_json(serde_json::json!({"dependsOn": 2000})))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        // Mock: GET base issue after
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/org/repo/issues/10"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": 1000,
+                "number": 10,
+                "title": "Base Issue",
+                "state": "open",
+                "body": "",
+                "html_url": "https://forge.example/org/repo/issues/10"
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let repo = test_repo();
+        adapter
+            .remove_issue_dependency(&repo, 10, &repo, 20, &cred)
+            .await
+            .expect("should succeed");
     }
 }

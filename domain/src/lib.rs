@@ -649,6 +649,7 @@ pub enum WebhookEvent {
 pub struct AddIssueDependencyRequest {
     pub agent: AgentIdentity,
     pub dependency: u64,
+    pub dependency_repository: Option<RepositoryRef>,
     pub index: u64,
     pub repository: RepositoryRef,
 }
@@ -916,6 +917,7 @@ pub struct RebaseBranchResponse {
 pub struct RemoveIssueDependencyRequest {
     pub agent: AgentIdentity,
     pub dependency: u64,
+    pub dependency_repository: Option<RepositoryRef>,
     pub index: u64,
     pub repository: RepositoryRef,
 }
