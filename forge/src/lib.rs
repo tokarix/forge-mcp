@@ -8,7 +8,7 @@ use base64::Engine;
 use domain::{
     ChangeRequest, ChangeRequestComment, ChangeRequestCommentDetail, ChangeRequestEvent,
     ChangeRequestEventAction, ChangeRequestReview, ChangeRequestState, ForgeCredential, ForgeUser,
-    ReadRepositoryFileResponse, RepositoryMergeSettings, RepositoryRef,
+    Mergeability, ReadRepositoryFileResponse, RepositoryMergeSettings, RepositoryRef,
 };
 use hmac::{Hmac, Mac};
 use reqwest::StatusCode;
@@ -998,6 +998,8 @@ struct ForgejoPullRequest {
     head: ForgejoPullBranch,
     html_url: String,
     merge_base: Option<String>,
+    #[serde(default)]
+    mergeable: Option<bool>,
     merged: bool,
     number: u64,
     state: String,
@@ -1014,6 +1016,7 @@ impl ForgejoPullRequest {
                 _ => ChangeRequestState::Closed,
             }
         };
+        let (has_conflicts, mergeability) = Self::compute_mergeability(self.mergeable);
         ChangeRequest {
             base_branch: self.base.ref_name,
             body: self.body.unwrap_or_default(),
@@ -1021,11 +1024,21 @@ impl ForgejoPullRequest {
             commit_count: None,
             head_branch: self.head.ref_name,
             head_sha: Some(self.head.sha),
+            has_conflicts,
             index: self.number,
             merge_base_sha: self.merge_base,
+            mergeability,
             state,
             title: self.title,
             url: self.html_url,
+        }
+    }
+
+    fn compute_mergeability(mergeable: Option<bool>) -> (Option<bool>, Mergeability) {
+        match mergeable {
+            Some(true) => (Some(false), Mergeability::Mergeable),
+            Some(false) => (Some(true), Mergeability::Conflicting),
+            None => (None, Mergeability::Unknown),
         }
     }
 }
@@ -6131,5 +6144,26 @@ mod tests {
             .remove_issue_dependency(&repo, 10, &repo, 20, &cred)
             .await
             .expect("should succeed");
+    }
+
+    #[test]
+    fn forgejo_mergeability_mergeable() {
+        let (hc, m) = ForgejoPullRequest::compute_mergeability(Some(true));
+        assert_eq!(m, Mergeability::Mergeable);
+        assert_eq!(hc, Some(false));
+    }
+
+    #[test]
+    fn forgejo_mergeability_conflicting() {
+        let (hc, m) = ForgejoPullRequest::compute_mergeability(Some(false));
+        assert_eq!(m, Mergeability::Conflicting);
+        assert_eq!(hc, Some(true));
+    }
+
+    #[test]
+    fn forgejo_mergeability_unknown() {
+        let (hc, m) = ForgejoPullRequest::compute_mergeability(None);
+        assert_eq!(m, Mergeability::Unknown);
+        assert_eq!(hc, None);
     }
 }

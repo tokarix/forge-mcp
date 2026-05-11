@@ -406,7 +406,7 @@ mod tests {
     use domain::{
         ChangeRequest, ChangeRequestCommentDetail, ChangeRequestState, CommitPatchResponse,
         GetChangeRequestCommentsRequest, GetChangeRequestRequest, ListChangeRequestsRequest,
-        OpenChangeRequestResponse, ReadRepositoryFileResponse, ServiceError,
+        Mergeability, OpenChangeRequestResponse, ReadRepositoryFileResponse, ServiceError,
     };
     use tower::ServiceExt;
     use wiremock::{
@@ -835,8 +835,10 @@ mod tests {
                 commit_count: None,
                 head_branch: "agent/fix".to_string(),
                 head_sha: None,
+                has_conflicts: None,
                 index: request.index,
                 merge_base_sha: None,
+                mergeability: Mergeability::Unknown,
                 state: ChangeRequestState::Open,
                 title: "Fix".to_string(),
                 url: "https://example.com/pulls/1".to_string(),
@@ -959,8 +961,10 @@ mod tests {
                     commit_count: None,
                     head_branch: "agent/fix".to_string(),
                     head_sha: None,
+                    has_conflicts: None,
                     index: 1,
                     merge_base_sha: None,
+                    mergeability: Mergeability::Unknown,
                     state: ChangeRequestState::Open,
                     title: "Fix".to_string(),
                     url: "https://example.com/pulls/1".to_string(),

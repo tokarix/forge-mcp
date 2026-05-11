@@ -1680,7 +1680,7 @@ impl McpShim {
     /// Get a single change request by index.
     #[tool(
         name = "get_change_request",
-        description = "Get a single change request (pull request) by index."
+        description = "Get a single change request (pull request) by index. Returns mergeability state and has_conflicts indicator."
     )]
     async fn get_change_request(
         &self,
@@ -1837,7 +1837,7 @@ impl McpShim {
     /// List change requests for a repository.
     #[tool(
         name = "list_change_requests",
-        description = "List change requests (pull requests) for a repository."
+        description = "List change requests (pull requests) for a repository. Returns mergeability state and has_conflicts for each request."
     )]
     async fn list_change_requests(
         &self,
@@ -5745,6 +5745,115 @@ mod tests {
         assert_eq!(json["head_sha"], "abc123");
         assert_eq!(json["state"], "failure");
         assert_eq!(json["details"][0]["context"], "ci/woodpecker");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_change_request_tool_passes_mergeability() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mock = wiremock::MockServer::start().await;
+
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(
+                "/api/v1/repos/adlevio/tokarix/forge-mcp/pulls/1",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "index": 1,
+                    "title": "Fix",
+                    "state": "Open",
+                    "base_branch": "main",
+                    "head_branch": "agent/fix",
+                    "body": "Fix bug",
+                    "url": "https://example.com/pulls/1",
+                    "mergeability": "conflicting",
+                    "has_conflicts": true,
+                    "head_sha": "abc123",
+                    "merge_base_sha": "def456"
+                })),
+            )
+            .mount(&mock)
+            .await;
+
+        let config = test_config(&mock.uri());
+        let shim = McpShim::new(config);
+
+        let request = serde_json::json!({
+            "forge": "adlevio",
+            "owner": "tokarix",
+            "repo": "forge-mcp",
+            "index": 1
+        });
+
+        let result = shim
+            .get_change_request(Parameters(serde_json::from_value(request)?))
+            .await?;
+
+        let json: serde_json::Value = serde_json::from_str(&result)?;
+        assert_eq!(json["index"], 1);
+        assert_eq!(json["mergeability"], "conflicting");
+        assert_eq!(json["has_conflicts"], true);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn list_change_requests_tool_passes_mergeability()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mock = wiremock::MockServer::start().await;
+
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(
+                "/api/v1/repos/adlevio/tokarix/forge-mcp/pulls",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                    {
+                        "index": 1,
+                        "title": "Fix",
+                        "state": "Open",
+                        "base_branch": "main",
+                        "head_branch": "agent/fix",
+                        "body": "Fix bug",
+                        "url": "https://example.com/pulls/1",
+                        "mergeability": "mergeable",
+                        "has_conflicts": false
+                    },
+                    {
+                        "index": 2,
+                        "title": "Feature",
+                        "state": "Open",
+                        "base_branch": "main",
+                        "head_branch": "agent/feature",
+                        "body": "Add feature",
+                        "url": "https://example.com/pulls/2",
+                        "mergeability": "conflicting",
+                        "has_conflicts": true
+                    }
+                ])),
+            )
+            .mount(&mock)
+            .await;
+
+        let config = test_config(&mock.uri());
+        let shim = McpShim::new(config);
+
+        let request = serde_json::json!({
+            "forge": "adlevio",
+            "owner": "tokarix",
+            "repo": "forge-mcp"
+        });
+
+        let result = shim
+            .list_change_requests(Parameters(serde_json::from_value(request)?))
+            .await?;
+
+        let json: serde_json::Value = serde_json::from_str(&result)?;
+        assert_eq!(json[0]["mergeability"], "mergeable");
+        assert_eq!(json[0]["has_conflicts"], false);
+        assert_eq!(json[1]["mergeability"], "conflicting");
+        assert_eq!(json[1]["has_conflicts"], true);
 
         Ok(())
     }

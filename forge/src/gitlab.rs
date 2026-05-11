@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use domain::{
     ChangeRequest, ChangeRequestComment, ChangeRequestCommentDetail, ChangeRequestEvent,
     ChangeRequestEventAction, ChangeRequestReview, ChangeRequestState, ForgeCredential, ForgeUser,
-    ReadRepositoryFileResponse, RepositoryMergeSettings, RepositoryRef,
+    Mergeability, ReadRepositoryFileResponse, RepositoryMergeSettings, RepositoryRef,
 };
 use reqwest::StatusCode;
 use serde::Deserialize;
@@ -265,7 +265,13 @@ struct GitLabMergeRequest {
     changes_count: Option<String>,
     description: Option<String>,
     diff_refs: Option<GitLabDiffRefs>,
+    #[serde(default)]
+    detailed_merge_status: Option<String>,
     iid: u64,
+    #[serde(default)]
+    has_conflicts: Option<bool>,
+    #[serde(default)]
+    merge_status: Option<String>,
     sha: Option<String>,
     source_branch: String,
     state: String,
@@ -297,6 +303,11 @@ impl GitLabMergeRequest {
             .changes_count
             .as_deref()
             .and_then(|s| s.parse::<u64>().ok());
+        let (has_conflicts, mergeability) = Self::compute_mergeability(
+            self.detailed_merge_status.as_ref(),
+            self.has_conflicts,
+            self.merge_status.as_ref(),
+        );
         ChangeRequest {
             base_branch: self.target_branch,
             body: self.description.unwrap_or_default(),
@@ -304,12 +315,68 @@ impl GitLabMergeRequest {
             commit_count: None,
             head_branch: self.source_branch,
             head_sha,
+            has_conflicts,
             index: self.iid,
             merge_base_sha,
+            mergeability,
             state,
             title: self.title,
             url: self.web_url,
         }
+    }
+
+    fn compute_mergeability(
+        detailed_merge_status: Option<&String>,
+        has_conflicts: Option<bool>,
+        merge_status: Option<&String>,
+    ) -> (Option<bool>, Mergeability) {
+        let (hc, mut mergeability) = if let Some(status) = detailed_merge_status {
+            match status.as_str() {
+                "conflict" => {
+                    let hc_inferred = has_conflicts.or(Some(true));
+                    (hc_inferred, Mergeability::Conflicting)
+                }
+                "mergeable" => (has_conflicts, Mergeability::Mergeable),
+                "ci_must_pass"
+                | "commits_status"
+                | "not_approved"
+                | "requested_changes"
+                | "need_rebase"
+                | "draft_status"
+                | "discussions_not_resolved"
+                | "blocked_by_admin_status"
+                | "locked"
+                | "invalid"
+                | "not_open"
+                | "required_approvals_not_met"
+                | "secret_detection_vulnerabilities_found"
+                | "rules_not_configured"
+                | "legal_hold_failed"
+                | "milestone_limit"
+                | "jira_association_missing"
+                | "merge_request_blocked"
+                | "merge_time"
+                | "security_policy_pipeline_check"
+                | "security_policy_violations"
+                | "status_checks_must_pass"
+                | "locked_paths"
+                | "locked_lfs_files"
+                | "title_regex" => (has_conflicts, Mergeability::NotMergeable),
+                _ => (has_conflicts, Mergeability::Unknown),
+            }
+        } else {
+            match merge_status {
+                Some(s) if s == "can_be_merged" => (has_conflicts, Mergeability::Mergeable),
+                Some(s) if s == "cannot_be_merged" => (has_conflicts, Mergeability::NotMergeable),
+                _ => (has_conflicts, Mergeability::Unknown),
+            }
+        };
+
+        if hc == Some(true) {
+            mergeability = Mergeability::Conflicting;
+        }
+
+        (hc, mergeability)
     }
 }
 
@@ -1988,7 +2055,10 @@ mod tests {
             changes_count: None,
             description: Some("body".to_string()),
             diff_refs: None,
+            detailed_merge_status: None,
+            has_conflicts: None,
             iid: 1,
+            merge_status: None,
             sha: Some("abc123".to_string()),
             source_branch: "feature".to_string(),
             state: "opened".to_string(),
@@ -2007,7 +2077,10 @@ mod tests {
             changes_count: Some("3".to_string()),
             description: None,
             diff_refs: None,
+            detailed_merge_status: None,
+            has_conflicts: None,
             iid: 2,
+            merge_status: None,
             sha: None,
             source_branch: "feature".to_string(),
             state: "merged".to_string(),
@@ -3191,5 +3264,124 @@ mod tests {
         assert_eq!(result.0, "feature");
         assert!(result.1.is_none());
         assert!(!result.2);
+    }
+
+    #[test]
+    fn gitlab_mergeability_conflict() {
+        let status = "conflict".to_string();
+        let (hc, m) = GitLabMergeRequest::compute_mergeability(Some(&status), Some(false), None);
+        assert_eq!(m, Mergeability::Conflicting);
+        assert_eq!(hc, Some(false));
+    }
+
+    #[test]
+    fn gitlab_mergeability_conflict_preserves_has_conflicts_false() {
+        let status = "conflict".to_string();
+        let (hc, m) = GitLabMergeRequest::compute_mergeability(Some(&status), None, None);
+        assert_eq!(m, Mergeability::Conflicting);
+        assert_eq!(hc, Some(true));
+    }
+
+    #[test]
+    fn gitlab_mergeability_mergeable() {
+        let status = "mergeable".to_string();
+        let (hc, m) = GitLabMergeRequest::compute_mergeability(Some(&status), None, None);
+        assert_eq!(m, Mergeability::Mergeable);
+        assert_eq!(hc, None);
+    }
+
+    #[test]
+    fn gitlab_mergeability_policy_blocker() {
+        let status = "ci_must_pass".to_string();
+        let (hc, m) = GitLabMergeRequest::compute_mergeability(Some(&status), Some(false), None);
+        assert_eq!(m, Mergeability::NotMergeable);
+        assert_eq!(hc, Some(false));
+    }
+
+    #[test]
+    fn gitlab_mergeability_commits_status_not_mergeable() {
+        let status = "commits_status".to_string();
+        let (_, m) = GitLabMergeRequest::compute_mergeability(Some(&status), None, None);
+        assert_eq!(m, Mergeability::NotMergeable);
+    }
+
+    #[test]
+    fn gitlab_mergeability_transient() {
+        let status = "checking".to_string();
+        let (_, m) = GitLabMergeRequest::compute_mergeability(Some(&status), None, None);
+        assert_eq!(m, Mergeability::Unknown);
+    }
+
+    #[test]
+    fn gitlab_mergeability_fallback_legacy_mergeable() {
+        let merge_status = "can_be_merged".to_string();
+        let (hc, m) = GitLabMergeRequest::compute_mergeability(None, None, Some(&merge_status));
+        assert_eq!(m, Mergeability::Mergeable);
+        assert_eq!(hc, None);
+    }
+
+    #[test]
+    fn gitlab_mergeability_fallback_legacy_not_mergeable() {
+        let merge_status = "cannot_be_merged".to_string();
+        let (_, m) = GitLabMergeRequest::compute_mergeability(None, None, Some(&merge_status));
+        assert_eq!(m, Mergeability::NotMergeable);
+    }
+
+    #[test]
+    fn gitlab_mergeability_fallback_none() {
+        let (_, m) = GitLabMergeRequest::compute_mergeability(None, None, None);
+        assert_eq!(m, Mergeability::Unknown);
+    }
+
+    #[test]
+    fn gitlab_mergeability_has_conflicts_overrides_mergeable() {
+        let status = "mergeable".to_string();
+        let (hc, m) = GitLabMergeRequest::compute_mergeability(Some(&status), Some(true), None);
+        assert_eq!(m, Mergeability::Conflicting);
+        assert_eq!(hc, Some(true));
+    }
+
+    #[test]
+    fn gitlab_mergeability_locked_is_not_mergeable() {
+        let status = "locked".to_string();
+        let (_, m) = GitLabMergeRequest::compute_mergeability(Some(&status), None, None);
+        assert_eq!(m, Mergeability::NotMergeable);
+    }
+
+    #[test]
+    fn gitlab_mergeability_required_approvals_not_met() {
+        let status = "required_approvals_not_met".to_string();
+        let (_, m) = GitLabMergeRequest::compute_mergeability(Some(&status), None, None);
+        assert_eq!(m, Mergeability::NotMergeable);
+    }
+
+    #[test]
+    fn gitlab_mergeability_transient_ci_still_running() {
+        let status = "ci_still_running".to_string();
+        let (_, m) = GitLabMergeRequest::compute_mergeability(Some(&status), None, None);
+        assert_eq!(m, Mergeability::Unknown);
+    }
+
+    #[test]
+    fn gitlab_mergeability_new_blockers_not_mergeable() {
+        for status in [
+            "jira_association_missing",
+            "merge_request_blocked",
+            "merge_time",
+            "security_policy_pipeline_check",
+            "security_policy_violations",
+            "status_checks_must_pass",
+            "locked_paths",
+            "locked_lfs_files",
+            "title_regex",
+        ] {
+            let s = status.to_string();
+            let (_, m) = GitLabMergeRequest::compute_mergeability(Some(&s), None, None);
+            assert_eq!(
+                m,
+                Mergeability::NotMergeable,
+                "expected NotMergeable for: {status}"
+            );
+        }
     }
 }

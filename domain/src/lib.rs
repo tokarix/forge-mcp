@@ -92,7 +92,8 @@ pub struct Repository {
     pub url: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct ChangeRequest {
     pub base_branch: String,
     pub body: String,
@@ -100,8 +101,11 @@ pub struct ChangeRequest {
     pub commit_count: Option<u64>,
     pub head_branch: String,
     pub head_sha: Option<String>,
+    pub has_conflicts: Option<bool>,
     pub index: u64,
     pub merge_base_sha: Option<String>,
+    #[serde(default)]
+    pub mergeability: Mergeability,
     pub state: ChangeRequestState,
     pub title: String,
     pub url: String,
@@ -169,11 +173,24 @@ pub enum CommitStatusState {
     Warning,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub enum ChangeRequestState {
+    #[default]
+    Open,
     Closed,
     Merged,
-    Open,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum Mergeability {
+    Mergeable,
+    Conflicting,
+    NotMergeable,
+    #[default]
+    Unknown,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -1415,7 +1432,9 @@ pub trait RepositoryWriteService: Send + Sync {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::validate_repository_path;
-    use super::{ChangeRequest, ChangeRequestEventAction, ChangeRequestState, ForgeCredential};
+    use super::{
+        ChangeRequest, ChangeRequestEventAction, ChangeRequestState, ForgeCredential, Mergeability,
+    };
 
     #[test]
     fn forge_credential_debug_redacts_token() {
@@ -1443,8 +1462,10 @@ mod tests {
             commit_count: None,
             head_branch: "agent/fix".to_string(),
             head_sha: None,
+            has_conflicts: None,
             index: 1,
             merge_base_sha: None,
+            mergeability: Mergeability::Unknown,
             state: ChangeRequestState::Open,
             title: "Fix".to_string(),
             url: "https://example.com/pulls/1".to_string(),
@@ -1452,6 +1473,44 @@ mod tests {
         let json = serde_json::to_value(&cr).expect("should serialize");
         assert_eq!(json["index"], 1);
         assert_eq!(json["state"], "Open");
+        assert!(json["has_conflicts"].is_null());
+        assert_eq!(json["mergeability"], "unknown");
+    }
+
+    #[test]
+    fn change_request_mergeability_serializes_correctly() {
+        let cr = ChangeRequest {
+            base_branch: "main".to_string(),
+            body: "fix".to_string(),
+            changed_files_count: None,
+            commit_count: None,
+            head_branch: "agent/fix".to_string(),
+            head_sha: None,
+            has_conflicts: Some(true),
+            index: 1,
+            merge_base_sha: None,
+            mergeability: Mergeability::Conflicting,
+            state: ChangeRequestState::Open,
+            title: "Fix".to_string(),
+            url: "https://example.com/pulls/1".to_string(),
+        };
+        let json = serde_json::to_value(&cr).expect("should serialize");
+        assert_eq!(json["has_conflicts"], true);
+        assert_eq!(json["mergeability"], "conflicting");
+
+        let cr_mergeable = ChangeRequest {
+            mergeability: Mergeability::Mergeable,
+            ..cr
+        };
+        let json2 = serde_json::to_value(&cr_mergeable).expect("should serialize");
+        assert_eq!(json2["mergeability"], "mergeable");
+
+        let cr_not_mergeable = ChangeRequest {
+            mergeability: Mergeability::NotMergeable,
+            ..cr_mergeable
+        };
+        let json3 = serde_json::to_value(&cr_not_mergeable).expect("should serialize");
+        assert_eq!(json3["mergeability"], "not_mergeable");
     }
 
     #[test]

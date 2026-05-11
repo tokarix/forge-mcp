@@ -471,7 +471,7 @@ pub async fn get_pull_diff(
         ("index" = u64, Path, description = "Pull request index"),
     ),
     responses(
-        (status = 200, description = "Change request details"),
+        (status = 200, description = "Change request details", body = domain::ChangeRequest),
         (status = 401, description = "Unauthorized", body = ErrorBody),
     ),
     security(("bearer" = []))
@@ -656,7 +656,7 @@ pub async fn get_pull_ci_details(
         ("state" = Option<String>, Query, description = "State filter: open, closed, merged"),
     ),
     responses(
-        (status = 200, description = "List of change requests"),
+        (status = 200, description = "List of change requests", body = Vec<domain::ChangeRequest>),
         (status = 401, description = "Unauthorized", body = ErrorBody),
     ),
     security(("bearer" = []))
@@ -2355,7 +2355,7 @@ mod tests {
     use domain::{
         Branch, BranchDetails, ChangeRequest, ChangeRequestCommentDetail, ChangeRequestState,
         CommitPatchResponse, GetChangeRequestCommentsRequest, GetChangeRequestRequest,
-        ListBranchesResponse, ListChangeRequestsRequest, OpenChangeRequestResponse,
+        ListBranchesResponse, ListChangeRequestsRequest, Mergeability, OpenChangeRequestResponse,
         ReadRepositoryFileResponse, ServiceError,
     };
     use tower::ServiceExt;
@@ -2772,30 +2772,58 @@ mod tests {
     }
 
     struct FakeReadService {
-        list_branches_response: Arc<Mutex<Option<ListBranchesResponse>>>,
-        get_branch_response: Arc<Mutex<Option<BranchDetails>>>,
+        list_branches: Arc<Mutex<Option<ListBranchesResponse>>>,
+        get_branch: Arc<Mutex<Option<BranchDetails>>>,
+        get_change_request: Arc<Mutex<Option<ChangeRequest>>>,
+        list_change_requests: Arc<Mutex<Option<Vec<ChangeRequest>>>>,
     }
 
     impl FakeReadService {
         fn new() -> Self {
             Self {
-                list_branches_response: Arc::new(Mutex::new(None)),
-                get_branch_response: Arc::new(Mutex::new(None)),
+                list_branches: Arc::new(Mutex::new(None)),
+                get_branch: Arc::new(Mutex::new(None)),
+                get_change_request: Arc::new(Mutex::new(None)),
+                list_change_requests: Arc::new(Mutex::new(None)),
             }
         }
 
         fn with_list_branches(resp: ListBranchesResponse) -> Arc<Self> {
             let svc = Self {
-                list_branches_response: Arc::new(Mutex::new(Some(resp))),
-                get_branch_response: Arc::new(Mutex::new(None)),
+                list_branches: Arc::new(Mutex::new(Some(resp))),
+                get_branch: Arc::new(Mutex::new(None)),
+                get_change_request: Arc::new(Mutex::new(None)),
+                list_change_requests: Arc::new(Mutex::new(None)),
             };
             Arc::new(svc)
         }
 
         fn with_get_branch(resp: BranchDetails) -> Arc<Self> {
             let svc = Self {
-                list_branches_response: Arc::new(Mutex::new(None)),
-                get_branch_response: Arc::new(Mutex::new(Some(resp))),
+                list_branches: Arc::new(Mutex::new(None)),
+                get_branch: Arc::new(Mutex::new(Some(resp))),
+                get_change_request: Arc::new(Mutex::new(None)),
+                list_change_requests: Arc::new(Mutex::new(None)),
+            };
+            Arc::new(svc)
+        }
+
+        fn with_get_change_request(resp: ChangeRequest) -> Arc<Self> {
+            let svc = Self {
+                list_branches: Arc::new(Mutex::new(None)),
+                get_branch: Arc::new(Mutex::new(None)),
+                get_change_request: Arc::new(Mutex::new(Some(resp))),
+                list_change_requests: Arc::new(Mutex::new(None)),
+            };
+            Arc::new(svc)
+        }
+
+        fn with_list_change_requests(resp: Vec<ChangeRequest>) -> Arc<Self> {
+            let svc = Self {
+                list_branches: Arc::new(Mutex::new(None)),
+                get_branch: Arc::new(Mutex::new(None)),
+                get_change_request: Arc::new(Mutex::new(None)),
+                list_change_requests: Arc::new(Mutex::new(Some(resp))),
             };
             Arc::new(svc)
         }
@@ -2921,7 +2949,11 @@ mod tests {
             _request: ListChangeRequestsRequest,
             _credential: &domain::ForgeCredential,
         ) -> Result<Vec<ChangeRequest>, ServiceError> {
-            Ok(vec![])
+            if let Some(resp) = self.list_change_requests.lock().expect("lock").take() {
+                Ok(resp)
+            } else {
+                Ok(vec![])
+            }
         }
 
         async fn get_change_request(
@@ -2929,19 +2961,25 @@ mod tests {
             request: GetChangeRequestRequest,
             _: &domain::ForgeCredential,
         ) -> Result<ChangeRequest, ServiceError> {
-            Ok(ChangeRequest {
-                base_branch: "main".to_string(),
-                body: "body".to_string(),
-                changed_files_count: None,
-                commit_count: None,
-                head_branch: "agent/fix".to_string(),
-                head_sha: None,
-                index: request.index,
-                merge_base_sha: None,
-                state: ChangeRequestState::Open,
-                title: "Fix".to_string(),
-                url: "https://example.com/pulls/1".to_string(),
-            })
+            if let Some(resp) = self.get_change_request.lock().expect("lock").take() {
+                Ok(resp)
+            } else {
+                Ok(ChangeRequest {
+                    base_branch: "main".to_string(),
+                    body: "body".to_string(),
+                    changed_files_count: None,
+                    commit_count: None,
+                    head_branch: "agent/fix".to_string(),
+                    head_sha: None,
+                    has_conflicts: None,
+                    index: request.index,
+                    merge_base_sha: None,
+                    mergeability: Mergeability::Unknown,
+                    state: ChangeRequestState::Open,
+                    title: "Fix".to_string(),
+                    url: "https://example.com/pulls/1".to_string(),
+                })
+            }
         }
 
         async fn list_branches(
@@ -2949,7 +2987,7 @@ mod tests {
             _: domain::ListBranchesRequest,
             _: &domain::ForgeCredential,
         ) -> Result<domain::ListBranchesResponse, ServiceError> {
-            if let Some(resp) = self.list_branches_response.lock().expect("lock").take() {
+            if let Some(resp) = self.list_branches.lock().expect("lock").take() {
                 Ok(resp)
             } else {
                 Err(ServiceError::Upstream("unimplemented in test fake".into()))
@@ -2961,7 +2999,7 @@ mod tests {
             _: domain::GetBranchRequest,
             _: &domain::ForgeCredential,
         ) -> Result<domain::BranchDetails, ServiceError> {
-            if let Some(resp) = self.get_branch_response.lock().expect("lock").take() {
+            if let Some(resp) = self.get_branch.lock().expect("lock").take() {
                 Ok(resp)
             } else {
                 Err(ServiceError::Upstream("unimplemented in test fake".into()))
@@ -3068,8 +3106,10 @@ mod tests {
                 commit_count: None,
                 head_branch: "agent/fix".to_string(),
                 head_sha: None,
+                has_conflicts: None,
                 index: request.index,
                 merge_base_sha: None,
+                mergeability: Mergeability::Unknown,
                 state: ChangeRequestState::Closed,
                 title: "Fix".to_string(),
                 url: "https://example.com/pulls/1".to_string(),
@@ -3133,8 +3173,10 @@ mod tests {
                     commit_count: None,
                     head_branch: "agent/fix".to_string(),
                     head_sha: None,
+                    has_conflicts: None,
                     index: 1,
                     merge_base_sha: None,
+                    mergeability: Mergeability::Unknown,
                     state: ChangeRequestState::Open,
                     title: "Fix".to_string(),
                     url: "https://example.com/pulls/1".to_string(),
@@ -3223,8 +3265,10 @@ mod tests {
                 commit_count: None,
                 head_branch: "agent/fix".to_string(),
                 head_sha: None,
+                has_conflicts: None,
                 index: request.index,
                 merge_base_sha: None,
+                mergeability: Mergeability::Unknown,
                 state: ChangeRequestState::Open,
                 title: request.title.unwrap_or_else(|| "Fix".to_string()),
                 url: "https://example.com/pulls/1".to_string(),
@@ -3686,6 +3730,96 @@ mod tests {
             .expect("read response body");
         let json: serde_json::Value = serde_json::from_slice(&body).expect("parse JSON response");
         assert_eq!(json["index"], 1);
+    }
+
+    #[tokio::test]
+    async fn get_pull_serializes_mergeability_and_has_conflicts() {
+        let cr = ChangeRequest {
+            base_branch: "main".to_string(),
+            body: "body".to_string(),
+            changed_files_count: None,
+            commit_count: None,
+            head_branch: "agent/fix".to_string(),
+            head_sha: Some("abc123".to_string()),
+            has_conflicts: Some(true),
+            index: 1,
+            merge_base_sha: None,
+            mergeability: Mergeability::Conflicting,
+            state: ChangeRequestState::Open,
+            title: "Fix".to_string(),
+            url: "https://example.com/pulls/1".to_string(),
+        };
+
+        let state = test_state_with_read(
+            FakeReadService::with_get_change_request(cr),
+            vec!["test-forge/org/repo".to_string()],
+            Arc::new(FakeWriteService::new()),
+        );
+
+        let app = crate::build_router(state, false);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/repos/test-forge/org/repo/pulls/1")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read response body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("parse JSON response");
+        assert_eq!(json["mergeability"], "conflicting");
+        assert_eq!(json["has_conflicts"], true);
+    }
+
+    #[tokio::test]
+    async fn list_pulls_serializes_mergeability_and_has_conflicts() {
+        let crs = vec![ChangeRequest {
+            base_branch: "main".to_string(),
+            body: "body".to_string(),
+            changed_files_count: None,
+            commit_count: None,
+            head_branch: "agent/fix".to_string(),
+            head_sha: Some("abc123".to_string()),
+            has_conflicts: Some(false),
+            index: 1,
+            merge_base_sha: None,
+            mergeability: Mergeability::Mergeable,
+            state: ChangeRequestState::Open,
+            title: "Fix".to_string(),
+            url: "https://example.com/pulls/1".to_string(),
+        }];
+
+        let state = test_state_with_read(
+            FakeReadService::with_list_change_requests(crs),
+            vec!["test-forge/org/repo".to_string()],
+            Arc::new(FakeWriteService::new()),
+        );
+
+        let app = crate::build_router(state, false);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/repos/test-forge/org/repo/pulls")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read response body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("parse JSON response");
+        assert_eq!(json[0]["mergeability"], "mergeable");
+        assert_eq!(json[0]["has_conflicts"], false);
     }
 
     #[tokio::test]
