@@ -39,6 +39,28 @@ GIT_CONFIG_VALUE_1='!f() { echo username=<agent_id>; echo password=<git_token>; 
 git clone http://gateway:8443/git/myforge/org/repo
 ```
 
+### Existing Checkout Setup
+
+For an existing checkout, keep the persisted remote URL tokenless and inject
+credentials only for commands that contact the proxy.
+
+```bash
+git remote set-url origin http://gateway:8443/git/myforge/org/repo
+git branch --set-upstream-to=origin/master master
+
+GIT_CONFIG_COUNT=2 \
+GIT_CONFIG_KEY_0=credential.helper \
+GIT_CONFIG_VALUE_0= \
+GIT_CONFIG_KEY_1=credential.helper \
+GIT_CONFIG_VALUE_1='!f() { echo username=<agent_id>; echo password=<git_token>; }; f' \
+git fetch origin master
+```
+
+If the repository also has a local mirror remote, make sure the working branch
+tracks the proxy remote that matches the deployed forge state. A successful
+`git pull` against a stale local mirror can still leave the checkout behind the
+gateway's `master` or `main`.
+
 ## Write Workflow
 
 Always work in a **detached git worktree** — never edit files in the main checkout. This keeps the main working tree clean and prevents patches from picking up unrelated changes, especially when multiple agents share the same repository.
