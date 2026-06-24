@@ -103,6 +103,8 @@ pub struct ChangeRequest {
     pub head_sha: Option<String>,
     pub has_conflicts: Option<bool>,
     pub index: u64,
+    #[serde(default)]
+    pub labels: Vec<String>,
     pub merge_base_sha: Option<String>,
     #[serde(default)]
     pub mergeability: Mergeability,
@@ -1464,6 +1466,7 @@ mod tests {
             head_sha: None,
             has_conflicts: None,
             index: 1,
+            labels: vec![],
             merge_base_sha: None,
             mergeability: Mergeability::Unknown,
             state: ChangeRequestState::Open,
@@ -1488,6 +1491,7 @@ mod tests {
             head_sha: None,
             has_conflicts: Some(true),
             index: 1,
+            labels: vec![],
             merge_base_sha: None,
             mergeability: Mergeability::Conflicting,
             state: ChangeRequestState::Open,
@@ -1511,6 +1515,60 @@ mod tests {
         };
         let json3 = serde_json::to_value(&cr_not_mergeable).expect("should serialize");
         assert_eq!(json3["mergeability"], "not_mergeable");
+    }
+
+    #[test]
+    fn change_request_labels_always_serialized() {
+        let cr = ChangeRequest {
+            base_branch: "main".to_string(),
+            body: "fix".to_string(),
+            changed_files_count: None,
+            commit_count: None,
+            head_branch: "agent/fix".to_string(),
+            head_sha: None,
+            has_conflicts: None,
+            index: 1,
+            labels: vec!["bugfix".to_string()],
+            merge_base_sha: None,
+            mergeability: Mergeability::Unknown,
+            state: ChangeRequestState::Open,
+            title: "Fix".to_string(),
+            url: "https://example.com/pulls/1".to_string(),
+        };
+        let json = serde_json::to_value(&cr).expect("should serialize");
+        assert_eq!(json["labels"], serde_json::json!(["bugfix"]));
+    }
+
+    #[test]
+    fn change_request_deserializes_missing_labels_as_empty() {
+        let json = r#"{
+            "base_branch": "main",
+            "body": "",
+            "head_branch": "feature",
+            "index": 1,
+            "state": "Open",
+            "title": "T",
+            "url": "U"
+        }"#;
+        let cr: ChangeRequest = serde_json::from_str(json).expect("should deserialize");
+        assert!(cr.labels.is_empty());
+    }
+
+    #[test]
+    fn change_request_deserializes_labels_array() {
+        let json = r#"{
+            "base_branch": "main",
+            "body": "",
+            "head_branch": "feature",
+            "index": 1,
+            "labels": ["a", "b"],
+            "state": "Open",
+            "title": "T",
+            "url": "U"
+        }"#;
+        let cr: ChangeRequest = serde_json::from_str(json).expect("should deserialize");
+        assert!(cr.labels.contains(&"a".to_string()));
+        assert!(cr.labels.contains(&"b".to_string()));
     }
 
     #[test]

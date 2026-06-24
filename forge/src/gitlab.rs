@@ -271,6 +271,8 @@ struct GitLabMergeRequest {
     #[serde(default)]
     has_conflicts: Option<bool>,
     #[serde(default)]
+    labels: Option<Vec<String>>,
+    #[serde(default)]
     merge_status: Option<String>,
     sha: Option<String>,
     source_branch: String,
@@ -317,6 +319,7 @@ impl GitLabMergeRequest {
             head_sha,
             has_conflicts,
             index: self.iid,
+            labels: self.labels.unwrap_or_default(),
             merge_base_sha,
             mergeability,
             state,
@@ -2058,6 +2061,7 @@ mod tests {
             detailed_merge_status: None,
             has_conflicts: None,
             iid: 1,
+            labels: None,
             merge_status: None,
             sha: Some("abc123".to_string()),
             source_branch: "feature".to_string(),
@@ -2080,6 +2084,7 @@ mod tests {
             detailed_merge_status: None,
             has_conflicts: None,
             iid: 2,
+            labels: None,
             merge_status: None,
             sha: None,
             source_branch: "feature".to_string(),
@@ -3383,5 +3388,90 @@ mod tests {
                 "expected NotMergeable for: {status}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn gitlab_mr_labels_map_to_names() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v4/projects/.+/merge_requests/\d+$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "iid": 1,
+                "title": "Fix",
+                "state": "opened",
+                "description": "Fix bug",
+                "source_branch": "agent/fix",
+                "target_branch": "main",
+                "web_url": "https://gitlab.example/group/repo/-/merge_requests/1",
+                "sha": "abc123",
+                "labels": ["bug", "backend"]
+            })))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let cr = adapter
+            .get_change_request(&test_repo(), 1, &cred)
+            .await
+            .expect("get change request");
+
+        assert_eq!(cr.labels, vec!["bug", "backend"]);
+    }
+
+    #[tokio::test]
+    async fn gitlab_mr_missing_labels_returns_empty() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v4/projects/.+/merge_requests/\d+$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "iid": 1,
+                "title": "Fix",
+                "state": "opened",
+                "description": "",
+                "source_branch": "agent/fix",
+                "target_branch": "main",
+                "web_url": "https://gitlab.example/group/repo/-/merge_requests/1",
+                "sha": "abc123"
+            })))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let cr = adapter
+            .get_change_request(&test_repo(), 1, &cred)
+            .await
+            .expect("get change request");
+
+        assert!(cr.labels.is_empty());
+    }
+
+    #[tokio::test]
+    async fn gitlab_mr_malformed_labels_array_propagates_error() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v4/projects/.+/merge_requests/\d+$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "iid": 1,
+                "title": "Fix",
+                "state": "opened",
+                "description": "",
+                "source_branch": "agent/fix",
+                "target_branch": "main",
+                "web_url": "https://gitlab.example/group/repo/-/merge_requests/1",
+                "sha": "abc123",
+                "labels": ["bug", 123]
+            })))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let result = adapter.get_change_request(&test_repo(), 1, &cred).await;
+        assert!(result.is_err());
     }
 }

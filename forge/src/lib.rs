@@ -973,6 +973,8 @@ struct ForgejoPullRequest {
     changed_files: Option<u64>,
     head: ForgejoPullBranch,
     html_url: String,
+    #[serde(default)]
+    labels: Option<Vec<ForgejoLabelResponse>>,
     merge_base: Option<String>,
     #[serde(default)]
     mergeable: Option<bool>,
@@ -1002,6 +1004,12 @@ impl ForgejoPullRequest {
             head_sha: Some(self.head.sha),
             has_conflicts,
             index: self.number,
+            labels: self
+                .labels
+                .unwrap_or_default()
+                .into_iter()
+                .map(|l| l.name)
+                .collect(),
             merge_base_sha: self.merge_base,
             mergeability,
             state,
@@ -6129,5 +6137,98 @@ mod tests {
         let (hc, m) = ForgejoPullRequest::compute_mergeability(None);
         assert_eq!(m, Mergeability::Unknown);
         assert_eq!(hc, None);
+    }
+
+    #[tokio::test]
+    async fn forgejo_pr_labels_map_to_names() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/org/repo/pulls/1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "number": 1,
+                "title": "Fix",
+                "state": "open",
+                "merged": false,
+                "body": "Fix bug",
+                "html_url": "https://forge.example/org/repo/pulls/1",
+                "base": {"ref": "main", "sha": "abc123"},
+                "head": {"ref": "agent/fix", "sha": "def456"},
+                "labels": [
+                    {"id": 1, "name": "bug"},
+                    {"id": 2, "name": "priority"}
+                ]
+            })))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let cr = adapter
+            .get_change_request(&test_repo(), 1, &cred)
+            .await
+            .expect("get change request");
+
+        assert_eq!(cr.labels, vec!["bug", "priority"]);
+    }
+
+    #[tokio::test]
+    async fn forgejo_pr_missing_labels_returns_empty() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/org/repo/pulls/1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "number": 1,
+                "title": "Fix",
+                "state": "open",
+                "merged": false,
+                "body": "",
+                "html_url": "https://forge.example/org/repo/pulls/1",
+                "base": {"ref": "main", "sha": "abc123"},
+                "head": {"ref": "agent/fix", "sha": "def456"}
+            })))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let cr = adapter
+            .get_change_request(&test_repo(), 1, &cred)
+            .await
+            .expect("get change request");
+
+        assert!(cr.labels.is_empty());
+    }
+
+    #[tokio::test]
+    async fn forgejo_pr_malformed_label_object_propagates_error() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/org/repo/pulls/1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "number": 1,
+                "title": "Fix",
+                "state": "open",
+                "merged": false,
+                "body": "",
+                "html_url": "https://forge.example/org/repo/pulls/1",
+                "base": {"ref": "main", "sha": "abc123"},
+                "head": {"ref": "agent/fix", "sha": "def456"},
+                "labels": [
+                    {"id": 1}
+                ]
+            })))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let result = adapter.get_change_request(&test_repo(), 1, &cred).await;
+        match result {
+            Err(ForgeError::Http(_)) => {}
+            other => panic!("expected ForgeError::Http, got {other:?}"),
+        }
     }
 }

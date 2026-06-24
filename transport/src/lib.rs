@@ -1680,7 +1680,7 @@ impl McpShim {
     /// Get a single change request by index.
     #[tool(
         name = "get_change_request",
-        description = "Get a single change request (pull request) by index. Returns mergeability state and has_conflicts indicator."
+        description = "Get a single change request (pull request) by index. Returns mergeability state, has_conflicts indicator, and labels."
     )]
     async fn get_change_request(
         &self,
@@ -1837,7 +1837,7 @@ impl McpShim {
     /// List change requests for a repository.
     #[tool(
         name = "list_change_requests",
-        description = "List change requests (pull requests) for a repository. Returns mergeability state and has_conflicts for each request."
+        description = "List change requests (pull requests) for a repository. Returns mergeability state, has_conflicts, and labels for each request."
     )]
     async fn list_change_requests(
         &self,
@@ -5770,7 +5770,8 @@ mod tests {
                     "mergeability": "conflicting",
                     "has_conflicts": true,
                     "head_sha": "abc123",
-                    "merge_base_sha": "def456"
+                    "merge_base_sha": "def456",
+                    "labels": ["bugfix"]
                 })),
             )
             .mount(&mock)
@@ -5794,6 +5795,7 @@ mod tests {
         assert_eq!(json["index"], 1);
         assert_eq!(json["mergeability"], "conflicting");
         assert_eq!(json["has_conflicts"], true);
+        assert_eq!(json["labels"], serde_json::json!(["bugfix"]));
 
         Ok(())
     }
@@ -5818,7 +5820,8 @@ mod tests {
                         "body": "Fix bug",
                         "url": "https://example.com/pulls/1",
                         "mergeability": "mergeable",
-                        "has_conflicts": false
+                        "has_conflicts": false,
+                        "labels": ["frontend"]
                     },
                     {
                         "index": 2,
@@ -5829,7 +5832,8 @@ mod tests {
                         "body": "Add feature",
                         "url": "https://example.com/pulls/2",
                         "mergeability": "conflicting",
-                        "has_conflicts": true
+                        "has_conflicts": true,
+                        "labels": ["backend", "priority"]
                     }
                 ])),
             )
@@ -5852,8 +5856,13 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(&result)?;
         assert_eq!(json[0]["mergeability"], "mergeable");
         assert_eq!(json[0]["has_conflicts"], false);
+        assert_eq!(json[0]["labels"], serde_json::json!(["frontend"]));
         assert_eq!(json[1]["mergeability"], "conflicting");
         assert_eq!(json[1]["has_conflicts"], true);
+        assert_eq!(
+            json[1]["labels"],
+            serde_json::json!(["backend", "priority"])
+        );
 
         Ok(())
     }

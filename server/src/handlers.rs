@@ -2973,6 +2973,7 @@ mod tests {
                     head_sha: None,
                     has_conflicts: None,
                     index: request.index,
+                    labels: vec![],
                     merge_base_sha: None,
                     mergeability: Mergeability::Unknown,
                     state: ChangeRequestState::Open,
@@ -3108,6 +3109,7 @@ mod tests {
                 head_sha: None,
                 has_conflicts: None,
                 index: request.index,
+                labels: vec![],
                 merge_base_sha: None,
                 mergeability: Mergeability::Unknown,
                 state: ChangeRequestState::Closed,
@@ -3175,6 +3177,7 @@ mod tests {
                     head_sha: None,
                     has_conflicts: None,
                     index: 1,
+                    labels: vec![],
                     merge_base_sha: None,
                     mergeability: Mergeability::Unknown,
                     state: ChangeRequestState::Open,
@@ -3267,6 +3270,7 @@ mod tests {
                 head_sha: None,
                 has_conflicts: None,
                 index: request.index,
+                labels: vec![],
                 merge_base_sha: None,
                 mergeability: Mergeability::Unknown,
                 state: ChangeRequestState::Open,
@@ -3743,6 +3747,7 @@ mod tests {
             head_sha: Some("abc123".to_string()),
             has_conflicts: Some(true),
             index: 1,
+            labels: vec!["ready-for-code-review".to_string()],
             merge_base_sha: None,
             mergeability: Mergeability::Conflicting,
             state: ChangeRequestState::Open,
@@ -3775,6 +3780,7 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).expect("parse JSON response");
         assert_eq!(json["mergeability"], "conflicting");
         assert_eq!(json["has_conflicts"], true);
+        assert_eq!(json["labels"], serde_json::json!(["ready-for-code-review"]));
     }
 
     #[tokio::test]
@@ -3788,6 +3794,7 @@ mod tests {
             head_sha: Some("abc123".to_string()),
             has_conflicts: Some(false),
             index: 1,
+            labels: vec![],
             merge_base_sha: None,
             mergeability: Mergeability::Mergeable,
             state: ChangeRequestState::Open,
@@ -3820,6 +3827,7 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).expect("parse JSON response");
         assert_eq!(json[0]["mergeability"], "mergeable");
         assert_eq!(json[0]["has_conflicts"], false);
+        assert!(json[0]["labels"].is_array());
     }
 
     #[tokio::test]
