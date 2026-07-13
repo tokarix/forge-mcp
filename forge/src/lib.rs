@@ -13,7 +13,7 @@ use domain::{
 use hmac::{Hmac, Mac};
 use reqwest::StatusCode;
 use reqwest::redirect::Policy;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use thiserror::Error;
 
@@ -42,6 +42,23 @@ pub enum ForgeError {
     },
     #[error("unexpected upstream status {status}: {body}")]
     UnexpectedStatus { status: StatusCode, body: String },
+    #[error(
+        "Forgejo dependency request failed: method={method} path={path} source={source_owner}/{source_repo}#{source_index} dependency={dependency_owner}/{dependency_repo}#{dependency_index} status={status:?} response_body_preview={response_body_preview:?}: {source}"
+    )]
+    DependencyRequest {
+        method: String,
+        path: String,
+        source_owner: String,
+        source_repo: String,
+        source_index: u64,
+        dependency_owner: String,
+        dependency_repo: String,
+        dependency_index: u64,
+        status: Option<StatusCode>,
+        response_body_preview: Option<String>,
+        #[source]
+        source: Box<ForgeError>,
+    },
     #[error("operation not supported: {0}")]
     Unsupported(String),
     #[error("invalid response payload: {0}")]
@@ -106,6 +123,10 @@ pub(crate) fn parse_forge_error_message(body: &str) -> Option<String> {
         return extract_error_recursive(&value);
     }
     None
+}
+
+fn bounded_preview(value: &str, max_chars: usize) -> String {
+    value.chars().take(max_chars).collect()
 }
 
 #[async_trait]
@@ -742,6 +763,7 @@ impl ForgejoAdapter {
     /// # Errors
     ///
     /// Returns an error if the HTTP client cannot be built.
+    #[allow(clippy::result_large_err)]
     pub fn new(config: ForgejoConfig) -> Result<Self, ForgeError> {
         install_ring_provider();
 
@@ -784,8 +806,10 @@ impl ForgejoAdapter {
         let body = response.text().await.unwrap_or_default();
 
         if status == StatusCode::NOT_FOUND {
-            let message = parse_forge_error_message(&body)
-                .unwrap_or_else(|| "repository or resource not found".to_string());
+            let message = parse_forge_error_message(&body).map_or_else(
+                || "repository or resource not found".to_string(),
+                |message| bounded_preview(&message, 1024),
+            );
             tracing::warn!(
                 %status,
                 %message,
@@ -798,10 +822,97 @@ impl ForgejoAdapter {
             %status,
             %url,
             body_len = body.len(),
-            body_preview = %&body[..body.len().min(512)],
+            body_preview = %bounded_preview(&body, 512),
             "unexpected upstream status",
         );
-        Err(ForgeError::UnexpectedStatus { status, body })
+        Err(ForgeError::UnexpectedStatus {
+            status,
+            body: bounded_preview(&body, 1024),
+        })
+    }
+
+    fn dependency_request_error(
+        method: &reqwest::Method,
+        path: &str,
+        repository: &RepositoryRef,
+        index: u64,
+        dependency_repository: &RepositoryRef,
+        dependency: u64,
+        error: ForgeError,
+    ) -> ForgeError {
+        let (status, response_body_preview) = match &error {
+            ForgeError::NotFound { status, message }
+            | ForgeError::UnexpectedStatus {
+                status,
+                body: message,
+            } => (Some(*status), Some(bounded_preview(message, 1024))),
+            ForgeError::Redirect { status, location } => {
+                (Some(*status), Some(bounded_preview(location, 1024)))
+            }
+            _ => (None, None),
+        };
+
+        ForgeError::DependencyRequest {
+            method: method.to_string(),
+            path: path.to_string(),
+            source_owner: repository.owner.clone(),
+            source_repo: repository.name.clone(),
+            source_index: index,
+            dependency_owner: dependency_repository.owner.clone(),
+            dependency_repo: dependency_repository.name.clone(),
+            dependency_index: dependency,
+            status,
+            response_body_preview,
+            source: Box::new(error),
+        }
+    }
+
+    /// Sends a Forgejo issue-dependency POST or DELETE request.
+    ///
+    /// This sends the complete `ForgejoIssueMeta` body for either operation.
+    /// The source issue is identified by the URL path, while the dependency
+    /// issue is identified by the JSON body.
+    async fn send_issue_dependency_request(
+        &self,
+        method: reqwest::Method,
+        repository: &RepositoryRef,
+        index: u64,
+        dependency_repository: &RepositoryRef,
+        dependency: u64,
+        credential: &ForgeCredential,
+    ) -> Result<(), ForgeError> {
+        let path = format!(
+            "/api/v1/repos/{}/{}/issues/{index}/dependencies",
+            repository.owner, repository.name,
+        );
+        let url = format!("{}{path}", self.config.base_url.trim_end_matches('/'));
+        let body = ForgejoIssueMeta {
+            index: dependency,
+            owner: dependency_repository.owner.clone(),
+            repo: dependency_repository.name.clone(),
+        };
+        let effective_token = credential.token.as_deref().or(self.config.token.as_deref());
+        let mut request = self.client.request(method.clone(), &url).json(&body);
+        if let Some(token) = effective_token {
+            request = request.bearer_auth(token);
+        }
+
+        Self::check_response(request.send().await?)
+            .await
+            .map(|_| ())
+            .map_err(|error| {
+                Self::dependency_request_error(
+                    &method,
+                    &path,
+                    repository,
+                    index,
+                    dependency_repository,
+                    dependency,
+                    error,
+                )
+            })?;
+
+        Ok(())
     }
 
     async fn get_repository_merge_settings_response(
@@ -1080,6 +1191,17 @@ struct ForgejoIssueResponse {
     title: String,
 }
 
+/// Request body used by Forgejo's issue dependency endpoints.
+///
+/// Both POST and DELETE dependency writes use `IssueMeta`.
+/// The dependency issue's visible index and its repository coordinates.
+#[derive(Debug, Serialize)]
+struct ForgejoIssueMeta {
+    index: u64,
+    owner: String,
+    repo: String,
+}
+
 impl ForgejoIssueResponse {
     fn into_issue(self) -> domain::Issue {
         domain::Issue {
@@ -1330,31 +1452,15 @@ impl ForgeAdapter for ForgejoAdapter {
         dependency: u64,
         credential: &ForgeCredential,
     ) -> Result<domain::Issue, ForgeError> {
-        // Forgejo's dependency API expects IssueMeta with the visible issue index,
-        // not the internal database ID.  Include "owner" and "repo" for cross-repo.
-        let url = format!(
-            "{}/api/v1/repos/{}/{}/issues/{index}/dependencies",
-            self.config.base_url.trim_end_matches('/'),
-            repository.owner,
-            repository.name,
-        );
-
-        let body = if dependency_repository == repository {
-            serde_json::json!({"index": dependency})
-        } else {
-            serde_json::json!({
-                "index": dependency,
-                "owner": dependency_repository.owner,
-                "repo": dependency_repository.name
-            })
-        };
-        let effective_token = credential.token.as_deref().or(self.config.token.as_deref());
-        let mut request = self.client.post(&url).json(&body);
-        if let Some(token) = effective_token {
-            request = request.bearer_auth(token);
-        }
-
-        Self::check_response(request.send().await?).await?;
+        self.send_issue_dependency_request(
+            reqwest::Method::POST,
+            repository,
+            index,
+            dependency_repository,
+            dependency,
+            credential,
+        )
+        .await?;
 
         self.get_issue(repository, index, credential).await
     }
@@ -2160,31 +2266,15 @@ impl ForgeAdapter for ForgejoAdapter {
         dependency: u64,
         credential: &ForgeCredential,
     ) -> Result<domain::Issue, ForgeError> {
-        // Forgejo's dependency API expects IssueMeta with the visible issue index,
-        // not the internal database ID.  Include "owner" and "repo" for cross-repo.
-        let url = format!(
-            "{}/api/v1/repos/{}/{}/issues/{index}/dependencies",
-            self.config.base_url.trim_end_matches('/'),
-            repository.owner,
-            repository.name,
-        );
-
-        let body = if dependency_repository == repository {
-            serde_json::json!({"index": dependency})
-        } else {
-            serde_json::json!({
-                "index": dependency,
-                "owner": dependency_repository.owner,
-                "repo": dependency_repository.name
-            })
-        };
-        let effective_token = credential.token.as_deref().or(self.config.token.as_deref());
-        let mut request = self.client.delete(&url).json(&body);
-        if let Some(token) = effective_token {
-            request = request.bearer_auth(token);
-        }
-
-        Self::check_response(request.send().await?).await?;
+        self.send_issue_dependency_request(
+            reqwest::Method::DELETE,
+            repository,
+            index,
+            dependency_repository,
+            dependency,
+            credential,
+        )
+        .await?;
 
         self.get_issue(repository, index, credential).await
     }
@@ -5918,7 +6008,58 @@ mod tests {
         }
     }
 
-    /// Same-repo: single POST to base repo with `IssueMeta` body using visible index.
+    #[allow(clippy::too_many_arguments)]
+    fn assert_dependency_error_context(
+        error: ForgeError,
+        method: &str,
+        source_owner: &str,
+        source_repo: &str,
+        source_index: u64,
+        dependency_owner: &str,
+        dependency_repo: &str,
+        dependency_index: u64,
+        status: StatusCode,
+        response_body_preview: &str,
+    ) -> ForgeError {
+        match error {
+            ForgeError::DependencyRequest {
+                method: actual_method,
+                path,
+                source_owner: actual_source_owner,
+                source_repo: actual_source_repo,
+                source_index: actual_source_index,
+                dependency_owner: actual_dependency_owner,
+                dependency_repo: actual_dependency_repo,
+                dependency_index: actual_dependency_index,
+                status: actual_status,
+                response_body_preview: actual_response_body_preview,
+                source,
+            } => {
+                assert_eq!(actual_method, method);
+                assert_eq!(
+                    path,
+                    format!(
+                        "/api/v1/repos/{source_owner}/{source_repo}/issues/{source_index}/dependencies"
+                    )
+                );
+                assert_eq!(actual_source_owner, source_owner);
+                assert_eq!(actual_source_repo, source_repo);
+                assert_eq!(actual_source_index, source_index);
+                assert_eq!(actual_dependency_owner, dependency_owner);
+                assert_eq!(actual_dependency_repo, dependency_repo);
+                assert_eq!(actual_dependency_index, dependency_index);
+                assert_eq!(actual_status, Some(status));
+                assert_eq!(
+                    actual_response_body_preview.as_deref(),
+                    Some(response_body_preview)
+                );
+                *source
+            }
+            other => panic!("expected DependencyRequest, got {other:?}"),
+        }
+    }
+
+    /// Same-repo: single POST to base repo with the complete `IssueMeta` body.
     #[tokio::test]
     async fn add_issue_dependency_same_repo_sends_visible_index() {
         let mock = MockServer::start().await;
@@ -5926,7 +6067,11 @@ mod tests {
         // Mock: POST dependency to base repo — no prefetch
         Mock::given(method("POST"))
             .and(path_regex(r"/api/v1/repos/org/repo/issues/10/dependencies"))
-            .and(body_json(serde_json::json!({"index": 20})))
+            .and(body_json(serde_json::json!({
+                "index": 20,
+                "owner": "org",
+                "repo": "repo"
+            })))
             .respond_with(ResponseTemplate::new(200))
             .expect(1)
             .mount(&mock)
@@ -6042,15 +6187,64 @@ mod tests {
             .expect("should succeed");
     }
 
-    /// Regression guard: same-repo remove body contains only "index", no cross-repo fields.
+    /// Cross-repo remove: a DELETE contract mismatch must not look successful.
     #[tokio::test]
-    async fn remove_issue_dependency_same_repo_no_cross_fields() {
+    async fn remove_issue_dependency_cross_repo_preserves_delete_contract() {
         let mock = MockServer::start().await;
 
-        // Mock: DELETE dependency — body should contain only "index", no owner/repo
         Mock::given(method("DELETE"))
             .and(path_regex(r"/api/v1/repos/org/repo/issues/10/dependencies"))
-            .and(body_json(serde_json::json!({"index": 20})))
+            .and(body_json(serde_json::json!({
+                "index": 20,
+                "owner": "other-org",
+                "repo": "other-repo"
+            })))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "message": "cross-repo dependency not found"
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let result = adapter
+            .remove_issue_dependency(&test_repo(), 10, &test_cross_repo(), 20, &cred)
+            .await;
+
+        match assert_dependency_error_context(
+            result.expect_err("expected cross-repo DELETE to fail"),
+            "DELETE",
+            "org",
+            "repo",
+            10,
+            "other-org",
+            "other-repo",
+            20,
+            StatusCode::NOT_FOUND,
+            "cross-repo dependency not found",
+        ) {
+            ForgeError::NotFound { status, message } => {
+                assert_eq!(status, StatusCode::NOT_FOUND);
+                assert_eq!(message, "cross-repo dependency not found");
+            }
+            other => panic!("expected cross-repo DELETE NotFound source, got {other:?}"),
+        }
+    }
+
+    /// Same-repo remove: single DELETE to base repo with the complete `IssueMeta` body.
+    #[tokio::test]
+    async fn remove_issue_dependency_same_repo_sends_visible_index_body() {
+        let mock = MockServer::start().await;
+
+        // Mock: DELETE dependency from base repo — no prefetch
+        Mock::given(method("DELETE"))
+            .and(path_regex(r"/api/v1/repos/org/repo/issues/10/dependencies"))
+            .and(body_json(serde_json::json!({
+                "index": 20,
+                "owner": "org",
+                "repo": "repo"
+            })))
             .respond_with(ResponseTemplate::new(200))
             .expect(1)
             .mount(&mock)
@@ -6080,42 +6274,158 @@ mod tests {
             .expect("should succeed");
     }
 
-    /// Same-repo remove: single DELETE to base repo with `IssueMeta` body — no prefetch.
     #[tokio::test]
-    async fn remove_issue_dependency_same_repo_sends_visible_index_body() {
+    async fn issue_dependency_repository_not_found_preserves_upstream_message() {
         let mock = MockServer::start().await;
 
-        // Mock: DELETE dependency from base repo — no prefetch
-        Mock::given(method("DELETE"))
+        Mock::given(method("POST"))
             .and(path_regex(r"/api/v1/repos/org/repo/issues/10/dependencies"))
-            .and(body_json(serde_json::json!({"index": 20})))
-            .respond_with(ResponseTemplate::new(200))
-            .expect(1)
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "message": "repository 'other-org/other-repo' not found"
+            })))
             .mount(&mock)
             .await;
 
-        // Mock: GET base issue after
-        Mock::given(method("GET"))
-            .and(path_regex(r"/api/v1/repos/org/repo/issues/10"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "id": 1000,
-                "number": 10,
-                "title": "Base Issue",
-                "state": "open",
-                "body": "",
-                "html_url": "https://forge.example/org/repo/issues/10"
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let result = adapter
+            .add_issue_dependency(&test_repo(), 10, &test_cross_repo(), 20, &cred)
+            .await;
+
+        match assert_dependency_error_context(
+            result.expect_err("expected repository lookup to fail"),
+            "POST",
+            "org",
+            "repo",
+            10,
+            "other-org",
+            "other-repo",
+            20,
+            StatusCode::NOT_FOUND,
+            "repository 'other-org/other-repo' not found",
+        ) {
+            ForgeError::NotFound { status, message } => {
+                assert_eq!(status, StatusCode::NOT_FOUND);
+                assert_eq!(message, "repository 'other-org/other-repo' not found");
+            }
+            other => panic!("expected repository NotFound source, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn issue_dependency_issue_not_found_preserves_upstream_message() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path_regex(r"/api/v1/repos/org/repo/issues/10/dependencies"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "message": "issue #20 not found in org/repo"
             })))
-            .expect(1)
             .mount(&mock)
             .await;
 
         let adapter = test_adapter(&mock.uri());
         let cred = ForgeCredential { token: None };
         let repo = test_repo();
-        adapter
-            .remove_issue_dependency(&repo, 10, &repo, 20, &cred)
-            .await
-            .expect("should succeed");
+        let result = adapter
+            .add_issue_dependency(&repo, 10, &repo, 20, &cred)
+            .await;
+
+        match assert_dependency_error_context(
+            result.expect_err("expected issue lookup to fail"),
+            "POST",
+            "org",
+            "repo",
+            10,
+            "org",
+            "repo",
+            20,
+            StatusCode::NOT_FOUND,
+            "issue #20 not found in org/repo",
+        ) {
+            ForgeError::NotFound { status, message } => {
+                assert_eq!(status, StatusCode::NOT_FOUND);
+                assert_eq!(message, "issue #20 not found in org/repo");
+            }
+            other => panic!("expected issue NotFound source, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn issue_dependency_malformed_request_preserves_upstream_diagnostic() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path_regex(r"/api/v1/repos/org/repo/issues/10/dependencies"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "message": "dependency index must be positive"
+            })))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let repo = test_repo();
+        let result = adapter
+            .add_issue_dependency(&repo, 10, &repo, 20, &cred)
+            .await;
+
+        match assert_dependency_error_context(
+            result.expect_err("expected malformed request to fail"),
+            "POST",
+            "org",
+            "repo",
+            10,
+            "org",
+            "repo",
+            20,
+            StatusCode::BAD_REQUEST,
+            r#"{"message":"dependency index must be positive"}"#,
+        ) {
+            ForgeError::UnexpectedStatus { status, body } => {
+                assert_eq!(status, StatusCode::BAD_REQUEST);
+                assert!(body.contains("dependency index must be positive"));
+            }
+            other => panic!("expected UnexpectedStatus source, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn cross_repo_not_found_is_not_reclassified_as_unsupported() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path_regex(r"/api/v1/repos/org/repo/issues/10/dependencies"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "message": "IsErrRepoNotExist"
+            })))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let result = adapter
+            .add_issue_dependency(&test_repo(), 10, &test_cross_repo(), 20, &cred)
+            .await;
+
+        match assert_dependency_error_context(
+            result.expect_err("expected cross-repo NotFound to fail"),
+            "POST",
+            "org",
+            "repo",
+            10,
+            "other-org",
+            "other-repo",
+            20,
+            StatusCode::NOT_FOUND,
+            "IsErrRepoNotExist",
+        ) {
+            ForgeError::NotFound { status, message } => {
+                assert_eq!(status, StatusCode::NOT_FOUND);
+                assert_eq!(message, "IsErrRepoNotExist");
+            }
+            other => panic!("expected cross-repo NotFound source, got {other:?}"),
+        }
     }
 
     #[test]
