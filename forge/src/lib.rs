@@ -804,6 +804,10 @@ impl ForgejoAdapter {
         Err(ForgeError::UnexpectedStatus { status, body })
     }
 
+    /// Sends a Forgejo issue-dependency POST or DELETE request.
+    ///
+    /// The source issue is identified by the URL path, while the dependency
+    /// issue is identified by the complete `ForgejoIssueMeta` JSON body.
     async fn send_issue_dependency_request(
         &self,
         method: reqwest::Method,
@@ -829,23 +833,7 @@ impl ForgejoAdapter {
             request = request.bearer_auth(token);
         }
 
-        let response = request.send().await?;
-        let status = response.status();
-        if !status.is_success() {
-            tracing::warn!(
-                method = %method,
-                %path,
-                source_owner = %repository.owner,
-                source_repo = %repository.name,
-                source_index = index,
-                dependency_owner = %dependency_repository.owner,
-                dependency_repo = %dependency_repository.name,
-                dependency_index = dependency,
-                %status,
-                "Forgejo issue dependency request failed",
-            );
-        }
-        Self::check_response(response).await?;
+        Self::check_response(request.send().await?).await?;
 
         Ok(())
     }
@@ -1129,8 +1117,9 @@ struct ForgejoIssueResponse {
 /// Request body used by Forgejo's issue dependency endpoints.
 ///
 /// Forgejo binds both POST and DELETE dependency writes to `IssueMeta`, which
-/// requires the visible issue index and the dependency repository coordinates,
-/// including when the dependency is in the source repository.
+/// The `index` field is the dependency issue's visible index, and `owner`
+/// and `repo` identify that dependency issue's repository, including when it
+/// is the source repository.
 #[derive(Debug, Serialize)]
 struct ForgejoIssueMeta {
     index: u64,
@@ -6070,6 +6059,40 @@ mod tests {
             .remove_issue_dependency(&base_repo, 10, &dep_repo, 20, &cred)
             .await
             .expect("should succeed");
+    }
+
+    /// Cross-repo remove: a DELETE contract mismatch must not look successful.
+    #[tokio::test]
+    async fn remove_issue_dependency_cross_repo_preserves_delete_contract() {
+        let mock = MockServer::start().await;
+
+        Mock::given(method("DELETE"))
+            .and(path_regex(r"/api/v1/repos/org/repo/issues/10/dependencies"))
+            .and(body_json(serde_json::json!({
+                "index": 20,
+                "owner": "other-org",
+                "repo": "other-repo"
+            })))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "message": "cross-repo dependency not found"
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let result = adapter
+            .remove_issue_dependency(&test_repo(), 10, &test_cross_repo(), 20, &cred)
+            .await;
+
+        match result {
+            Err(ForgeError::NotFound { status, message }) => {
+                assert_eq!(status, StatusCode::NOT_FOUND);
+                assert_eq!(message, "cross-repo dependency not found");
+            }
+            other => panic!("expected cross-repo DELETE NotFound, got {other:?}"),
+        }
     }
 
     /// Same-repo remove: single DELETE to base repo with the complete `IssueMeta` body.
