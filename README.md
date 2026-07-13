@@ -41,4 +41,19 @@ How to run:
 - Optionally set `FORGE_MCP_AGENT_ID` and `FORGE_MCP_SESSION_ID`.
 - Start the server with `cargo run -p server`.
 
+To run the opt-in real-Forgejo dependency lifecycle test, use a disposable
+Forgejo instance and token:
+
+```text
+FORGEJO_TEST_BASE_URL=https://forgejo.example \
+FORGEJO_TEST_TOKEN=replace-me \
+cargo test -p forge --test forgejo_issue_dependencies -- --ignored --nocapture
+```
+
+The test discovers the authenticated owner and Forgejo version, creates
+temporary repositories and issues, exercises same- and cross-repository
+dependency add/read/remove operations, and best-effort deletes its temporary
+repositories. Never use production repositories or a long-lived production
+token for this test.
+
 Issues & PRs disabled. Development happens on an internal Forgejo instance.

@@ -28,6 +28,25 @@ fn install_ring_provider() {
 }
 
 #[derive(Debug, Error)]
+#[error(
+    "Forgejo dependency request failed: method={method} path={path} source={source_owner}/{source_repo}#{source_index} dependency={dependency_owner}/{dependency_repo}#{dependency_index} status={status:?} response_body_preview={response_body_preview:?}: {source}"
+)]
+pub struct DependencyRequestError {
+    pub method: String,
+    pub path: String,
+    pub source_owner: String,
+    pub source_repo: String,
+    pub source_index: u64,
+    pub dependency_owner: String,
+    pub dependency_repo: String,
+    pub dependency_index: u64,
+    pub status: Option<StatusCode>,
+    pub response_body_preview: Option<String>,
+    #[source]
+    pub source: Box<ForgeError>,
+}
+
+#[derive(Debug, Error)]
 pub enum ForgeError {
     #[error("upstream request failed: {0}")]
     Http(#[from] reqwest::Error),
@@ -42,23 +61,8 @@ pub enum ForgeError {
     },
     #[error("unexpected upstream status {status}: {body}")]
     UnexpectedStatus { status: StatusCode, body: String },
-    #[error(
-        "Forgejo dependency request failed: method={method} path={path} source={source_owner}/{source_repo}#{source_index} dependency={dependency_owner}/{dependency_repo}#{dependency_index} status={status:?} response_body_preview={response_body_preview:?}: {source}"
-    )]
-    DependencyRequest {
-        method: String,
-        path: String,
-        source_owner: String,
-        source_repo: String,
-        source_index: u64,
-        dependency_owner: String,
-        dependency_repo: String,
-        dependency_index: u64,
-        status: Option<StatusCode>,
-        response_body_preview: Option<String>,
-        #[source]
-        source: Box<ForgeError>,
-    },
+    #[error(transparent)]
+    DependencyRequest(Box<DependencyRequestError>),
     #[error("operation not supported: {0}")]
     Unsupported(String),
     #[error("invalid response payload: {0}")]
@@ -852,7 +856,7 @@ impl ForgejoAdapter {
             _ => (None, None),
         };
 
-        ForgeError::DependencyRequest {
+        ForgeError::DependencyRequest(Box::new(DependencyRequestError {
             method: method.to_string(),
             path: path.to_string(),
             source_owner: repository.owner.clone(),
@@ -864,7 +868,7 @@ impl ForgejoAdapter {
             status,
             response_body_preview,
             source: Box::new(error),
-        }
+        }))
     }
 
     /// Sends a Forgejo issue-dependency POST or DELETE request.
@@ -6022,38 +6026,26 @@ mod tests {
         response_body_preview: &str,
     ) -> ForgeError {
         match error {
-            ForgeError::DependencyRequest {
-                method: actual_method,
-                path,
-                source_owner: actual_source_owner,
-                source_repo: actual_source_repo,
-                source_index: actual_source_index,
-                dependency_owner: actual_dependency_owner,
-                dependency_repo: actual_dependency_repo,
-                dependency_index: actual_dependency_index,
-                status: actual_status,
-                response_body_preview: actual_response_body_preview,
-                source,
-            } => {
-                assert_eq!(actual_method, method);
+            ForgeError::DependencyRequest(details) => {
+                assert_eq!(details.method, method);
                 assert_eq!(
-                    path,
+                    details.path,
                     format!(
                         "/api/v1/repos/{source_owner}/{source_repo}/issues/{source_index}/dependencies"
                     )
                 );
-                assert_eq!(actual_source_owner, source_owner);
-                assert_eq!(actual_source_repo, source_repo);
-                assert_eq!(actual_source_index, source_index);
-                assert_eq!(actual_dependency_owner, dependency_owner);
-                assert_eq!(actual_dependency_repo, dependency_repo);
-                assert_eq!(actual_dependency_index, dependency_index);
-                assert_eq!(actual_status, Some(status));
+                assert_eq!(details.source_owner, source_owner);
+                assert_eq!(details.source_repo, source_repo);
+                assert_eq!(details.source_index, source_index);
+                assert_eq!(details.dependency_owner, dependency_owner);
+                assert_eq!(details.dependency_repo, dependency_repo);
+                assert_eq!(details.dependency_index, dependency_index);
+                assert_eq!(details.status, Some(status));
                 assert_eq!(
-                    actual_response_body_preview.as_deref(),
+                    details.response_body_preview.as_deref(),
                     Some(response_body_preview)
                 );
-                *source
+                *details.source
             }
             other => panic!("expected DependencyRequest, got {other:?}"),
         }
