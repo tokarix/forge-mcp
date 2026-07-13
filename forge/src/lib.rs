@@ -763,6 +763,7 @@ impl ForgejoAdapter {
     /// # Errors
     ///
     /// Returns an error if the HTTP client cannot be built.
+    #[allow(clippy::result_large_err)]
     pub fn new(config: ForgejoConfig) -> Result<Self, ForgeError> {
         install_ring_provider();
 
@@ -6007,6 +6008,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn assert_dependency_error_context(
         error: ForgeError,
         method: &str,
