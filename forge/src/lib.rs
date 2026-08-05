@@ -1063,7 +1063,7 @@ struct ForgejoIssueResponse {
     html_url: String,
     /// Forgejo internal database ID (not the visible issue number).
     /// Kept for deserialization completeness; no longer used after switching
-    /// to IssueMeta-style dependency API.
+    /// to `IssueMeta`-style dependency API.
     #[allow(dead_code)]
     id: u64,
     labels: Option<Vec<ForgejoLabelResponse>>,
@@ -1323,7 +1323,7 @@ impl ForgeAdapter for ForgejoAdapter {
         credential: &ForgeCredential,
     ) -> Result<domain::Issue, ForgeError> {
         // Forgejo's dependency API expects IssueMeta with the visible issue index,
-        // not the internal database ID.  For same-repo, only "index" is needed.
+        // not the internal database ID.  Include "owner" and "repo" for cross-repo.
         let url = format!(
             "{}/api/v1/repos/{}/{}/issues/{index}/dependencies",
             self.config.base_url.trim_end_matches('/'),
@@ -1331,7 +1331,15 @@ impl ForgeAdapter for ForgejoAdapter {
             repository.name,
         );
 
-        let body = serde_json::json!({"index": dependency});
+        let body = if dependency_repository == repository {
+            serde_json::json!({"index": dependency})
+        } else {
+            serde_json::json!({
+                "index": dependency,
+                "owner": dependency_repository.owner,
+                "repo": dependency_repository.name
+            })
+        };
         let effective_token = credential.token.as_deref().or(self.config.token.as_deref());
         let mut request = self.client.post(&url).json(&body);
         if let Some(token) = effective_token {
@@ -1339,8 +1347,6 @@ impl ForgeAdapter for ForgejoAdapter {
         }
 
         Self::check_response(request.send().await?).await?;
-
-        let _ = dependency_repository; // used for cross-repo in follow-up commit
 
         self.get_issue(repository, index, credential).await
     }
@@ -2147,7 +2153,7 @@ impl ForgeAdapter for ForgejoAdapter {
         credential: &ForgeCredential,
     ) -> Result<domain::Issue, ForgeError> {
         // Forgejo's dependency API expects IssueMeta with the visible issue index,
-        // not the internal database ID.  For same-repo, only "index" is needed.
+        // not the internal database ID.  Include "owner" and "repo" for cross-repo.
         let url = format!(
             "{}/api/v1/repos/{}/{}/issues/{index}/dependencies",
             self.config.base_url.trim_end_matches('/'),
@@ -2155,7 +2161,15 @@ impl ForgeAdapter for ForgejoAdapter {
             repository.name,
         );
 
-        let body = serde_json::json!({"index": dependency});
+        let body = if dependency_repository == repository {
+            serde_json::json!({"index": dependency})
+        } else {
+            serde_json::json!({
+                "index": dependency,
+                "owner": dependency_repository.owner,
+                "repo": dependency_repository.name
+            })
+        };
         let effective_token = credential.token.as_deref().or(self.config.token.as_deref());
         let mut request = self.client.delete(&url).json(&body);
         if let Some(token) = effective_token {
@@ -2163,8 +2177,6 @@ impl ForgeAdapter for ForgejoAdapter {
         }
 
         Self::check_response(request.send().await?).await?;
-
-        let _ = dependency_repository; // used for cross-repo in follow-up commit
 
         self.get_issue(repository, index, credential).await
     }
@@ -5898,7 +5910,7 @@ mod tests {
         }
     }
 
-    /// Same-repo: single POST to base repo with IssueMeta body using visible index.
+    /// Same-repo: single POST to base repo with `IssueMeta` body using visible index.
     #[tokio::test]
     async fn add_issue_dependency_same_repo_sends_visible_index() {
         let mock = MockServer::start().await;
@@ -5936,15 +5948,19 @@ mod tests {
             .expect("should succeed");
     }
 
-    /// Cross-repo add: single POST to base repo with IssueMeta body — no prefetch.
+    /// Cross-repo add: single POST to base repo with `IssueMeta` body including owner/repo.
     #[tokio::test]
-    async fn add_issue_dependency_cross_repo_sends_visible_index() {
+    async fn add_issue_dependency_cross_repo_sends_owner_and_repo() {
         let mock = MockServer::start().await;
 
-        // Mock: POST dependency to BASE repo — no prefetch from dep repo
+        // Mock: POST dependency to BASE repo — body includes owner/repo for cross-repo
         Mock::given(method("POST"))
             .and(path_regex(r"/api/v1/repos/org/repo/issues/10/dependencies"))
-            .and(body_json(serde_json::json!({"index": 20})))
+            .and(body_json(serde_json::json!({
+                "index": 20,
+                "owner": "other-org",
+                "repo": "other-repo"
+            })))
             .respond_with(ResponseTemplate::new(200))
             .expect(1)
             .mount(&mock)
@@ -5975,15 +5991,19 @@ mod tests {
             .expect("should succeed");
     }
 
-    /// Cross-repo remove: single DELETE to base repo with IssueMeta body — no prefetch.
+    /// Cross-repo remove: single DELETE to base repo with `IssueMeta` body including owner/repo.
     #[tokio::test]
-    async fn remove_issue_dependency_cross_repo_sends_visible_index_body() {
+    async fn remove_issue_dependency_cross_repo_sends_owner_and_repo_body() {
         let mock = MockServer::start().await;
 
-        // Mock: DELETE dependency on BASE repo — no prefetch from dep repo
+        // Mock: DELETE dependency on BASE repo — body includes owner/repo for cross-repo
         Mock::given(method("DELETE"))
             .and(path_regex(r"/api/v1/repos/org/repo/issues/10/dependencies"))
-            .and(body_json(serde_json::json!({"index": 20})))
+            .and(body_json(serde_json::json!({
+                "index": 20,
+                "owner": "other-org",
+                "repo": "other-repo"
+            })))
             .respond_with(ResponseTemplate::new(200))
             .expect(1)
             .mount(&mock)
@@ -6014,7 +6034,45 @@ mod tests {
             .expect("should succeed");
     }
 
-    /// Same-repo remove: single DELETE to base repo with IssueMeta body — no prefetch.
+    /// Regression guard: same-repo remove body contains only "index", no cross-repo fields.
+    #[tokio::test]
+    async fn remove_issue_dependency_same_repo_no_cross_fields() {
+        let mock = MockServer::start().await;
+
+        // Mock: DELETE dependency — body should contain only "index", no owner/repo
+        Mock::given(method("DELETE"))
+            .and(path_regex(r"/api/v1/repos/org/repo/issues/10/dependencies"))
+            .and(body_json(serde_json::json!({"index": 20})))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        // Mock: GET base issue after
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/org/repo/issues/10"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": 1000,
+                "number": 10,
+                "title": "Base Issue",
+                "state": "open",
+                "body": "",
+                "html_url": "https://forge.example/org/repo/issues/10"
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let cred = ForgeCredential { token: None };
+        let repo = test_repo();
+        adapter
+            .remove_issue_dependency(&repo, 10, &repo, 20, &cred)
+            .await
+            .expect("should succeed");
+    }
+
+    /// Same-repo remove: single DELETE to base repo with `IssueMeta` body — no prefetch.
     #[tokio::test]
     async fn remove_issue_dependency_same_repo_sends_visible_index_body() {
         let mock = MockServer::start().await;
