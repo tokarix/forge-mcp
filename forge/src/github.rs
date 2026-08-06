@@ -15,6 +15,8 @@ use sha2::Sha256;
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
+pub use crate::github_app::{GitHubAppConfig, GitHubAppCredential};
+
 use crate::{
     ForgeError, ForgeWebhookAdapter, ForgeWebhookError, IssuePaginationLimits,
     issue_list_status_error, next_page_from_link_header, pagination_error,
@@ -46,13 +48,26 @@ impl std::fmt::Debug for GitHubConfig {
 
 #[derive(Clone)]
 pub struct GitHubAdapter {
+    auth: GitHubAuth,
     client: reqwest::Client,
     config: GitHubConfig,
+    managed_app_credentials: Vec<GitHubAppCredential>,
+}
+
+#[derive(Clone)]
+enum GitHubAuth {
+    App(GitHubAppCredential),
+    Token,
 }
 
 impl std::fmt::Debug for GitHubAdapter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let auth_mode = match &self.auth {
+            GitHubAuth::App(_) => "github_app",
+            GitHubAuth::Token => "token",
+        };
         f.debug_struct("GitHubAdapter")
+            .field("auth_mode", &auth_mode)
             .field("config", &self.config)
             .finish_non_exhaustive()
     }
@@ -65,11 +80,48 @@ impl GitHubAdapter {
     pub fn new(config: GitHubConfig) -> Result<Self, ForgeError> {
         crate::install_ring_provider();
         Ok(Self {
+            auth: GitHubAuth::Token,
             client: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .build()?,
             config,
+            managed_app_credentials: Vec::new(),
         })
+    }
+
+    /// Builds an adapter authenticated as a GitHub App installation.
+    ///
+    /// The initial installation token is fetched before returning. A
+    /// background task refreshes it before GitHub's one-hour expiry and exits
+    /// automatically when the adapter is dropped.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the private key is invalid, the JWT cannot be
+    /// signed, or GitHub rejects the installation-token exchange.
+    pub async fn new_app(config: GitHubConfig, app: GitHubAppConfig) -> Result<Self, ForgeError> {
+        crate::install_ring_provider();
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?;
+        let managed_credential =
+            GitHubAppCredential::new_with_client(client.clone(), config.api_url.clone(), app)
+                .await?;
+        Ok(Self {
+            auth: GitHubAuth::App(managed_credential.clone()),
+            client,
+            config,
+            managed_app_credentials: vec![managed_credential],
+        })
+    }
+
+    /// Makes additional managed per-agent App identities discoverable by this
+    /// adapter. Tokens continue to refresh through the shared credentials.
+    pub fn extend_managed_app_credentials(
+        &mut self,
+        credentials: impl IntoIterator<Item = GitHubAppCredential>,
+    ) {
+        self.managed_app_credentials.extend(credentials);
     }
 
     fn api_base(&self) -> &str {
@@ -86,10 +138,16 @@ impl GitHubAdapter {
     }
 
     fn effective_token(&self, credential: &ForgeCredential) -> Option<String> {
-        credential
-            .token
-            .clone()
-            .or_else(|| self.config.token.clone())
+        match &self.auth {
+            GitHubAuth::App(managed) => credential
+                .token
+                .clone()
+                .or_else(|| managed.credential().token),
+            GitHubAuth::Token => credential
+                .token
+                .clone()
+                .or_else(|| self.config.token.clone()),
+        }
     }
 
     pub(crate) fn authenticate(builder: RequestBuilder, token: Option<&str>) -> RequestBuilder {
@@ -106,6 +164,17 @@ impl GitHubAdapter {
     fn request(&self, builder: RequestBuilder, credential: &ForgeCredential) -> RequestBuilder {
         let token = self.effective_token(credential);
         Self::authenticate(builder, token.as_deref())
+    }
+
+    fn managed_app_user(&self, credential: &ForgeCredential) -> Option<ForgeUser> {
+        let token = self.effective_token(credential)?;
+        self.managed_app_credentials
+            .iter()
+            .find(|managed| managed.matches_token(&token))
+            .map(|managed| ForgeUser {
+                email: String::new(),
+                username: managed.username(),
+            })
     }
 
     fn repo_path(repository: &RepositoryRef) -> String {
@@ -817,6 +886,12 @@ fn aggregate_statuses(statuses: &[domain::CommitStatus]) -> domain::CommitStatus
 
 #[async_trait]
 impl crate::ForgeAdapter for GitHubAdapter {
+    fn effective_credential(&self, credential: &ForgeCredential) -> ForgeCredential {
+        ForgeCredential {
+            token: self.effective_token(credential),
+        }
+    }
+
     async fn add_issue_dependency(
         &self,
         repository: &RepositoryRef,
@@ -878,6 +953,9 @@ impl crate::ForgeAdapter for GitHubAdapter {
         &self,
         credential: &ForgeCredential,
     ) -> Result<ForgeUser, ForgeError> {
+        if let Some(user) = self.managed_app_user(credential) {
+            return Ok(user);
+        }
         let url = format!("{}/user", self.api_base());
         let response = Self::check_response(
             self.request(self.client.get(url), credential)
@@ -2093,14 +2171,44 @@ fn parse_review_webhook(
 #[allow(clippy::expect_used, clippy::panic)]
 mod tests {
     use std::fmt::Write as _;
+    use std::sync::{Arc, RwLock};
 
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
-    use wiremock::matchers::{body_json, header, method, path, query_param};
+    use wiremock::matchers::{body_json, header, header_exists, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
     use crate::ForgeAdapter;
+
+    const TEST_RSA_PRIVATE_KEY: &str = r"-----BEGIN PRIVATE KEY-----
+MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQCtaES59VI/NIBJ
+E4W55WWW6ljKx+nzK4R0SsyoDVb4xSBYCVRdb24H5P76cNCOHho5yOjE7NbpfX4W
+K7xIptZAhBA7G6/WMDv6WI5oHQl/lzYnzthFcLWMQH2Xc6+ovXfsj8e+bk7kUbp/
+SYNBalRs8TVjmkFdDdBZ0uDExTRHXpRlcobX/pSi/61lrogJuEmjehdsLlLHWuW4
+I6HFLfCTfKjZp6s82kpeBoP1wkXemH4Hkmv3jnvr287xRkWnyE4c1/UyMomOrhIm
+rxTBs1xLj+dDxS9cp4ZVkdXk0Z9iMypPmvvVR7L+i+JzBT5uIjt/9wOsn+NmlOTc
+kcgTevqBAgMBAAECggEAIeps1romlfocxS4uT4eQcQ3ww+iJ12fBhkVC9fN1+T4E
+73MTrxqmOKEPRche4gz9MCQdcran6g8DZC61qrgG26N40Ta/E3Nnp7U+VRqoyu22
+R97q6dn7iCzs43xa9PPpyrjsZlCI2ZsqkM69/0Nes9gRiyOWeS7Ee20FTTcM3JBO
+Z2K7QM4ChFos8NxYIShXq4RPhtPn3x9PYmtJMns83YrYas6OW/Gkc/HLu/U3rXGO
+od8CLOlSLF3MHcyekFZUs8haF8Y+Dhbf1LUDKeRXOdxUzJo3wP68mYJQ/Xo2thNo
+f3o8pmLM6oJRLPrVLAslNM38MTneled8a2kIs9bUYQKBgQDjrmW7w0gPVllF2KmW
+1MbcqdLAXOfVoQMqCjXC2yJ3Sq6YVEuOCqf2raq0UXLDE4IO0lJjsanhzqy5be52
+G1CpzxfWdEad6/Lzbqkd+XMEGCD3jhpdERQ1GvMaJXGMHshu5myTNkiC79bPomRR
+9u1UNje8dnBirgjYoRZPHyigfQKBgQDC+bvGQcjJ4DBOAYy7QK1YSYB0MihbdON8
+iJu2xnxyrZbIeB51GjryZNwd+gLTd3XmDWSzJ4F6zeVgxnlQ/M+8tQYvHcex3smz
+el+FSKQFogvxP7FdeakstyWIqdyJVN63rauXEDVnyvpXpvePDzn9xwb1GlfuAwA8
+5+5Ez2xFVQKBgCOGqNUdaXcLMC7X2c5xMP5peTsOxBXvY8EBitX2v3ABtTCLpqZp
+P0AcZRBxzQhnWNnbM4PeyvUy/HyKjLTdGj8E02FhD0vA703QrI7Cx5GR+kLmZ3Ky
+IYcPx3MC+K62duvnBHYL+FCF/+yyGBk6AFotg5DiojKjmTnEGOkLoZk5AoGBAL0P
+plonngjLQGvTquBEZhJvK4UAwgt0+8XdPYjtTO1yj/ySJY6Nwc0bqinTLXxaoVNT
+d2sVisNG9f5yVl8G1nV436c+bE545wMHTaqTdqETshrcFSO7/iSi711mwLfWOSTI
+3dNc3zxnIXtvJyxsqmH/5So0wkDEXi2xBGVq8OUFAoGBAJBUMIkQ+BWgLnz1wi7T
+8AU9nYc5Qh62LM31CkR9d/qVQdy5OuKf0dK5tfj97kpUI8yh+Kenhjczy0ivYAn1
+0cKHzy9kpOHnej/nm1PvD6Ps9euQTKPh8/Z+etMpok7xbDvSrZUMOJCEY5g9suAz
+rRwzv5g6zr/Xm2UKcduXYVQs
+-----END PRIVATE KEY-----";
 
     fn adapter(base_url: &str) -> GitHubAdapter {
         GitHubAdapter::new(GitHubConfig {
@@ -2179,6 +2287,143 @@ mod tests {
             .expect("user");
         assert_eq!(user.username, "octocat");
         assert_eq!(user.email, "octocat@example.com");
+    }
+
+    #[tokio::test]
+    async fn github_app_exchanges_jwt_and_accepts_per_agent_app_tokens() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/app"))
+            .and(header_exists("authorization"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "slug": "stintel-codex"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/app/installations/456/access_tokens"))
+            .and(header_exists("authorization"))
+            .and(header("accept", "application/vnd.github+json"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "expires_at": "2099-01-01T00:00:00Z",
+                "token": "installation-token"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = GitHubAdapter::new_app(
+            GitHubConfig {
+                api_url: server.uri(),
+                token: None,
+            },
+            GitHubAppConfig {
+                app_id: 123,
+                installation_id: 456,
+                private_key_pem: TEST_RSA_PRIVATE_KEY.to_string(),
+            },
+        )
+        .await
+        .expect("GitHub App adapter");
+        let fallback = adapter.effective_credential(&ForgeCredential { token: None });
+        assert_eq!(fallback.token.as_deref(), Some("installation-token"));
+        let app_user = adapter
+            .get_authenticated_user(&fallback)
+            .await
+            .expect("managed App identity");
+        assert_eq!(app_user.username, "stintel-codex[bot]");
+        let per_agent = adapter.effective_credential(&credential());
+        assert_eq!(per_agent.token.as_deref(), Some("user-token"));
+        let debug = format!("{adapter:?}");
+        assert!(!debug.contains("installation-token"));
+        assert!(!debug.contains("user-token"));
+        assert!(debug.contains("github_app"));
+    }
+
+    #[tokio::test]
+    async fn managed_per_agent_app_token_resolves_its_own_bot_identity() {
+        let server = MockServer::start().await;
+        let reviewer = GitHubAppCredential {
+            app_slug: Arc::from("stintel-qwen"),
+            token: Arc::new(RwLock::new("reviewer-installation-token".to_string())),
+        };
+        let mut adapter = adapter(&server.uri());
+        adapter.extend_managed_app_credentials([reviewer.clone()]);
+
+        let user = adapter
+            .get_authenticated_user(&reviewer.credential())
+            .await
+            .expect("per-agent App identity");
+        assert_eq!(user.username, "stintel-qwen[bot]");
+        assert!(user.email.is_empty());
+    }
+
+    #[tokio::test]
+    async fn per_agent_app_token_submits_approval_instead_of_system_app() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/app"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "slug": "system"
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/app/installations/456/access_tokens"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "expires_at": "2099-01-01T00:00:00Z",
+                "token": "system-installation-token"
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/repos/org/repo/pulls/7/reviews"))
+            .and(header(
+                "authorization",
+                "Bearer reviewer-installation-token",
+            ))
+            .and(body_json(serde_json::json!({
+                "body": "Looks good",
+                "event": "APPROVE"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "body": "Looks good",
+                "id": 99,
+                "state": "APPROVED",
+                "user": {"login": "stintel-qwen[bot]"}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = GitHubAdapter::new_app(
+            GitHubConfig {
+                api_url: server.uri(),
+                token: None,
+            },
+            GitHubAppConfig {
+                app_id: 123,
+                installation_id: 456,
+                private_key_pem: TEST_RSA_PRIVATE_KEY.to_string(),
+            },
+        )
+        .await
+        .expect("GitHub App adapter");
+        let review = adapter
+            .submit_change_request_review(
+                &repository(),
+                7,
+                "Looks good",
+                "APPROVED",
+                &ForgeCredential {
+                    token: Some("reviewer-installation-token".to_string()),
+                },
+            )
+            .await
+            .expect("approval review");
+        assert_eq!(review.id, 99);
+        assert_eq!(review.event, "APPROVED");
     }
 
     #[tokio::test]

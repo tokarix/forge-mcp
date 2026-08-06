@@ -20,6 +20,7 @@ use sha2::Sha256;
 use thiserror::Error;
 
 pub mod github;
+mod github_app;
 pub mod gitlab;
 
 static INSTALL_RING_PROVIDER: Once = Once::new();
@@ -70,6 +71,8 @@ pub enum ForgeError {
     Unsupported(String),
     #[error("invalid response payload: {0}")]
     InvalidPayload(String),
+    #[error("forge authentication failed: {0}")]
+    Authentication(String),
 }
 
 #[derive(Debug, Error)]
@@ -373,6 +376,15 @@ pub(crate) fn validate_next_page(
 
 #[async_trait]
 pub trait ForgeAdapter: Send + Sync {
+    /// Resolves the credential that should be used for Git smart HTTP.
+    ///
+    /// Static-token adapters return the supplied credential unchanged. An
+    /// adapter with managed credentials (such as a GitHub App installation)
+    /// can return its current short-lived token instead.
+    fn effective_credential(&self, credential: &ForgeCredential) -> ForgeCredential {
+        credential.clone()
+    }
+
     /// Adds a dependency on another issue.
     async fn add_issue_dependency(
         &self,
