@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use thiserror::Error;
 
+pub mod github;
 pub mod gitlab;
 
 static INSTALL_RING_PROVIDER: Once = Once::new();
