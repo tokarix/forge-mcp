@@ -30,6 +30,7 @@ fn build_forge_instance<A>(
     adapter: Arc<A>,
     audit_sink: &Arc<InMemoryAuditSink>,
     client: &reqwest::Client,
+    configured_commit_author: Option<domain::CommitAuthor>,
     forge_config: &ForgeConfig,
     forge_kind: ForgeKind,
 ) -> ForgeInstance
@@ -53,6 +54,7 @@ where
     let write_service = Arc::new(WriteOrchestrator::new(
         Arc::clone(&adapter),
         Arc::clone(audit_sink),
+        configured_commit_author,
     ));
 
     ForgeInstance {
@@ -76,6 +78,7 @@ async fn configured_forge_instance(
     audit_sink: &Arc<InMemoryAuditSink>,
     client: &reqwest::Client,
     agent_app_credentials: Vec<GitHubAppCredential>,
+    configured_commit_author: Option<domain::CommitAuthor>,
 ) -> Result<ForgeInstance, Box<dyn std::error::Error>> {
     let instance = match forge_config.forge_type.as_str() {
         "forgejo" => {
@@ -89,6 +92,7 @@ async fn configured_forge_instance(
                 adapter,
                 audit_sink,
                 client,
+                configured_commit_author,
                 forge_config,
                 ForgeKind::Forgejo,
             )
@@ -98,7 +102,14 @@ async fn configured_forge_instance(
                 base_url: forge_config.base_url.clone(),
                 token: forge_config.token.clone(),
             })?);
-            build_forge_instance(adapter, audit_sink, client, forge_config, ForgeKind::GitLab)
+            build_forge_instance(
+                adapter,
+                audit_sink,
+                client,
+                configured_commit_author,
+                forge_config,
+                ForgeKind::GitLab,
+            )
         }
         "github" => {
             let github_config = GitHubConfig {
@@ -130,6 +141,7 @@ async fn configured_forge_instance(
                 Arc::new(adapter),
                 audit_sink,
                 client,
+                configured_commit_author,
                 forge_config,
                 ForgeKind::GitHub,
             )
@@ -214,6 +226,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| format!("failed to parse config file {config_path}: {e}"))?;
 
     validate_config(&config).map_err(|e| format!("invalid configuration: {e}"))?;
+    let configured_commit_author = config.server.commit_author();
 
     tracing::info!(version = %server_version(), listen = %config.server.listen, "forge-mcp starting");
 
@@ -227,9 +240,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .values()
             .filter_map(|credentials| credentials.get(&forge_config.alias).cloned())
             .collect();
-        let instance =
-            configured_forge_instance(forge_config, &audit_sink, &client, agent_app_credentials)
-                .await?;
+        let instance = configured_forge_instance(
+            forge_config,
+            &audit_sink,
+            &client,
+            agent_app_credentials,
+            configured_commit_author.clone(),
+        )
+        .await?;
 
         forges.insert(forge_config.alias.clone(), instance);
         tracing::info!(alias = %forge_config.alias, url = %forge_config.base_url, "registered forge");

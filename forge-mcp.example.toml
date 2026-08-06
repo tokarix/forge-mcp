@@ -3,6 +3,11 @@
 [server]
 listen = "0.0.0.0:8443"
 # enable_docs = true
+# Both commit author fields are required together. When configured, this
+# server-wide identity overrides request/local-Git identity for patch commits
+# and forge-user/agent fallback identity for rebase committers.
+# commit_author_name = "forge-mcp"
+# commit_author_email = "forge-mcp@example.com"
 
 # Each [[forges]] entry defines a forge instance the gateway can proxy to.
 # alias:         short name used in URLs and allowed_repos patterns (lowercase, hyphens ok)

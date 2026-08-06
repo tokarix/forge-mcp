@@ -44,6 +44,30 @@ How to run:
 - Copy `forge-mcp.example.toml` to `forge-mcp.toml` and configure the forges and agents.
 - Start the server with `cargo run -p server -- forge-mcp.toml`.
 
+## Global Git commit identity
+
+Operators can make one Git identity authoritative for every forge and every
+agent by configuring both fields under `[server]`:
+
+```toml
+[server]
+listen = "0.0.0.0:8443"
+commit_author_name = "forge-mcp"
+commit_author_email = "forge-mcp@example.com"
+```
+
+These fields belong only under `[server]`, not under `[[agents]]`. For
+`commit_patch`, the configured identity becomes both author and committer and
+overrides request fields, including identity discovered from a transport's
+local Git configuration. For `rebase_branch`, original authors are preserved
+while the configured identity becomes the committer of every rewritten
+commit; forge-user and agent fallback lookup is skipped.
+
+Both fields are required together. Omitting both preserves the existing
+behavior: patch commits use the request author, while rebases use the
+authenticated forge user when available and otherwise fall back to the agent
+identity.
+
 ## GitHub App authentication
 
 For distinct GitHub actors, register one GitHub App per agent and install each

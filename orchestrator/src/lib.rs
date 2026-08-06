@@ -538,6 +538,7 @@ where
 {
     adapter: Arc<A>,
     audit_sink: Arc<S>,
+    configured_commit_author: Option<domain::CommitAuthor>,
 }
 
 impl<A, S> WriteOrchestrator<A, S>
@@ -546,10 +547,15 @@ where
     S: AuditSink + 'static,
 {
     #[must_use]
-    pub fn new(adapter: Arc<A>, audit_sink: Arc<S>) -> Self {
+    pub fn new(
+        adapter: Arc<A>,
+        audit_sink: Arc<S>,
+        configured_commit_author: Option<domain::CommitAuthor>,
+    ) -> Self {
         Self {
             adapter,
             audit_sink,
+            configured_commit_author,
         }
     }
 }
@@ -889,7 +895,10 @@ where
         let existing = request.existing_branch;
         let patch = request.patch.clone();
         let new_branch = request.new_branch.clone();
-        let commit_author = request.commit_author.clone();
+        let commit_author = self
+            .configured_commit_author
+            .clone()
+            .unwrap_or_else(|| request.commit_author.clone());
         let commit_message = sanitize_commit_message(&request.commit_message);
         let token = credential.token.clone();
 
@@ -1044,10 +1053,15 @@ where
             ));
         }
 
-        // 3. Fetch committer identity from forge (best-effort)
-        let forge_user_result = self.adapter.get_authenticated_user(credential).await;
-        let (committer_name, committer_email) =
-            resolve_committer_identity(forge_user_result, &request.agent.agent_id);
+        // 3. Resolve committer identity from global policy or the legacy
+        // best-effort forge identity fallback.
+        let (committer_name, committer_email) = if let Some(author) = &self.configured_commit_author
+        {
+            (author.name.clone(), author.email.clone())
+        } else {
+            let forge_user_result = self.adapter.get_authenticated_user(credential).await;
+            resolve_committer_identity(forge_user_result, &request.agent.agent_id)
+        };
 
         // 4. Clone full depth, check out the branch
         let clone_url = format!(
@@ -1573,7 +1587,17 @@ mod tests {
         }
     }
 
-    struct FakeForgeAdapter;
+    #[derive(Default)]
+    struct FakeForgeAdapter {
+        authenticated_user_lookups: std::sync::atomic::AtomicUsize,
+    }
+
+    impl FakeForgeAdapter {
+        fn authenticated_user_lookups(&self) -> usize {
+            self.authenticated_user_lookups
+                .load(std::sync::atomic::Ordering::Relaxed)
+        }
+    }
 
     #[async_trait::async_trait]
     impl ForgeAdapter for FakeForgeAdapter {
@@ -1763,6 +1787,8 @@ mod tests {
             &self,
             _: &domain::ForgeCredential,
         ) -> Result<domain::ForgeUser, ForgeError> {
+            self.authenticated_user_lookups
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Ok(domain::ForgeUser {
                 email: "test@test".to_string(),
                 username: "test".to_string(),
@@ -2357,7 +2383,7 @@ mod tests {
 
     #[tokio::test]
     async fn reads_a_repository_file_and_records_audit() {
-        let adapter = Arc::new(FakeForgeAdapter);
+        let adapter = Arc::new(FakeForgeAdapter::default());
         let audit = Arc::new(InMemoryAuditSink::new());
         let orchestrator = ReadOrchestrator::new(adapter, Arc::clone(&audit));
 
@@ -2372,7 +2398,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_empty_path() {
-        let adapter = Arc::new(FakeForgeAdapter);
+        let adapter = Arc::new(FakeForgeAdapter::default());
         let audit = Arc::new(InMemoryAuditSink::new());
         let orchestrator = ReadOrchestrator::new(adapter, Arc::clone(&audit));
 
@@ -2387,7 +2413,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_path_traversal() {
-        let adapter = Arc::new(FakeForgeAdapter);
+        let adapter = Arc::new(FakeForgeAdapter::default());
         let audit = Arc::new(InMemoryAuditSink::new());
         let orchestrator = ReadOrchestrator::new(adapter, Arc::clone(&audit));
 
@@ -2421,7 +2447,7 @@ mod tests {
 
     #[tokio::test]
     async fn returns_audit_error_on_sink_failure() {
-        let adapter = Arc::new(FakeForgeAdapter);
+        let adapter = Arc::new(FakeForgeAdapter::default());
         let audit = Arc::new(FailingAuditSink);
         let orchestrator = ReadOrchestrator::new(adapter, audit);
 
@@ -3669,7 +3695,7 @@ diff --git a/README.md b/README.md
     async fn commit_patch_rejects_invalid_diff() {
         let adapter = Arc::new(WriteTestForgeAdapter);
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit), None);
 
         let mut request = write_test_request();
         request.patch = "\
@@ -3695,7 +3721,7 @@ Binary files /dev/null and b/image.png differ
     async fn commit_patch_rejects_wrong_branch_prefix() {
         let adapter = Arc::new(WriteTestForgeAdapter);
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit), None);
 
         let mut request = write_test_request();
         request.new_branch = "main".to_string();
@@ -3717,7 +3743,7 @@ Binary files /dev/null and b/image.png differ
     async fn commit_patch_rejects_protected_paths() {
         let adapter = Arc::new(WriteTestForgeAdapter);
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit), None);
 
         let mut request = write_test_request();
         request.patch = "\
@@ -3747,7 +3773,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
     async fn open_change_request_rejects_wrong_branch_prefix() {
         let adapter = Arc::new(WriteTestForgeAdapter);
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit), None);
 
         let request = OpenChangeRequestRequest {
             agent: AgentIdentity {
@@ -3784,7 +3810,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
     async fn commit_patch_rejects_existing_branch_without_prefix() {
         let adapter = Arc::new(WriteTestForgeAdapter);
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit), None);
 
         let mut request = write_test_request();
         request.existing_branch = true;
@@ -3813,7 +3839,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
     async fn open_change_request_records_audit_and_creates() {
         let adapter = Arc::new(WriteTestForgeAdapter);
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit), None);
 
         let request = OpenChangeRequestRequest {
             agent: AgentIdentity {
@@ -3852,7 +3878,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
     async fn create_issue_records_audit_and_creates() {
         let adapter = Arc::new(WriteTestForgeAdapter);
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit), None);
 
         let result = orchestrator
             .create_issue(
@@ -3897,7 +3923,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
     async fn add_issue_label_records_audit_and_adds() {
         let adapter = Arc::new(WriteTestForgeAdapter);
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit), None);
 
         let result = orchestrator
             .add_issue_label(
@@ -3938,7 +3964,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
     async fn remove_issue_label_records_audit_and_removes() {
         let adapter = Arc::new(WriteTestForgeAdapter);
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit), None);
 
         let result = orchestrator
             .remove_issue_label(
@@ -4419,7 +4445,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             head_branch: "agent/fix".to_string(),
         });
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit), None);
 
         let result = orchestrator
             .close_change_request(
@@ -4445,7 +4471,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             head_branch: "agent/fix".to_string(),
         });
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit), None);
 
         let authorized = domain::policy::AuthorizedWrite {
             policy: domain::policy::PolicyConfig {
@@ -4473,7 +4499,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             head_branch: "other-agent/fix".to_string(),
         });
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit), None);
 
         let err = orchestrator
             .close_change_request(
@@ -4512,7 +4538,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
     async fn comment_on_change_request_records_audit_and_comments() {
         let adapter = Arc::new(WriteTestForgeAdapter);
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit), None);
 
         let result = orchestrator
             .comment_on_change_request(
@@ -4557,7 +4583,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
     async fn submit_review_records_audit_and_submits() {
         let adapter = Arc::new(WriteTestForgeAdapter);
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit), None);
 
         let result = orchestrator
             .submit_change_request_review(
@@ -4581,7 +4607,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
     async fn submit_review_rejects_invalid_event() {
         let adapter = Arc::new(WriteTestForgeAdapter);
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit), None);
 
         let err = orchestrator
             .submit_change_request_review(
@@ -5022,7 +5048,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
     async fn credential_override_reaches_adapter() {
         let adapter = Arc::new(CredentialCapturingAdapter::new());
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator = WriteOrchestrator::new(Arc::clone(&adapter), Arc::clone(&audit));
+        let orchestrator = WriteOrchestrator::new(Arc::clone(&adapter), Arc::clone(&audit), None);
 
         let override_cred = domain::ForgeCredential {
             token: Some("per-agent-token".to_string()),
@@ -5047,7 +5073,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
     async fn credential_none_reaches_adapter() {
         let adapter = Arc::new(CredentialCapturingAdapter::new());
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator = WriteOrchestrator::new(Arc::clone(&adapter), Arc::clone(&audit));
+        let orchestrator = WriteOrchestrator::new(Arc::clone(&adapter), Arc::clone(&audit), None);
 
         let no_override = domain::ForgeCredential { token: None };
 
@@ -5521,7 +5547,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
     async fn schedule_auto_merge_valid_merge_style() {
         let adapter = Arc::new(AutoMergeTestForgeAdapter::new("abc123"));
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit), None);
 
         orchestrator
             .schedule_auto_merge(
@@ -5537,7 +5563,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
     async fn schedule_auto_merge_invalid_merge_style() {
         let adapter = Arc::new(AutoMergeTestForgeAdapter::new("abc123"));
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit), None);
 
         let err = orchestrator
             .schedule_auto_merge(
@@ -5556,7 +5582,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
     async fn schedule_auto_merge_head_sha_mismatch() {
         let adapter = Arc::new(AutoMergeTestForgeAdapter::new("abc123"));
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit), None);
 
         let err = orchestrator
             .schedule_auto_merge(
@@ -5581,7 +5607,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             recorded_delete_branch_after_merge: Mutex::new(Vec::new()),
         });
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit), None);
 
         let err = orchestrator
             .schedule_auto_merge(
@@ -5601,7 +5627,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
         let full_sha = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2";
         let adapter = Arc::new(AutoMergeTestForgeAdapter::new(full_sha));
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit), None);
 
         orchestrator
             .schedule_auto_merge(
@@ -5639,7 +5665,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
     async fn schedule_auto_merge_rejects_disallowed_strategy() {
         let adapter = AutoMergeTestForgeAdapter::new("abc123");
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator = WriteOrchestrator::new(Arc::new(adapter), Arc::clone(&audit));
+        let orchestrator = WriteOrchestrator::new(Arc::new(adapter), Arc::clone(&audit), None);
 
         let err = orchestrator
             .schedule_auto_merge(
@@ -5666,7 +5692,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
     async fn schedule_auto_merge_uses_repo_default_delete_branch_setting() {
         let adapter = Arc::new(AutoMergeTestForgeAdapter::new("abc123"));
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator = WriteOrchestrator::new(Arc::clone(&adapter), Arc::clone(&audit));
+        let orchestrator = WriteOrchestrator::new(Arc::clone(&adapter), Arc::clone(&audit), None);
 
         orchestrator
             .schedule_auto_merge(
@@ -5687,7 +5713,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
     async fn schedule_auto_merge_prefers_explicit_delete_branch_override() {
         let adapter = Arc::new(AutoMergeTestForgeAdapter::new("abc123"));
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator = WriteOrchestrator::new(Arc::clone(&adapter), Arc::clone(&audit));
+        let orchestrator = WriteOrchestrator::new(Arc::clone(&adapter), Arc::clone(&audit), None);
 
         let mut request = auto_merge_test_request("rebase", "abc123");
         request.delete_branch_after_merge = Some(false);
@@ -5711,7 +5737,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
     async fn schedule_auto_merge_posts_kick_status() {
         let adapter = Arc::new(AutoMergeTestForgeAdapter::new("abc123"));
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator = WriteOrchestrator::new(Arc::clone(&adapter), Arc::clone(&audit));
+        let orchestrator = WriteOrchestrator::new(Arc::clone(&adapter), Arc::clone(&audit), None);
 
         orchestrator
             .schedule_auto_merge(
@@ -5753,7 +5779,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
     async fn update_change_request_rejects_when_both_none() {
         let adapter = Arc::new(WriteTestForgeAdapter);
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit), None);
 
         let err = orchestrator
             .update_change_request(
@@ -5772,7 +5798,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
     async fn update_change_request_rejects_without_prefix() {
         let adapter = Arc::new(WriteTestForgeAdapter);
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit), None);
 
         let authorized = domain::policy::AuthorizedWrite {
             policy: domain::policy::PolicyConfig {
@@ -5800,7 +5826,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             head_branch: "other-agent/fix".to_string(),
         });
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit), None);
 
         let err = orchestrator
             .update_change_request(
@@ -5819,7 +5845,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
     async fn update_change_request_records_audit() {
         let adapter = Arc::new(WriteTestForgeAdapter);
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit), None);
 
         let result = orchestrator
             .update_change_request(
@@ -5868,7 +5894,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
     async fn update_issue_rejects_when_both_none() {
         let adapter = Arc::new(WriteTestForgeAdapter);
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit), None);
 
         let err = orchestrator
             .update_issue(
@@ -5887,7 +5913,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
     async fn update_issue_records_audit() {
         let adapter = Arc::new(WriteTestForgeAdapter);
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit), None);
 
         let result = orchestrator
             .update_issue(
@@ -5912,7 +5938,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
     async fn update_issue_updates_body_only() {
         let adapter = Arc::new(WriteTestForgeAdapter);
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit), None);
 
         let result = orchestrator
             .update_issue(
@@ -5925,6 +5951,225 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
 
         assert_eq!(result.body, "Updated body");
         assert_eq!(audit.records().expect("audit records").len(), 1);
+    }
+
+    fn setup_commit_patch_test_repo() -> tempfile::TempDir {
+        use std::process::Command;
+
+        fn run(dir: &std::path::Path, args: &[&str]) {
+            let output = Command::new("git")
+                .current_dir(dir)
+                .args(args)
+                .output()
+                .expect("git command");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let remote_dir = tempfile::TempDir::new().expect("create remote temp dir");
+        run(remote_dir.path(), &["init", "--bare", "remote.git"]);
+        let remote_path = remote_dir.path().join("remote.git");
+        let work_dir = tempfile::TempDir::new().expect("create work temp dir");
+        let work = work_dir.path().join("work");
+        run(
+            work_dir.path(),
+            &[
+                "clone",
+                remote_path.to_str().expect("remote path UTF-8"),
+                "work",
+            ],
+        );
+        std::fs::write(work.join("README.md"), "# Hello\n").expect("write README");
+        run(&work, &["add", "README.md"]);
+        run(
+            &work,
+            &[
+                "-c",
+                "user.name=Initial Author",
+                "-c",
+                "user.email=initial@example.test",
+                "commit",
+                "-m",
+                "initial commit",
+            ],
+        );
+        run(&work, &["push", "origin", "HEAD:main"]);
+        remote_dir
+    }
+
+    fn commit_patch_test_request(
+        remote_path: &std::path::Path,
+        agent_id: &str,
+        branch: &str,
+        filename: &str,
+        author: domain::CommitAuthor,
+    ) -> CommitPatchRequest {
+        CommitPatchRequest {
+            agent: AgentIdentity {
+                agent_id: agent_id.to_string(),
+                session_id: "test-session".to_string(),
+            },
+            base_branch: "main".to_string(),
+            commit_author: author,
+            commit_message: format!("add {filename}"),
+            existing_branch: false,
+            new_branch: branch.to_string(),
+            patch: format!(
+                "diff --git a/{filename} b/{filename}\n\
+                 new file mode 100644\n\
+                 --- /dev/null\n\
+                 +++ b/{filename}\n\
+                 @@ -0,0 +1 @@\n\
+                 +content\n"
+            ),
+            repository: RepositoryRef {
+                alias: "test".to_string(),
+                forge: ForgeKind::Forgejo,
+                host: format!(
+                    "file://{}",
+                    remote_path.parent().expect("remote parent").display()
+                ),
+                name: "remote".to_string(),
+                owner: ".".to_string(),
+            },
+        }
+    }
+
+    fn bare_commit_identity(
+        remote_path: &std::path::Path,
+        git_ref: &str,
+    ) -> (String, String, String, String) {
+        let output = std::process::Command::new("git")
+            .arg("--git-dir")
+            .arg(remote_path)
+            .args(["show", "-s", "--format=%an%x00%ae%x00%cn%x00%ce", git_ref])
+            .output()
+            .expect("inspect remote commit");
+        assert!(output.status.success());
+        let text = String::from_utf8(output.stdout).expect("identity UTF-8");
+        let fields: Vec<_> = text.split('\0').map(str::trim).collect();
+        assert_eq!(fields.len(), 4);
+        (
+            fields[0].to_string(),
+            fields[1].to_string(),
+            fields[2].to_string(),
+            fields[3].to_string(),
+        )
+    }
+
+    #[tokio::test]
+    async fn configured_commit_author_overrides_two_agents_and_requests() {
+        let remote_dir = setup_commit_patch_test_repo();
+        let remote_path = remote_dir.path().join("remote.git");
+        let configured_author = domain::CommitAuthor {
+            name: "Global Committer".to_string(),
+            email: "global@example.test".to_string(),
+        };
+        let orchestrator = WriteOrchestrator::new(
+            Arc::new(FakeForgeAdapter::default()),
+            Arc::new(InMemoryAuditSink::new()),
+            Some(configured_author.clone()),
+        );
+        let authorized = domain::policy::AuthorizedWrite {
+            policy: domain::policy::PolicyConfig {
+                branch_prefix: Some("agent/".to_string()),
+                ..domain::policy::PolicyConfig::default()
+            },
+        };
+
+        for (agent, branch, filename, request_name, request_email) in [
+            (
+                "agent-one",
+                "agent/identity-one",
+                "one.txt",
+                "Request One",
+                "one@example.test",
+            ),
+            (
+                "agent-two",
+                "agent/identity-two",
+                "two.txt",
+                "Request Two",
+                "two@example.test",
+            ),
+        ] {
+            let request = commit_patch_test_request(
+                &remote_path,
+                agent,
+                branch,
+                filename,
+                domain::CommitAuthor {
+                    name: request_name.to_string(),
+                    email: request_email.to_string(),
+                },
+            );
+            orchestrator
+                .commit_patch(
+                    request,
+                    authorized.clone(),
+                    &ForgeCredential { token: None },
+                )
+                .await
+                .expect("commit patch");
+            assert_eq!(
+                bare_commit_identity(&remote_path, branch),
+                (
+                    configured_author.name.clone(),
+                    configured_author.email.clone(),
+                    configured_author.name.clone(),
+                    configured_author.email.clone(),
+                )
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn unconfigured_commit_patch_uses_request_author() {
+        let remote_dir = setup_commit_patch_test_repo();
+        let remote_path = remote_dir.path().join("remote.git");
+        let request_author = domain::CommitAuthor {
+            name: "Request Author".to_string(),
+            email: "request@example.test".to_string(),
+        };
+        let orchestrator = WriteOrchestrator::new(
+            Arc::new(FakeForgeAdapter::default()),
+            Arc::new(InMemoryAuditSink::new()),
+            None,
+        );
+        let request = commit_patch_test_request(
+            &remote_path,
+            "agent-one",
+            "agent/request-author",
+            "request.txt",
+            request_author.clone(),
+        );
+
+        orchestrator
+            .commit_patch(
+                request,
+                domain::policy::AuthorizedWrite {
+                    policy: domain::policy::PolicyConfig {
+                        branch_prefix: Some("agent/".to_string()),
+                        ..domain::policy::PolicyConfig::default()
+                    },
+                },
+                &ForgeCredential { token: None },
+            )
+            .await
+            .expect("commit patch");
+
+        assert_eq!(
+            bare_commit_identity(&remote_path, "agent/request-author"),
+            (
+                request_author.name.clone(),
+                request_author.email.clone(),
+                request_author.name,
+                request_author.email,
+            )
+        );
     }
 
     // --- rebase_branch integration tests ---
@@ -6017,9 +6262,9 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
         let (remote_dir, shas) = setup_rebase_test_repo(branch_name);
 
         let remote_path = remote_dir.path().join("remote.git");
-        let adapter = Arc::new(FakeForgeAdapter);
+        let adapter = Arc::new(FakeForgeAdapter::default());
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
+        let orchestrator = WriteOrchestrator::new(Arc::clone(&adapter), Arc::clone(&audit), None);
 
         let request = domain::RebaseBranchRequest {
             agent: AgentIdentity {
@@ -6068,6 +6313,86 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             audit.records().expect("audit records")[0].action,
             "rebase_branch"
         );
+        assert_eq!(adapter.authenticated_user_lookups(), 1);
+    }
+
+    #[tokio::test]
+    async fn configured_rebase_committer_applies_to_two_agents_without_lookup() {
+        let configured_author = domain::CommitAuthor {
+            name: "Global Committer".to_string(),
+            email: "global@example.test".to_string(),
+        };
+        let adapter = Arc::new(FakeForgeAdapter::default());
+        let orchestrator = WriteOrchestrator::new(
+            Arc::clone(&adapter),
+            Arc::new(InMemoryAuditSink::new()),
+            Some(configured_author.clone()),
+        );
+        let authorized = domain::policy::AuthorizedWrite {
+            policy: domain::policy::PolicyConfig {
+                branch_prefix: Some("agent/".to_string()),
+                ..domain::policy::PolicyConfig::default()
+            },
+        };
+
+        for (agent_id, branch) in [
+            ("agent-one", "agent/global-rebase-one"),
+            ("agent-two", "agent/global-rebase-two"),
+        ] {
+            let (remote_dir, shas) = setup_rebase_test_repo(branch);
+            let remote_path = remote_dir.path().join("remote.git");
+            let request = domain::RebaseBranchRequest {
+                agent: AgentIdentity {
+                    agent_id: agent_id.to_string(),
+                    session_id: "test-session".to_string(),
+                },
+                base_branch: "main".to_string(),
+                branch: branch.to_string(),
+                operations: vec![domain::RebaseOperation::Drop {
+                    commit: shas[1].clone(),
+                }],
+                repository: RepositoryRef {
+                    alias: "test".to_string(),
+                    forge: domain::ForgeKind::Forgejo,
+                    host: format!(
+                        "file://{}",
+                        remote_path.parent().expect("remote parent").display()
+                    ),
+                    name: "remote".to_string(),
+                    owner: ".".to_string(),
+                },
+            };
+
+            orchestrator
+                .rebase_branch(
+                    request,
+                    authorized.clone(),
+                    &ForgeCredential { token: None },
+                )
+                .await
+                .expect("rebase branch");
+
+            let output = std::process::Command::new("git")
+                .arg("--git-dir")
+                .arg(&remote_path)
+                .args(["rev-list", "--reverse", &format!("main..{branch}")])
+                .output()
+                .expect("list remote commits");
+            assert!(output.status.success());
+            let commits = String::from_utf8(output.stdout).expect("commit list UTF-8");
+            let commits: Vec<_> = commits.lines().collect();
+            assert_eq!(commits.len(), 2);
+            for commit in commits {
+                let (author_name, author_email, committer_name, committer_email) =
+                    bare_commit_identity(&remote_path, commit);
+                assert_eq!(author_name, "Test");
+                assert_eq!(author_email, "test@test");
+                assert_eq!(committer_name, configured_author.name);
+                assert_eq!(committer_email, configured_author.email);
+            }
+        }
+
+        assert_eq!(adapter.authenticated_user_lookups(), 0);
     }
 
     /// Set up a bare remote repo like `setup_rebase_test_repo`, but also
@@ -6176,9 +6501,9 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
         let remote_dir = setup_rebase_onto_test_repo(branch_name);
 
         let remote_path = remote_dir.path().join("remote.git");
-        let adapter = Arc::new(FakeForgeAdapter);
+        let adapter = Arc::new(FakeForgeAdapter::default());
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit), None);
 
         let request = domain::RebaseBranchRequest {
             agent: AgentIdentity {
@@ -6234,9 +6559,9 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
 
     #[tokio::test]
     async fn rebase_branch_rebase_onto_rejects_combined_operations() {
-        let adapter = Arc::new(FakeForgeAdapter);
+        let adapter = Arc::new(FakeForgeAdapter::default());
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit), None);
 
         let request = domain::RebaseBranchRequest {
             agent: AgentIdentity {
@@ -6727,7 +7052,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
     async fn close_issue_succeeds_and_records_both_audits() {
         let adapter = Arc::new(CloseIssueTestForgeAdapter::new(false, false));
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator = WriteOrchestrator::new(Arc::clone(&adapter), Arc::clone(&audit));
+        let orchestrator = WriteOrchestrator::new(Arc::clone(&adapter), Arc::clone(&audit), None);
 
         let result = orchestrator
             .close_issue(
@@ -6768,7 +7093,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
     async fn close_issue_fails_on_comment_error() {
         let adapter = Arc::new(CloseIssueTestForgeAdapter::new(true, false));
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit), None);
 
         let err = orchestrator
             .close_issue(
@@ -6795,7 +7120,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
     async fn close_issue_fails_on_close_error() {
         let adapter = Arc::new(CloseIssueTestForgeAdapter::new(false, true));
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit));
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit), None);
 
         let err = orchestrator
             .close_issue(
@@ -6833,7 +7158,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
     async fn close_issue_fails_on_first_audit_error() {
         let adapter = Arc::new(CloseIssueTestForgeAdapter::new(false, false));
         let audit = Arc::new(FailingAuditSink);
-        let orchestrator = WriteOrchestrator::new(adapter, audit);
+        let orchestrator = WriteOrchestrator::new(adapter, audit, None);
 
         let err = orchestrator
             .close_issue(
@@ -6881,7 +7206,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
     async fn close_issue_fails_on_close_audit_error() {
         let adapter = Arc::new(CloseIssueTestForgeAdapter::new(false, false));
         let audit = Arc::new(ConditionalAuditSink::new(2));
-        let orchestrator = WriteOrchestrator::new(Arc::clone(&adapter), audit);
+        let orchestrator = WriteOrchestrator::new(Arc::clone(&adapter), audit, None);
 
         let err = orchestrator
             .close_issue(
@@ -7287,7 +7612,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             }),
         };
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator = WriteOrchestrator::new(Arc::new(adapter), Arc::clone(&audit));
+        let orchestrator = WriteOrchestrator::new(Arc::new(adapter), Arc::clone(&audit), None);
 
         let repo = base_repository_ref();
         let req = domain::AddIssueDependencyRequest {
@@ -7318,7 +7643,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             }),
         };
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator = WriteOrchestrator::new(Arc::new(adapter), Arc::clone(&audit));
+        let orchestrator = WriteOrchestrator::new(Arc::new(adapter), Arc::clone(&audit), None);
 
         let repo = base_repository_ref();
         let dep_repo = cross_repo_repository_ref();
@@ -7350,7 +7675,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             }),
         };
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator = WriteOrchestrator::new(Arc::new(adapter), Arc::clone(&audit));
+        let orchestrator = WriteOrchestrator::new(Arc::new(adapter), Arc::clone(&audit), None);
 
         let repo = base_repository_ref();
         let req = domain::RemoveIssueDependencyRequest {
@@ -7381,7 +7706,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             }),
         };
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator = WriteOrchestrator::new(Arc::new(adapter), Arc::clone(&audit));
+        let orchestrator = WriteOrchestrator::new(Arc::new(adapter), Arc::clone(&audit), None);
 
         let repo = base_repository_ref();
         let dep_repo = cross_repo_repository_ref();
@@ -7416,7 +7741,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             }),
         });
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator = WriteOrchestrator::new(Arc::clone(&adapter), Arc::clone(&audit));
+        let orchestrator = WriteOrchestrator::new(Arc::clone(&adapter), Arc::clone(&audit), None);
 
         let repo = base_repository_ref();
         let dep_repo = cross_repo_repository_ref();
@@ -7448,7 +7773,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             }),
         });
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator = WriteOrchestrator::new(Arc::clone(&adapter), Arc::clone(&audit));
+        let orchestrator = WriteOrchestrator::new(Arc::clone(&adapter), Arc::clone(&audit), None);
 
         let repo = base_repository_ref();
         let req = domain::AddIssueDependencyRequest {
@@ -7479,7 +7804,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             }),
         });
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator = WriteOrchestrator::new(Arc::clone(&adapter), Arc::clone(&audit));
+        let orchestrator = WriteOrchestrator::new(Arc::clone(&adapter), Arc::clone(&audit), None);
 
         let repo = base_repository_ref();
         let dep_repo = cross_repo_repository_ref();
@@ -7514,7 +7839,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             }),
         });
         let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator = WriteOrchestrator::new(Arc::clone(&adapter), Arc::clone(&audit));
+        let orchestrator = WriteOrchestrator::new(Arc::clone(&adapter), Arc::clone(&audit), None);
 
         let repo = base_repository_ref();
         let req = domain::RemoveIssueDependencyRequest {

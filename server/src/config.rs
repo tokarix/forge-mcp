@@ -9,11 +9,44 @@ pub struct ServerConfig {
     pub server: ListenConfig,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct ListenConfig {
+    #[serde(default)]
+    pub commit_author_email: Option<String>,
+    #[serde(default)]
+    pub commit_author_name: Option<String>,
     #[serde(default)]
     pub enable_docs: bool,
     pub listen: String,
+}
+
+impl std::fmt::Debug for ListenConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ListenConfig")
+            .field(
+                "commit_author_email",
+                &self.commit_author_email.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("commit_author_name", &self.commit_author_name)
+            .field("enable_docs", &self.enable_docs)
+            .field("listen", &self.listen)
+            .finish()
+    }
+}
+
+impl ListenConfig {
+    /// Returns the normalized global commit identity after configuration
+    /// validation.
+    #[must_use]
+    pub fn commit_author(&self) -> Option<domain::CommitAuthor> {
+        self.commit_author_name
+            .as_deref()
+            .zip(self.commit_author_email.as_deref())
+            .map(|(name, email)| domain::CommitAuthor {
+                name: name.trim().to_string(),
+                email: email.trim().to_string(),
+            })
+    }
 }
 
 #[derive(Clone, Deserialize)]
@@ -344,6 +377,27 @@ fn validate_github_app(
     Ok(())
 }
 
+fn validate_commit_author(server: &ListenConfig) -> Result<(), String> {
+    match (
+        server.commit_author_name.as_deref(),
+        server.commit_author_email.as_deref(),
+    ) {
+        (Some(_), None) => {
+            Err("server.commit_author_email is required with server.commit_author_name".to_string())
+        }
+        (None, Some(_)) => {
+            Err("server.commit_author_name is required with server.commit_author_email".to_string())
+        }
+        (Some(name), Some(_)) if name.trim().is_empty() => {
+            Err("server.commit_author_name must not be blank".to_string())
+        }
+        (Some(_), Some(email)) if email.trim().is_empty() => {
+            Err("server.commit_author_email must not be blank".to_string())
+        }
+        (None, None) | (Some(_), Some(_)) => Ok(()),
+    }
+}
+
 /// Validates the parsed config for semantic correctness.
 ///
 /// # Errors
@@ -351,6 +405,7 @@ fn validate_github_app(
 /// Returns a description of the first validation error found.
 pub fn validate_config(config: &ServerConfig) -> Result<(), String> {
     const SUPPORTED_FORGE_TYPES: &[&str] = &["forgejo", "github", "gitlab"];
+    validate_commit_author(&config.server)?;
 
     let mut seen_aliases = std::collections::HashSet::new();
     let mut forge_types = std::collections::HashMap::new();
@@ -530,6 +585,84 @@ protected_paths = [".forgejo/", ".github/"]
 [agents.forge_identity.internal]
 token = "claude-bot-forgejo-token"
 "#;
+
+    fn config_with_commit_author(name: Option<&str>, email: Option<&str>) -> ServerConfig {
+        ServerConfig {
+            agents: Vec::new(),
+            forges: Vec::new(),
+            server: ListenConfig {
+                commit_author_email: email.map(str::to_string),
+                commit_author_name: name.map(str::to_string),
+                enable_docs: false,
+                listen: "127.0.0.1:8443".to_string(),
+            },
+        }
+    }
+
+    #[test]
+    fn validates_and_trims_global_commit_author() {
+        let config =
+            config_with_commit_author(Some("  Forge MCP  "), Some("  commits@example.test  "));
+
+        validate_config(&config).expect("validate commit author");
+        assert_eq!(
+            config.server.commit_author(),
+            Some(domain::CommitAuthor {
+                name: "Forge MCP".to_string(),
+                email: "commits@example.test".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn accepts_omitted_global_commit_author() {
+        let config = config_with_commit_author(None, None);
+
+        validate_config(&config).expect("validate omitted commit author");
+        assert_eq!(config.server.commit_author(), None);
+    }
+
+    #[test]
+    fn rejects_global_commit_author_name_without_email() {
+        let config = config_with_commit_author(Some("Forge MCP"), None);
+
+        let error = validate_config(&config).expect_err("reject missing email");
+        assert!(error.contains("commit_author_email"));
+    }
+
+    #[test]
+    fn rejects_global_commit_author_email_without_name() {
+        let config = config_with_commit_author(None, Some("commits@example.test"));
+
+        let error = validate_config(&config).expect_err("reject missing name");
+        assert!(error.contains("commit_author_name"));
+    }
+
+    #[test]
+    fn rejects_blank_global_commit_author_name() {
+        let config = config_with_commit_author(Some("  "), Some("commits@example.test"));
+
+        let error = validate_config(&config).expect_err("reject blank name");
+        assert!(error.contains("commit_author_name must not be blank"));
+    }
+
+    #[test]
+    fn rejects_blank_global_commit_author_email() {
+        let config = config_with_commit_author(Some("Forge MCP"), Some("  "));
+
+        let error = validate_config(&config).expect_err("reject blank email");
+        assert!(error.contains("commit_author_email must not be blank"));
+    }
+
+    #[test]
+    fn listen_config_debug_redacts_global_commit_author_email() {
+        let config =
+            config_with_commit_author(Some("Forge MCP"), Some("sensitive-commits@example.test"));
+
+        let debug = format!("{:?}", config.server);
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("sensitive-commits@example.test"));
+    }
 
     #[test]
     fn parses_valid_config() {

@@ -36,6 +36,21 @@ fn auth_header(token: &str) -> String {
     format!("Authorization: Basic {credentials}")
 }
 
+fn identity_env(
+    base_env: &[(String, String)],
+    author: Option<(&str, &str)>,
+    committer: (&str, &str),
+) -> Vec<(String, String)> {
+    let mut env = base_env.to_vec();
+    if let Some((name, email)) = author {
+        env.push(("GIT_AUTHOR_NAME".to_string(), name.to_string()));
+        env.push(("GIT_AUTHOR_EMAIL".to_string(), email.to_string()));
+    }
+    env.push(("GIT_COMMITTER_NAME".to_string(), committer.0.to_string()));
+    env.push(("GIT_COMMITTER_EMAIL".to_string(), committer.1.to_string()));
+    env
+}
+
 /// An operation to apply during an interactive rebase.
 #[derive(Clone, Debug)]
 pub enum RebaseOperation {
@@ -140,19 +155,12 @@ impl GitWorkspace {
         author_name: &str,
         author_email: &str,
     ) -> Result<GitCommitResult, GitExecError> {
-        run_git(
-            &self.repo_path,
-            &[
-                "-c",
-                &format!("user.name={author_name}"),
-                "-c",
-                &format!("user.email={author_email}"),
-                "commit",
-                "-m",
-                message,
-            ],
+        let identity_env = identity_env(
             &self.auth_env,
-        )?;
+            Some((author_name, author_email)),
+            (author_name, author_email),
+        );
+        run_git(&self.repo_path, &["commit", "-m", message], &identity_env)?;
 
         let sha = run_git(&self.repo_path, &["rev-parse", "HEAD"], &self.auth_env)?;
 
@@ -318,8 +326,7 @@ impl GitWorkspace {
             let _ = self.restore_branch(&branch, &original_head);
         })?;
 
-        let committer_name_arg = format!("user.name={committer_name}");
-        let committer_email_arg = format!("user.email={committer_email}");
+        let committer_env = identity_env(&self.auth_env, None, (committer_name, committer_email));
 
         // Process each commit in order
         for commit in &commits {
@@ -330,18 +337,7 @@ impl GitWorkspace {
             }
 
             // Cherry-pick this commit
-            if let Err(e) = run_git(
-                &self.repo_path,
-                &[
-                    "-c",
-                    &committer_name_arg,
-                    "-c",
-                    &committer_email_arg,
-                    "cherry-pick",
-                    sha,
-                ],
-                &self.auth_env,
-            ) {
+            if let Err(e) = run_git(&self.repo_path, &["cherry-pick", sha], &committer_env) {
                 let _ = run_git(&self.repo_path, &["cherry-pick", "--abort"], &self.auth_env);
                 let _ = self.restore_branch(&branch, &original_head);
                 return Err(e);
@@ -350,9 +346,7 @@ impl GitWorkspace {
             // Apply fixup sources for this target
             if let Some(sources) = fixup_by_target.get(sha) {
                 for source in sources {
-                    if let Err(e) =
-                        self.apply_fixup(source, &committer_name_arg, &committer_email_arg)
-                    {
+                    if let Err(e) = self.apply_fixup(source, &committer_env) {
                         let _ = self.restore_branch(&branch, &original_head);
                         return Err(e);
                     }
@@ -376,8 +370,7 @@ impl GitWorkspace {
     fn apply_fixup(
         &self,
         source: &str,
-        committer_name_arg: &str,
-        committer_email_arg: &str,
+        committer_env: &[(String, String)],
     ) -> Result<(), GitExecError> {
         if let Err(e) = run_git(
             &self.repo_path,
@@ -390,16 +383,8 @@ impl GitWorkspace {
 
         run_git(
             &self.repo_path,
-            &[
-                "-c",
-                committer_name_arg,
-                "-c",
-                committer_email_arg,
-                "commit",
-                "--amend",
-                "--no-edit",
-            ],
-            &self.auth_env,
+            &["commit", "--amend", "--no-edit"],
+            committer_env,
         )
         .map(|_| ())
     }
@@ -429,19 +414,8 @@ impl GitWorkspace {
         committer_name: &str,
         committer_email: &str,
     ) -> Result<(), GitExecError> {
-        run_git(
-            &self.repo_path,
-            &[
-                "-c",
-                &format!("user.name={committer_name}"),
-                "-c",
-                &format!("user.email={committer_email}"),
-                "rebase",
-                base_ref,
-            ],
-            &self.auth_env,
-        )
-        .map(|_| ())
+        let committer_env = identity_env(&self.auth_env, None, (committer_name, committer_email));
+        run_git(&self.repo_path, &["rebase", base_ref], &committer_env).map(|_| ())
     }
 
     /// Resolves a refspec to a full SHA.
@@ -602,6 +576,18 @@ mod tests {
         workspace
             .create_branch("agent/test-branch")
             .expect("create branch");
+        run_git(
+            &workspace.repo_path,
+            &["config", "user.name", "opencode-agent"],
+            &workspace.auth_env,
+        )
+        .expect("configure unrelated repository author name");
+        run_git(
+            &workspace.repo_path,
+            &["config", "user.email", "opencode-agent@example.test"],
+            &workspace.auth_env,
+        )
+        .expect("configure unrelated repository author email");
 
         let patch = "\
 diff --git a/README.md b/README.md
@@ -618,6 +604,15 @@ index 7e59600..1234567 100644
             .commit("test: add world", "Test Agent", "agent@test")
             .expect("commit");
         assert!(!result.commit_sha.is_empty());
+        assert_eq!(
+            commit_identity(&workspace, &result.commit_sha),
+            (
+                "Test Agent".to_string(),
+                "agent@test".to_string(),
+                "Test Agent".to_string(),
+                "agent@test".to_string(),
+            )
+        );
 
         workspace
             .push_branch("agent/test-branch")
@@ -694,6 +689,118 @@ index 7e59600..1234567 100644
             .commit_sha
     }
 
+    fn add_commit_as(
+        workspace: &GitWorkspace,
+        filename: &str,
+        content: &str,
+        message: &str,
+        author_name: &str,
+        author_email: &str,
+    ) -> String {
+        std::fs::write(workspace.repo_path.join(filename), content).expect("write file");
+        run_git(
+            &workspace.repo_path,
+            &["add", filename],
+            &workspace.auth_env,
+        )
+        .expect("run command");
+        workspace
+            .commit(message, author_name, author_email)
+            .expect("commit")
+            .commit_sha
+    }
+
+    fn commit_identity(workspace: &GitWorkspace, commit: &str) -> (String, String, String, String) {
+        let output = run_git(
+            &workspace.repo_path,
+            &["show", "-s", "--format=%an%x00%ae%x00%cn%x00%ce", commit],
+            &workspace.auth_env,
+        )
+        .expect("inspect commit identity");
+        let fields: Vec<_> = output.split('\0').map(str::trim).collect();
+        assert_eq!(fields.len(), 4);
+        (
+            fields[0].to_string(),
+            fields[1].to_string(),
+            fields[2].to_string(),
+            fields[3].to_string(),
+        )
+    }
+
+    #[test]
+    fn failing_commit_does_not_expose_identity_email() {
+        let (_remote_dir, remote_path) = setup_remote_with_initial_commit();
+        let remote_url = format!("file://{}", remote_path.display());
+        let workspace =
+            GitWorkspace::clone_repo(&remote_url, "main", None, true).expect("clone repo");
+        let sensitive_email = "sensitive-commits@example.test";
+
+        let error = workspace
+            .commit("nothing to commit", "Global Committer", sensitive_email)
+            .expect_err("empty commit should fail")
+            .to_string();
+
+        assert!(!error.contains(sensitive_email));
+    }
+
+    #[test]
+    fn interactive_rebase_preserves_authors_and_replaces_committers() {
+        let (_remote_dir, remote_path) = setup_remote_with_initial_commit();
+        let remote_url = format!("file://{}", remote_path.display());
+        let workspace =
+            GitWorkspace::clone_repo(&remote_url, "main", None, false).expect("clone repo");
+        workspace
+            .create_branch("agent/identity-rebase")
+            .expect("create branch");
+
+        add_commit_as(
+            &workspace,
+            "alice.txt",
+            "alice",
+            "alice commit",
+            "Alice Author",
+            "alice@example.test",
+        );
+        add_commit_as(
+            &workspace,
+            "bob.txt",
+            "bob",
+            "bob commit",
+            "Bob Author",
+            "bob@example.test",
+        );
+        let merge_base = workspace
+            .merge_base("HEAD", "origin/main")
+            .expect("merge base");
+
+        workspace
+            .rebase_interactive(&merge_base, &[], "Global Committer", "global@example.test")
+            .expect("rewrite commits");
+
+        let commits = workspace
+            .list_commits_in_range(&merge_base)
+            .expect("list rewritten commits");
+        assert_eq!(commits.len(), 2);
+        assert_eq!(
+            commit_identity(&workspace, &commits[0]),
+            (
+                "Alice Author".to_string(),
+                "alice@example.test".to_string(),
+                "Global Committer".to_string(),
+                "global@example.test".to_string(),
+            )
+        );
+        assert_eq!(
+            commit_identity(&workspace, &commits[1]),
+            (
+                "Bob Author".to_string(),
+                "bob@example.test".to_string(),
+                "Global Committer".to_string(),
+                "global@example.test".to_string(),
+            )
+        );
+    }
+
     #[test]
     fn rebase_fixup_squashes_commit_into_target() {
         let (_remote_dir, remote_path) = setup_remote_with_initial_commit();
@@ -742,6 +849,14 @@ index 7e59600..1234567 100644
         // Should now have 2 commits
         let commits_after = ws.list_commits_in_range(&mb).expect("list commits");
         assert_eq!(commits_after.len(), 2);
+        for commit in commits_after {
+            let (author_name, author_email, committer_name, committer_email) =
+                commit_identity(&ws, &commit);
+            assert_eq!(author_name, "Test");
+            assert_eq!(author_email, "test@test");
+            assert_eq!(committer_name, "Test Committer");
+            assert_eq!(committer_email, "committer@test");
+        }
     }
 
     #[test]
@@ -945,6 +1060,17 @@ index 7e59600..1234567 100644
         // Should still have 2 branch commits
         let commits = ws.list_commits_in_range(&mb).expect("list commits");
         assert_eq!(commits.len(), 2);
+        for commit in commits {
+            assert_eq!(
+                commit_identity(&ws, &commit),
+                (
+                    "Test".to_string(),
+                    "test@test".to_string(),
+                    "Test Committer".to_string(),
+                    "committer@test".to_string(),
+                )
+            );
+        }
     }
 
     /// Helper: add a multi-file commit to a workspace.
