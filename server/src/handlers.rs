@@ -1452,7 +1452,7 @@ pub async fn list_repositories(
         ("state" = Option<String>, Query, description = "Optional state filter: open, closed"),
     ),
     responses(
-        (status = 200, description = "List of issues"),
+        (status = 200, description = "Exhaustive, deduplicated issue list within the provider pagination safety envelope; exceeding a safety budget returns an error"),
         (status = 401, description = "Unauthorized", body = ErrorBody),
     ),
     security(("bearer" = []))

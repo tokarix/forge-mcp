@@ -330,6 +330,8 @@ where
             .map_err(|e| ServiceError::Upstream(e.to_string()))
     }
 
+    /// Returns an exhaustive, deduplicated issue snapshot within the provider
+    /// pagination safety envelope. Any budget failure rejects the whole call.
     async fn list_issues(
         &self,
         request: ListIssuesRequest,

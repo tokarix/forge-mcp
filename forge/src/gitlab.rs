@@ -1,6 +1,8 @@
 //! GitLab REST API v4 adapter.
 
+use std::collections::HashSet;
 use std::fmt::Write;
+use std::time::Instant;
 
 use async_trait::async_trait;
 use domain::{
@@ -77,6 +79,123 @@ impl GitLabAdapter {
     /// default.
     fn effective_token<'a>(&'a self, credential: &'a ForgeCredential) -> Option<&'a str> {
         credential.token.as_deref().or(self.config.token.as_deref())
+    }
+
+    fn issue_continuation(headers: &reqwest::header::HeaderMap) -> Result<Option<u64>, ForgeError> {
+        let link_next = crate::next_page_from_link_header(headers)?;
+        let x_next = headers
+            .get("x-next-page")
+            .map(|value| {
+                let value = value
+                    .to_str()
+                    .map_err(|_| crate::pagination_error("X-Next-Page is not valid UTF-8"))?;
+                let value = value.trim();
+                if value.is_empty() {
+                    return Ok(None);
+                }
+                value
+                    .parse::<u64>()
+                    .map(Some)
+                    .map_err(|_| crate::pagination_error("X-Next-Page is not numeric"))
+            })
+            .transpose()?
+            .flatten();
+        if let (Some(link_next), Some(x_next)) = (link_next, x_next)
+            && link_next != x_next
+        {
+            return Err(crate::pagination_error(format!(
+                "Link and X-Next-Page continuations disagree ({link_next} != {x_next})"
+            )));
+        }
+        Ok(link_next.or(x_next))
+    }
+
+    async fn list_issues_with_limits(
+        &self,
+        repository: &RepositoryRef,
+        state: Option<&str>,
+        credential: &ForgeCredential,
+        limits: crate::IssuePaginationLimits,
+    ) -> Result<Vec<domain::Issue>, ForgeError> {
+        let limits = limits.validate()?;
+        let deadline = Instant::now()
+            .checked_add(limits.deadline)
+            .ok_or_else(|| crate::pagination_error("deadline overflow"))?;
+        let token = self.effective_token(credential);
+        let mut page = 1_u64;
+        let mut pages = 0_u64;
+        let mut raw_issues = 0_usize;
+        let mut used_bytes = 0_usize;
+        let mut issues = Vec::new();
+        let mut seen = HashSet::new();
+
+        loop {
+            if pages >= limits.max_pages {
+                return Err(crate::pagination_error(format!(
+                    "provider exceeded the page budget of {} pages",
+                    limits.max_pages
+                )));
+            }
+            let remaining = crate::remaining_deadline(deadline)?;
+            let mut url = format!(
+                "{}/projects/{}/issues?per_page={}&page={page}",
+                self.api_base(),
+                Self::project_path(repository),
+                limits.page_size,
+            );
+            if let Some(state) = state {
+                // GitLab uses "opened" instead of "open".
+                let gl_state = if state == "open" { "opened" } else { state };
+                let _ = write!(url, "&state={gl_state}");
+            }
+
+            let request = Self::authenticate(self.client.get(&url).timeout(remaining), token);
+            let response = request.send().await?;
+            if response.status().is_redirection() {
+                return Err(crate::redirect_error(&response));
+            }
+            let response =
+                crate::read_bounded_issue_response(response, limits, used_bytes, deadline).await?;
+            used_bytes = used_bytes
+                .checked_add(response.body.len())
+                .ok_or_else(|| crate::pagination_error("cumulative byte count overflow"))?;
+            if !response.status.is_success() {
+                return Err(crate::issue_list_status_error(&response));
+            }
+
+            let provider_next = Self::issue_continuation(&response.headers)?;
+
+            let page_issues: Vec<GitLabIssue> =
+                serde_json::from_slice(&response.body).map_err(|error| {
+                    crate::pagination_error(format!("invalid issue page JSON: {error}"))
+                })?;
+            let _ = crate::remaining_deadline(deadline)?;
+            let next_raw_issues = raw_issues
+                .checked_add(page_issues.len())
+                .ok_or_else(|| crate::pagination_error("raw issue count overflow"))?;
+            if next_raw_issues > limits.max_raw_issues {
+                return Err(crate::pagination_error(format!(
+                    "provider exceeded the raw issue budget of {} issues",
+                    limits.max_raw_issues
+                )));
+            }
+            raw_issues = next_raw_issues;
+            for issue in page_issues {
+                let issue = issue.into_issue();
+                if seen.insert(issue.index) {
+                    issues.push(issue);
+                }
+            }
+
+            pages = pages
+                .checked_add(1)
+                .ok_or_else(|| crate::pagination_error("page count overflow"))?;
+            let next = crate::validate_next_page(page, provider_next)?;
+            let Some(next) = next else {
+                return Ok(issues);
+            };
+            page = next;
+        }
     }
 
     /// Checks the HTTP response status and returns a descriptive error for
@@ -1141,21 +1260,13 @@ impl crate::ForgeAdapter for GitLabAdapter {
         state: Option<&str>,
         credential: &ForgeCredential,
     ) -> Result<Vec<domain::Issue>, ForgeError> {
-        let mut url = format!(
-            "{}/projects/{}/issues",
-            self.api_base(),
-            Self::project_path(repository),
-        );
-        if let Some(state) = state {
-            // GitLab uses "opened" instead of "open".
-            let gl_state = if state == "open" { "opened" } else { state };
-            let _ = write!(url, "?state={gl_state}");
-        }
-        let token = self.effective_token(credential);
-        let request = Self::authenticate(self.client.get(&url), token);
-        let response = Self::check_response(request.send().await?).await?;
-        let issues: Vec<GitLabIssue> = response.json().await?;
-        Ok(issues.into_iter().map(GitLabIssue::into_issue).collect())
+        self.list_issues_with_limits(
+            repository,
+            state,
+            credential,
+            crate::IssuePaginationLimits::default(),
+        )
+        .await
     }
 
     async fn list_repositories(

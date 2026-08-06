@@ -1,7 +1,9 @@
 //! Forge adapter traits and the Phase 1 Forgejo implementation.
 
+use std::collections::HashSet;
 use std::fmt::Write;
 use std::sync::Once;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use base64::Engine;
@@ -131,6 +133,241 @@ pub(crate) fn parse_forge_error_message(body: &str) -> Option<String> {
 
 fn bounded_preview(value: &str, max_chars: usize) -> String {
     value.chars().take(max_chars).collect()
+}
+
+/// Safety limits for an exhaustive issue listing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct IssuePaginationLimits {
+    pub(crate) page_size: usize,
+    pub(crate) max_pages: u64,
+    pub(crate) max_raw_issues: usize,
+    pub(crate) max_page_bytes: usize,
+    pub(crate) max_total_bytes: usize,
+    pub(crate) deadline: Duration,
+}
+
+pub(crate) const ISSUE_PAGE_SIZE: usize = 100;
+pub(crate) const MAX_ISSUE_PAGES: u64 = 1_000;
+pub(crate) const MAX_RAW_ISSUES: usize = 100_000;
+pub(crate) const MAX_ISSUE_PAGE_BYTES: usize = 8 * 1024 * 1024;
+pub(crate) const MAX_ISSUE_TOTAL_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const FORGE_MCP_ISSUE_LIST_DEADLINE: Duration = Duration::from_secs(60);
+
+impl Default for IssuePaginationLimits {
+    fn default() -> Self {
+        Self {
+            page_size: ISSUE_PAGE_SIZE,
+            max_pages: MAX_ISSUE_PAGES,
+            max_raw_issues: MAX_RAW_ISSUES,
+            max_page_bytes: MAX_ISSUE_PAGE_BYTES,
+            max_total_bytes: MAX_ISSUE_TOTAL_BYTES,
+            deadline: FORGE_MCP_ISSUE_LIST_DEADLINE,
+        }
+    }
+}
+
+impl IssuePaginationLimits {
+    pub(crate) fn validate(self) -> Result<Self, ForgeError> {
+        if self.page_size == 0
+            || self.max_pages == 0
+            || self.max_raw_issues == 0
+            || self.max_page_bytes == 0
+            || self.max_total_bytes == 0
+            || self.deadline.is_zero()
+            || self.max_page_bytes > self.max_total_bytes
+            || u128::from(self.page_size as u64) * u128::from(self.max_pages)
+                < u128::from(self.max_raw_issues as u64)
+        {
+            return Err(ForgeError::InvalidPayload(
+                "invalid issue pagination limits".to_string(),
+            ));
+        }
+        Ok(self)
+    }
+}
+
+pub(crate) struct BoundedIssueResponse {
+    pub(crate) status: StatusCode,
+    pub(crate) headers: reqwest::header::HeaderMap,
+    pub(crate) body: Vec<u8>,
+}
+
+pub(crate) fn pagination_error(message: impl Into<String>) -> ForgeError {
+    ForgeError::InvalidPayload(format!("issue pagination: {}", message.into()))
+}
+
+pub(crate) fn remaining_deadline(deadline: Instant) -> Result<Duration, ForgeError> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or_else(|| pagination_error("deadline exceeded"))
+}
+
+pub(crate) async fn read_bounded_issue_response(
+    response: reqwest::Response,
+    limits: IssuePaginationLimits,
+    used_bytes: usize,
+    deadline: Instant,
+) -> Result<BoundedIssueResponse, ForgeError> {
+    let status = response.status();
+    let headers = response.headers().clone();
+    let remaining_total = limits
+        .max_total_bytes
+        .checked_sub(used_bytes)
+        .ok_or_else(|| pagination_error("cumulative byte budget underflow"))?;
+    let allowance = limits.max_page_bytes.min(remaining_total);
+
+    if let Some(content_length) = headers
+        .get(reqwest::header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<usize>().ok())
+        && content_length > allowance
+    {
+        return Err(pagination_error(format!(
+            "declared response size {content_length} exceeds remaining allowance {allowance}"
+        )));
+    }
+
+    let mut body = Vec::new();
+    let mut page_bytes = 0usize;
+    let mut response = response;
+    loop {
+        let _ = remaining_deadline(deadline)?;
+        let Some(chunk) = response.chunk().await? else {
+            break;
+        };
+        let chunk_len = chunk.len();
+        let next_page_bytes = page_bytes
+            .checked_add(chunk_len)
+            .ok_or_else(|| pagination_error("page byte count overflow"))?;
+        let next_total_bytes = used_bytes
+            .checked_add(next_page_bytes)
+            .ok_or_else(|| pagination_error("cumulative byte count overflow"))?;
+        if next_page_bytes > limits.max_page_bytes {
+            return Err(pagination_error(format!(
+                "response exceeds per-page byte budget of {} bytes",
+                limits.max_page_bytes
+            )));
+        }
+        if next_total_bytes > limits.max_total_bytes {
+            return Err(pagination_error(format!(
+                "response exceeds cumulative byte budget of {} bytes",
+                limits.max_total_bytes
+            )));
+        }
+        body.try_reserve_exact(chunk_len).map_err(|error| {
+            pagination_error(format!(
+                "unable to reserve {chunk_len} response bytes: {error:?}"
+            ))
+        })?;
+        body.extend_from_slice(&chunk);
+        page_bytes = next_page_bytes;
+        let _ = remaining_deadline(deadline)?;
+    }
+    let _ = remaining_deadline(deadline)?;
+
+    Ok(BoundedIssueResponse {
+        status,
+        headers,
+        body,
+    })
+}
+
+pub(crate) fn issue_list_status_error(response: &BoundedIssueResponse) -> ForgeError {
+    let status = response.status;
+    let body = String::from_utf8_lossy(&response.body);
+    if status == StatusCode::NOT_FOUND {
+        let message = parse_forge_error_message(&body).map_or_else(
+            || "repository or resource not found".to_string(),
+            |message| bounded_preview(&message, 1024),
+        );
+        return ForgeError::NotFound { status, message };
+    }
+    ForgeError::UnexpectedStatus {
+        status,
+        body: bounded_preview(&body, 1024),
+    }
+}
+
+pub(crate) fn redirect_error(response: &reqwest::Response) -> ForgeError {
+    let location = response
+        .headers()
+        .get(reqwest::header::LOCATION)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("<unknown>")
+        .to_string();
+    ForgeError::Redirect {
+        status: response.status(),
+        location,
+    }
+}
+
+pub(crate) fn next_page_from_link_header(
+    headers: &reqwest::header::HeaderMap,
+) -> Result<Option<u64>, ForgeError> {
+    let Some(value) = headers.get(reqwest::header::LINK) else {
+        return Ok(None);
+    };
+    let value = value
+        .to_str()
+        .map_err(|_| pagination_error("Link header is not valid UTF-8"))?;
+    if value.trim().is_empty() {
+        return Ok(None);
+    }
+
+    let mut next = None;
+    for entry in value.split(',') {
+        let mut parts = entry.trim().split(';');
+        let target = parts
+            .next()
+            .map(str::trim)
+            .filter(|target| target.starts_with('<') && target.ends_with('>'))
+            .ok_or_else(|| pagination_error("malformed Link header"))?;
+        let url = reqwest::Url::parse(&target[1..target.len() - 1])
+            .map_err(|_| pagination_error("malformed Link URL"))?;
+        let mut is_next = false;
+        for parameter in parts {
+            let (name, value) = parameter
+                .trim()
+                .split_once('=')
+                .ok_or_else(|| pagination_error("malformed Link parameter"))?;
+            if name.trim() == "rel" {
+                let relation = value.trim().trim_matches('"');
+                is_next = relation.split_whitespace().any(|rel| rel == "next");
+            }
+        }
+        if is_next {
+            let page = url
+                .query_pairs()
+                .find(|(key, _)| key == "page")
+                .map(|(_, value)| value.into_owned())
+                .ok_or_else(|| pagination_error("next Link is missing page"))?
+                .parse::<u64>()
+                .map_err(|_| pagination_error("next Link page is not numeric"))?;
+            if next.replace(page).is_some() {
+                return Err(pagination_error("multiple next Links"));
+            }
+        }
+    }
+    Ok(next)
+}
+
+pub(crate) fn validate_next_page(
+    current: u64,
+    next: Option<u64>,
+) -> Result<Option<u64>, ForgeError> {
+    let Some(next) = next else {
+        return Ok(None);
+    };
+    let expected = current
+        .checked_add(1)
+        .ok_or_else(|| pagination_error("page number overflow"))?;
+    if next != expected {
+        return Err(pagination_error(format!(
+            "continuation page {next} is not current page {current} + 1"
+        )));
+    }
+    Ok(Some(next))
 }
 
 #[async_trait]
@@ -328,7 +565,9 @@ pub trait ForgeAdapter: Send + Sync {
         credential: &ForgeCredential,
     ) -> Result<Vec<ChangeRequest>, ForgeError>;
 
-    /// Lists issues for a repository.
+    /// Lists an exhaustive, first-occurrence-deduplicated issue snapshot for a
+    /// repository. Provider continuation metadata controls exhaustion; a
+    /// pagination safety-budget failure rejects the whole call.
     async fn list_issues(
         &self,
         repository: &RepositoryRef,
@@ -777,6 +1016,92 @@ impl ForgejoAdapter {
                 .build()?,
             config,
         })
+    }
+
+    async fn list_issues_with_limits(
+        &self,
+        repository: &RepositoryRef,
+        state: Option<&str>,
+        credential: &ForgeCredential,
+        limits: IssuePaginationLimits,
+    ) -> Result<Vec<domain::Issue>, ForgeError> {
+        let limits = limits.validate()?;
+        let deadline = Instant::now()
+            .checked_add(limits.deadline)
+            .ok_or_else(|| pagination_error("deadline overflow"))?;
+        let effective_token = credential.token.as_deref().or(self.config.token.as_deref());
+        let mut page = 1_u64;
+        let mut pages = 0_u64;
+        let mut raw_issues = 0_usize;
+        let mut used_bytes = 0_usize;
+        let mut issues = Vec::new();
+        let mut seen = HashSet::new();
+
+        loop {
+            if pages >= limits.max_pages {
+                return Err(pagination_error(format!(
+                    "provider exceeded the page budget of {} pages",
+                    limits.max_pages
+                )));
+            }
+            let remaining = remaining_deadline(deadline)?;
+            let mut url = format!(
+                "{}/api/v1/repos/{}/{}/issues?type=issues&limit={}&page={page}",
+                self.config.base_url.trim_end_matches('/'),
+                repository.owner,
+                repository.name,
+                limits.page_size,
+            );
+            if let Some(state) = state {
+                let _ = write!(url, "&state={state}");
+            }
+
+            let mut request = self.client.get(&url).timeout(remaining);
+            if let Some(token) = effective_token {
+                request = request.bearer_auth(token);
+            }
+            let response = request.send().await?;
+            if response.status().is_redirection() {
+                return Err(redirect_error(&response));
+            }
+            let response =
+                read_bounded_issue_response(response, limits, used_bytes, deadline).await?;
+            used_bytes = used_bytes
+                .checked_add(response.body.len())
+                .ok_or_else(|| pagination_error("cumulative byte count overflow"))?;
+            if !response.status.is_success() {
+                return Err(issue_list_status_error(&response));
+            }
+
+            let page_issues: Vec<ForgejoIssueResponse> = serde_json::from_slice(&response.body)
+                .map_err(|error| pagination_error(format!("invalid issue page JSON: {error}")))?;
+            let _ = remaining_deadline(deadline)?;
+            let next_raw_issues = raw_issues
+                .checked_add(page_issues.len())
+                .ok_or_else(|| pagination_error("raw issue count overflow"))?;
+            if next_raw_issues > limits.max_raw_issues {
+                return Err(pagination_error(format!(
+                    "provider exceeded the raw issue budget of {} issues",
+                    limits.max_raw_issues
+                )));
+            }
+            raw_issues = next_raw_issues;
+            for issue in page_issues {
+                let issue = issue.into_issue();
+                if seen.insert(issue.index) {
+                    issues.push(issue);
+                }
+            }
+
+            pages = pages
+                .checked_add(1)
+                .ok_or_else(|| pagination_error("page count overflow"))?;
+            let next = validate_next_page(page, next_page_from_link_header(&response.headers)?)?;
+            let Some(next) = next else {
+                return Ok(issues);
+            };
+            page = next;
+        }
     }
 
     /// Checks the HTTP response status and returns a descriptive error for
@@ -2146,29 +2471,13 @@ impl ForgeAdapter for ForgejoAdapter {
         state: Option<&str>,
         credential: &ForgeCredential,
     ) -> Result<Vec<domain::Issue>, ForgeError> {
-        let mut url = format!(
-            "{}/api/v1/repos/{}/{}/issues?type=issues",
-            self.config.base_url.trim_end_matches('/'),
-            repository.owner,
-            repository.name,
-        );
-        if let Some(state) = state {
-            let _ = write!(url, "&state={state}");
-        }
-
-        let effective_token = credential.token.as_deref().or(self.config.token.as_deref());
-        let mut request = self.client.get(&url);
-        if let Some(token) = effective_token {
-            request = request.bearer_auth(token);
-        }
-
-        let response = Self::check_response(request.send().await?).await?;
-
-        let issues: Vec<ForgejoIssueResponse> = response.json().await?;
-        Ok(issues
-            .into_iter()
-            .map(ForgejoIssueResponse::into_issue)
-            .collect())
+        self.list_issues_with_limits(
+            repository,
+            state,
+            credential,
+            IssuePaginationLimits::default(),
+        )
+        .await
     }
 
     async fn list_repositories(
@@ -3040,6 +3349,82 @@ mod tests {
             name: "repo".to_string(),
             owner: "org".to_string(),
         }
+    }
+
+    #[test]
+    fn issue_pagination_production_limits_are_coherent() {
+        let limits = IssuePaginationLimits::default();
+        assert_eq!(limits.deadline, Duration::from_secs(60));
+        assert!(limits.max_page_bytes <= limits.max_total_bytes);
+        assert!(limits.page_size > 0);
+        assert!(limits.max_pages > 0);
+        assert!(
+            u128::try_from(limits.page_size).expect("usize fits in u128")
+                * u128::from(limits.max_pages)
+                >= u128::try_from(limits.max_raw_issues).expect("usize fits in u128")
+        );
+        assert!(limits.validate().is_ok());
+    }
+
+    #[tokio::test]
+    async fn forgejo_issue_listing_follows_link_until_exhausted() {
+        let mock = MockServer::start().await;
+        let page = |first: u64, second: u64| {
+            serde_json::json!([
+                {
+                    "assignees": [], "body": "", "html_url": format!("https://forge/issues/{first}"),
+                    "id": first, "labels": [], "number": first, "state": "open", "title": format!("Issue {first}")
+                },
+                {
+                    "assignees": [], "body": "", "html_url": format!("https://forge/issues/{second}"),
+                    "id": second, "labels": [], "number": second, "state": "open", "title": format!("Issue {second}")
+                }
+            ])
+        };
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/org/repo/issues$"))
+            .and(query_param("page", "1"))
+            .and(query_param("limit", "2"))
+            .and(query_param("type", "issues"))
+            .and(query_param("state", "open"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("Link", "<http://evil.example/issues?page=2>; rel=\"next\"")
+                    .set_body_json(page(1, 2)),
+            )
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/org/repo/issues$"))
+            .and(query_param("page", "2"))
+            .and(query_param("limit", "2"))
+            .and(query_param("type", "issues"))
+            .and(query_param("state", "open"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(page(3, 4)))
+            .mount(&mock)
+            .await;
+
+        let adapter = test_adapter(&mock.uri());
+        let result = adapter
+            .list_issues_with_limits(
+                &test_repo(),
+                Some("open"),
+                &ForgeCredential { token: None },
+                IssuePaginationLimits {
+                    page_size: 2,
+                    max_pages: 2,
+                    max_raw_issues: 4,
+                    max_page_bytes: 4096,
+                    max_total_bytes: 8192,
+                    deadline: Duration::from_secs(1),
+                },
+            )
+            .await
+            .expect("list issues");
+        assert_eq!(
+            result.iter().map(|issue| issue.index).collect::<Vec<_>>(),
+            [1, 2, 3, 4]
+        );
     }
 
     #[tokio::test]

@@ -1921,8 +1921,13 @@ impl McpShim {
         self.gateway_get(url, &gw.token).await
     }
 
-    /// List issues for a repository.
-    #[tool(name = "list_issues", description = "List issues for a repository.")]
+    /// List an exhaustive, deduplicated issue snapshot for a repository within
+    /// the provider pagination safety envelope. Exceeding a safety budget
+    /// fails the whole call.
+    #[tool(
+        name = "list_issues",
+        description = "List an exhaustive, deduplicated issue snapshot within the provider pagination safety envelope; budget failures reject the whole call."
+    )]
     async fn list_issues(
         &self,
         Parameters(request): Parameters<ListIssuesTool>,
