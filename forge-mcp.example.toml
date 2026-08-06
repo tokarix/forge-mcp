@@ -6,11 +6,12 @@ listen = "0.0.0.0:8443"
 
 # Each [[forges]] entry defines a forge instance the gateway can proxy to.
 # alias:         short name used in URLs and allowed_repos patterns (lowercase, hyphens ok)
-# type:          forge software type ("forgejo" for now; "github" planned)
+# type:          forge software type ("forgejo", "github", or "gitlab")
 # base_url:      upstream forge base URL
+# api_url:       optional REST API root override (primarily for GitHub/GHES)
 # token:         API token for the upstream forge (optional for public instances)
 # git_auth_user: username for git smart HTTP Basic auth (default: "", for Forgejo;
-#                use "x-access-token" for GitHub)
+#                defaults to "x-access-token" for GitHub)
 
 [[forges]]
 alias = "internal"
@@ -18,6 +19,24 @@ type = "forgejo"
 base_url = "https://forge.example"
 token = "your-forgejo-api-token"
 # git_auth_user = ""  # default: empty (Forgejo uses token as password with empty user)
+
+# GitHub agents can each use a different App installation identity. An optional
+# forge-level App can be used as a fallback for system jobs such as webhook-
+# driven auto-merge; per-agent App credentials take precedence.
+[[forges]]
+alias = "github"
+type = "github"
+base_url = "https://github.com"
+# api_url = "https://api.github.com" # derived automatically for GitHub.com
+
+# [forges.github_app]
+# app_id = 999999
+# installation_id = 99999999
+# private_key_path = "/run/secrets/forge-mcp-system.pem"
+
+# Optional GitHub webhook verification.
+# [forges.webhook]
+# secret = "github-webhook-secret"
 
 # Each [[agents]] entry defines a bearer token that maps to an agent
 # identity and policy.
@@ -35,16 +54,35 @@ agent_id = "codex"
 session_id = "default"
 
 [agents.policy]
-allowed_repos = ["internal/org/repo", "internal/org/other-repo"]
+allowed_repos = ["internal/org/repo", "internal/org/other-repo", "github/org/repo"]
 branch_prefix = "agent/codex/"
 protected_paths = [".forgejo/", ".github/"]
 
+# Forgejo and GitLab can use a distinct upstream identity for this agent.
+[agents.forge_identity.internal]
+token = "codex-bot-forgejo-token"
+
+# This App's GitHub slug could be "stintel-codex"; GitHub displays its actor as
+# "stintel-codex[bot]".
+[agents.github_app.github]
+app_id = 123456
+installation_id = 78901234
+private_key_path = "/run/secrets/stintel-codex.pem"
+
 [[agents]]
-token = "bearer-token-for-claude"
-agent_id = "claude"
+token = "bearer-token-for-qwen"
+agent_id = "qwen"
 session_id = "default"
 
 [agents.policy]
-allowed_repos = ["internal/org/repo"]
-branch_prefix = "agent/claude/"
+allowed_repos = ["internal/org/repo", "github/org/repo"]
+branch_prefix = "agent/qwen/"
 protected_paths = [".forgejo/", ".github/"]
+
+[agents.forge_identity.internal]
+token = "qwen-bot-forgejo-token"
+
+[agents.github_app.github]
+app_id = 654321
+installation_id = 87654321
+private_key_path = "/run/secrets/stintel-qwen.pem"
