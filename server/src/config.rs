@@ -19,6 +19,10 @@ pub struct ListenConfig {
 #[derive(Clone, Deserialize)]
 pub struct ForgeConfig {
     pub alias: String,
+    /// Optional REST API root when it differs from `base_url`.
+    /// Defaults to `https://api.github.com` for GitHub.com and
+    /// `{base_url}/api/v3` for GitHub Enterprise Server.
+    pub api_url: Option<String>,
     pub base_url: String,
     #[serde(rename = "type")]
     pub forge_type: String,
@@ -27,6 +31,7 @@ pub struct ForgeConfig {
     /// GitHub uses "x-access-token" as username.
     #[serde(default)]
     pub git_auth_user: String,
+    pub github_app: Option<GitHubAppConfig>,
     pub token: Option<String>,
     pub woodpecker_url: Option<String>,
     pub woodpecker_token: Option<String>,
@@ -38,13 +43,23 @@ pub struct ForgeWebhookConfig {
     pub secret: String,
 }
 
+/// Credentials for a GitHub App installation.
+#[derive(Clone, Debug, Deserialize)]
+pub struct GitHubAppConfig {
+    pub app_id: u64,
+    pub installation_id: u64,
+    pub private_key_path: String,
+}
+
 impl std::fmt::Debug for ForgeConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ForgeConfig")
             .field("alias", &self.alias)
+            .field("api_url", &self.api_url)
             .field("base_url", &self.base_url)
             .field("forge_type", &self.forge_type)
             .field("git_auth_user", &self.git_auth_user)
+            .field("github_app", &self.github_app)
             .field("token", &self.token.as_ref().map(|_| "[REDACTED]"))
             .field("woodpecker_url", &self.woodpecker_url)
             .field(
@@ -56,11 +71,28 @@ impl std::fmt::Debug for ForgeConfig {
     }
 }
 
+impl ForgeConfig {
+    /// Resolves the GitHub REST API root for GitHub.com or GHES.
+    #[must_use]
+    pub fn github_api_url(&self) -> String {
+        self.api_url.clone().unwrap_or_else(|| {
+            if self.base_url.trim_end_matches('/') == "https://github.com" {
+                "https://api.github.com".to_string()
+            } else {
+                format!("{}/api/v3", self.base_url.trim_end_matches('/'))
+            }
+        })
+    }
+}
+
 #[derive(Clone, Deserialize)]
 pub struct AgentConfig {
     pub agent_id: String,
     #[serde(default)]
     pub forge_identity: std::collections::HashMap<String, ForgeIdentityConfig>,
+    /// Per-GitHub-forge App installation identities for this agent.
+    #[serde(default)]
+    pub github_app: std::collections::HashMap<String, GitHubAppConfig>,
     pub policy: AgentPolicyConfig,
     pub session_id: String,
     pub token: String,
@@ -71,6 +103,7 @@ impl std::fmt::Debug for AgentConfig {
         f.debug_struct("AgentConfig")
             .field("agent_id", &self.agent_id)
             .field("forge_identity", &self.forge_identity)
+            .field("github_app", &self.github_app)
             .field("policy", &self.policy)
             .field("session_id", &self.session_id)
             .field("token", &"[REDACTED]")
@@ -293,15 +326,34 @@ pub fn validate_forge_alias(alias: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_github_app(
+    app: &GitHubAppConfig,
+    owner_kind: &str,
+    owner_name: &str,
+) -> Result<(), String> {
+    if app.app_id == 0 || app.installation_id == 0 {
+        return Err(format!(
+            "GitHub App {owner_kind} '{owner_name}' requires non-zero app_id and installation_id"
+        ));
+    }
+    if app.private_key_path.trim().is_empty() {
+        return Err(format!(
+            "GitHub App {owner_kind} '{owner_name}' private_key_path must not be empty"
+        ));
+    }
+    Ok(())
+}
+
 /// Validates the parsed config for semantic correctness.
 ///
 /// # Errors
 ///
 /// Returns a description of the first validation error found.
 pub fn validate_config(config: &ServerConfig) -> Result<(), String> {
-    const SUPPORTED_FORGE_TYPES: &[&str] = &["forgejo", "gitlab"];
+    const SUPPORTED_FORGE_TYPES: &[&str] = &["forgejo", "github", "gitlab"];
 
     let mut seen_aliases = std::collections::HashSet::new();
+    let mut forge_types = std::collections::HashMap::new();
     for forge in &config.forges {
         validate_forge_alias(&forge.alias)?;
         if !seen_aliases.insert(&forge.alias) {
@@ -315,6 +367,22 @@ pub fn validate_config(config: &ServerConfig) -> Result<(), String> {
                 SUPPORTED_FORGE_TYPES.join(", ")
             ));
         }
+        forge_types.insert(forge.alias.clone(), forge.forge_type.as_str());
+        if let Some(app) = &forge.github_app {
+            if forge.forge_type != "github" {
+                return Err(format!(
+                    "forge '{}' configures github_app but has type '{}'",
+                    forge.alias, forge.forge_type
+                ));
+            }
+            if forge.token.is_some() {
+                return Err(format!(
+                    "GitHub App forge '{}' must not also configure token",
+                    forge.alias
+                ));
+            }
+            validate_github_app(app, "forge", &forge.alias)?;
+        }
         if let Some(webhook) = &forge.webhook
             && webhook.secret.trim().is_empty()
         {
@@ -325,6 +393,7 @@ pub fn validate_config(config: &ServerConfig) -> Result<(), String> {
         }
     }
 
+    let mut agent_github_app_owners = std::collections::HashMap::new();
     for agent in &config.agents {
         for forge_alias in agent.forge_identity.keys() {
             if !seen_aliases.contains(forge_alias) {
@@ -333,6 +402,42 @@ pub fn validate_config(config: &ServerConfig) -> Result<(), String> {
                     agent.agent_id
                 ));
             }
+            if agent.github_app.contains_key(forge_alias) {
+                return Err(format!(
+                    "agent '{}' must not configure both forge_identity and github_app for forge '{forge_alias}'",
+                    agent.agent_id
+                ));
+            }
+        }
+
+        for (forge_alias, app) in &agent.github_app {
+            let Some(forge_type) = forge_types.get(forge_alias) else {
+                return Err(format!(
+                    "agent '{}' has github_app for unknown forge alias '{forge_alias}'",
+                    agent.agent_id
+                ));
+            };
+            if *forge_type != "github" {
+                return Err(format!(
+                    "agent '{}' configures github_app for forge '{forge_alias}' of type '{forge_type}'",
+                    agent.agent_id
+                ));
+            }
+            validate_github_app(
+                app,
+                "agent identity",
+                &format!("{}:{forge_alias}", agent.agent_id),
+            )?;
+            let identity_key = (forge_alias.clone(), app.app_id);
+            if let Some(existing_agent) = agent_github_app_owners.get(&identity_key)
+                && existing_agent != &agent.agent_id
+            {
+                return Err(format!(
+                    "agents '{existing_agent}' and '{}' use the same GitHub App ID {} for forge '{forge_alias}'; distinct review identities require separate GitHub Apps",
+                    agent.agent_id, app.app_id
+                ));
+            }
+            agent_github_app_owners.insert(identity_key, agent.agent_id.clone());
         }
 
         for pattern in &agent.policy.allowed_repos {
@@ -1132,6 +1237,264 @@ allowed_repos = ["gl/group/subgroup/repo", "gl/group/subgroup/*"]
         };
         assert!(!policy.is_owner_accessible("other", "any-owner"));
     }
+
+    #[test]
+    fn accepts_github_and_resolves_github_com_api_url() {
+        let config = parse_config(
+            r#"
+[server]
+listen = "127.0.0.1:8443"
+
+[[forges]]
+alias = "github"
+type = "github"
+base_url = "https://github.com"
+
+[[agents]]
+token = "agent-token"
+agent_id = "codex"
+session_id = "default"
+
+[agents.policy]
+allowed_repos = ["github/org/repo"]
+"#,
+        )
+        .expect("parse GitHub config");
+        validate_config(&config).expect("validate GitHub config");
+        assert_eq!(config.forges[0].github_api_url(), "https://api.github.com");
+    }
+
+    #[test]
+    fn github_enterprise_api_url_can_be_derived_or_overridden() {
+        let mut config = parse_config(
+            r#"
+[server]
+listen = "127.0.0.1:8443"
+
+[[forges]]
+alias = "github"
+type = "github"
+base_url = "https://github.example/"
+
+[[agents]]
+token = "agent-token"
+agent_id = "codex"
+session_id = "default"
+
+[agents.policy]
+allowed_repos = ["github/org/repo"]
+"#,
+        )
+        .expect("parse GHES config");
+        assert_eq!(
+            config.forges[0].github_api_url(),
+            "https://github.example/api/v3"
+        );
+        config.forges[0].api_url = Some("https://api.proxy.example/github".to_string());
+        assert_eq!(
+            config.forges[0].github_api_url(),
+            "https://api.proxy.example/github"
+        );
+    }
+
+    #[test]
+    fn accepts_github_app_without_per_agent_identity() {
+        let config = parse_config(
+            r#"
+[server]
+listen = "127.0.0.1:8443"
+
+[[forges]]
+alias = "github"
+type = "github"
+base_url = "https://github.com"
+
+[forges.github_app]
+app_id = 123
+installation_id = 456
+private_key_path = "/run/secrets/github-app.pem"
+
+[[agents]]
+token = "agent-token"
+agent_id = "codex"
+session_id = "default"
+
+[agents.policy]
+allowed_repos = ["github/org/repo"]
+"#,
+        )
+        .expect("parse GitHub App config");
+        validate_config(&config).expect("validate GitHub App config");
+        let app = config.forges[0]
+            .github_app
+            .as_ref()
+            .expect("GitHub App config");
+        assert_eq!(app.app_id, 123);
+        assert_eq!(app.installation_id, 456);
+    }
+
+    #[test]
+    fn accepts_distinct_per_agent_github_apps() {
+        let config = parse_config(
+            r#"
+[server]
+listen = "127.0.0.1:8443"
+
+[[forges]]
+alias = "github"
+type = "github"
+base_url = "https://github.com"
+
+[[agents]]
+token = "codex-token"
+agent_id = "codex"
+session_id = "default"
+
+[agents.github_app.github]
+app_id = 123
+installation_id = 456
+private_key_path = "/run/secrets/stintel-codex.pem"
+
+[agents.policy]
+allowed_repos = ["github/org/repo"]
+
+[[agents]]
+token = "qwen-token"
+agent_id = "qwen"
+session_id = "default"
+
+[agents.github_app.github]
+app_id = 789
+installation_id = 101112
+private_key_path = "/run/secrets/stintel-qwen.pem"
+
+[agents.policy]
+allowed_repos = ["github/org/repo"]
+"#,
+        )
+        .expect("parse per-agent GitHub App config");
+        validate_config(&config).expect("validate per-agent GitHub App config");
+        assert_eq!(config.agents[0].github_app["github"].app_id, 123);
+        assert_eq!(config.agents[1].github_app["github"].app_id, 789);
+    }
+
+    #[test]
+    fn rejects_two_agent_identity_modes_for_same_forge() {
+        let config = parse_config(
+            r#"
+[server]
+listen = "127.0.0.1:8443"
+
+[[forges]]
+alias = "github"
+type = "github"
+base_url = "https://github.com"
+
+[[agents]]
+token = "agent-token"
+agent_id = "codex"
+session_id = "default"
+
+[agents.forge_identity.github]
+token = "ambiguous-token"
+
+[agents.github_app.github]
+app_id = 123
+installation_id = 456
+private_key_path = "/run/secrets/stintel-codex.pem"
+
+[agents.policy]
+allowed_repos = ["github/org/repo"]
+"#,
+        )
+        .expect("parse conflicting agent identities");
+        let error = validate_config(&config).expect_err("reject conflicting agent identities");
+        assert!(error.contains("both forge_identity and github_app"));
+    }
+
+    #[test]
+    fn rejects_reusing_one_github_app_for_distinct_agents() {
+        let config = parse_config(
+            r#"
+[server]
+listen = "127.0.0.1:8443"
+
+[[forges]]
+alias = "github"
+type = "github"
+base_url = "https://github.com"
+
+[[agents]]
+token = "codex-token"
+agent_id = "codex"
+session_id = "default"
+
+[agents.github_app.github]
+app_id = 123
+installation_id = 456
+private_key_path = "/run/secrets/stintel-codex.pem"
+
+[agents.policy]
+allowed_repos = ["github/org/repo"]
+
+[[agents]]
+token = "qwen-token"
+agent_id = "qwen"
+session_id = "default"
+
+[agents.github_app.github]
+app_id = 123
+installation_id = 456
+private_key_path = "/run/secrets/stintel-codex.pem"
+
+[agents.policy]
+allowed_repos = ["github/org/repo"]
+"#,
+        )
+        .expect("parse reused GitHub App config");
+        let error = validate_config(&config).expect_err("reject reused GitHub App identity");
+        assert!(error.contains("distinct review identities require separate GitHub Apps"));
+    }
+
+    #[test]
+    fn rejects_github_app_with_static_forge_token() {
+        let config = parse_config(
+            r#"
+[server]
+listen = "127.0.0.1:8443"
+
+[[forges]]
+alias = "github"
+type = "github"
+base_url = "https://github.com"
+token = "conflicting-token"
+
+[forges.github_app]
+app_id = 123
+installation_id = 456
+private_key_path = "/run/secrets/github-app.pem"
+
+[[agents]]
+token = "agent-token"
+agent_id = "codex"
+session_id = "default"
+
+[agents.policy]
+allowed_repos = ["github/org/repo"]
+"#,
+        )
+        .expect("parse GitHub App config");
+        let error = validate_config(&config).expect_err("reject conflicting credential modes");
+        assert!(error.contains("must not also configure token"));
+    }
+
+    #[test]
+    fn example_config_parses_and_validates() {
+        let config = parse_config(include_str!("../../forge-mcp.example.toml"))
+            .expect("parse example config");
+        validate_config(&config).expect("validate example config");
+    }
+
     #[test]
     fn debug_redacts_tokens() {
         let config = parse_config(VALID_CONFIG).expect("should parse");

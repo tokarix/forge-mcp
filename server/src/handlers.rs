@@ -152,19 +152,24 @@ fn resolve_agent<'a>(
 
 /// Resolves the effective forge credential for an agent + forge combination.
 ///
-/// Prefers the agent's per-forge identity token, falls back to the forge's
-/// configured token.
+/// Prefers the agent's managed GitHub App installation, then its per-forge
+/// identity token, and finally the forge's configured credential.
 pub(crate) fn resolve_credential(
     agent: &crate::auth::ResolvedAgent,
     forge_alias: &str,
     forge: &crate::registry::ForgeInstance,
 ) -> domain::ForgeCredential {
+    if let Some(credential) = agent.github_app_credentials.get(forge_alias) {
+        return forge.adapter.effective_credential(&credential.credential());
+    }
     let token = agent
         .forge_identities
         .get(forge_alias)
         .map(|id| id.token.clone())
         .or_else(|| forge.token.clone());
-    domain::ForgeCredential { token }
+    forge
+        .adapter
+        .effective_credential(&domain::ForgeCredential { token })
 }
 
 fn resolve_commit_author(
@@ -3301,6 +3306,7 @@ mod tests {
         let configs = vec![crate::config::AgentConfig {
             agent_id: "codex".to_string(),
             forge_identity: HashMap::new(),
+            github_app: std::collections::HashMap::new(),
             policy: AgentPolicyConfig {
                 allowed_repos: vec!["test-forge/org/repo".to_string()],
                 branch_prefix: Some("agent/".to_string()),
@@ -3354,6 +3360,7 @@ mod tests {
         let configs = vec![crate::config::AgentConfig {
             agent_id: "codex".to_string(),
             forge_identity: std::collections::HashMap::new(),
+            github_app: std::collections::HashMap::new(),
             policy: AgentPolicyConfig {
                 allowed_repos: vec!["test-forge/org/repo".to_string()],
                 branch_prefix: Some("agent/".to_string()),
@@ -3386,6 +3393,7 @@ mod tests {
         let configs = vec![crate::config::AgentConfig {
             agent_id: "codex".to_string(),
             forge_identity: std::collections::HashMap::new(),
+            github_app: std::collections::HashMap::new(),
             policy: AgentPolicyConfig {
                 allowed_repos,
                 branch_prefix: Some("agent/".to_string()),
@@ -3568,6 +3576,7 @@ mod tests {
         let configs = vec![crate::config::AgentConfig {
             agent_id: "codex".to_string(),
             forge_identity: std::collections::HashMap::new(),
+            github_app: std::collections::HashMap::new(),
             policy: AgentPolicyConfig {
                 allowed_repos: vec!["test-forge/org/allowed-repo".to_string()],
                 branch_prefix: Some("agent/".to_string()),
@@ -3835,6 +3844,7 @@ mod tests {
         let configs = vec![crate::config::AgentConfig {
             agent_id: "codex".to_string(),
             forge_identity: std::collections::HashMap::new(),
+            github_app: std::collections::HashMap::new(),
             policy: AgentPolicyConfig {
                 allowed_repos: vec!["test-forge/org/repo".to_string()],
                 branch_prefix: Some("agent/codex/".to_string()),
@@ -3963,6 +3973,7 @@ mod tests {
         let configs = vec![crate::config::AgentConfig {
             agent_id: "restricted".to_string(),
             forge_identity: std::collections::HashMap::new(),
+            github_app: std::collections::HashMap::new(),
             policy: AgentPolicyConfig {
                 allowed_repos: vec!["test-forge/org/repo".to_string()],
                 branch_prefix: Some("agent/".to_string()),
@@ -4029,6 +4040,7 @@ mod tests {
         let configs = vec![crate::config::AgentConfig {
             agent_id: "codex".to_string(),
             forge_identity: std::collections::HashMap::new(),
+            github_app: std::collections::HashMap::new(),
             policy: AgentPolicyConfig {
                 allowed_repos: vec!["*".to_string()],
                 branch_prefix: Some("agent/".to_string()),
@@ -4072,6 +4084,7 @@ mod tests {
         let configs = vec![crate::config::AgentConfig {
             agent_id: "noprefix".to_string(),
             forge_identity: std::collections::HashMap::new(),
+            github_app: std::collections::HashMap::new(),
             policy: AgentPolicyConfig {
                 allowed_repos: vec!["*".to_string()],
                 branch_prefix: None,
@@ -4612,6 +4625,7 @@ mod tests {
         let configs = vec![crate::config::AgentConfig {
             agent_id: "codex".to_string(),
             forge_identity: std::collections::HashMap::new(),
+            github_app: std::collections::HashMap::new(),
             policy: AgentPolicyConfig {
                 allowed_repos: vec!["test-forge/org/repo".to_string()],
                 branch_prefix: Some("agent/".to_string()),
@@ -4668,6 +4682,7 @@ mod tests {
         let configs = vec![crate::config::AgentConfig {
             agent_id: "codex".to_string(),
             forge_identity: std::collections::HashMap::new(),
+            github_app: std::collections::HashMap::new(),
             policy: AgentPolicyConfig {
                 allowed_repos: vec!["test-forge/org/repo".to_string()],
                 branch_prefix: Some("agent/".to_string()),
@@ -4717,6 +4732,7 @@ mod tests {
         let configs = vec![crate::config::AgentConfig {
             agent_id: "codex".to_string(),
             forge_identity: std::collections::HashMap::new(),
+            github_app: std::collections::HashMap::new(),
             policy: AgentPolicyConfig {
                 allowed_repos: vec![
                     "test-forge/org/repo".to_string(),
@@ -4783,6 +4799,7 @@ mod tests {
         let configs = vec![crate::config::AgentConfig {
             agent_id: "codex".to_string(),
             forge_identity: std::collections::HashMap::new(),
+            github_app: std::collections::HashMap::new(),
             policy: AgentPolicyConfig {
                 allowed_repos: vec![
                     "test-forge/org/repo".to_string(),

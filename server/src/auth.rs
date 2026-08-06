@@ -48,6 +48,7 @@ pub fn extract_token(headers: &axum::http::HeaderMap) -> Option<String> {
 #[derive(Clone, Debug)]
 pub struct ResolvedAgent {
     pub forge_identities: HashMap<String, crate::config::ForgeIdentityConfig>,
+    pub github_app_credentials: HashMap<String, forge::github::GitHubAppCredential>,
     pub identity: AgentIdentity,
     pub policy: PolicyConfig,
     pub policy_config: crate::config::AgentPolicyConfig,
@@ -71,12 +72,27 @@ impl AgentRegistry {
     /// Creates a registry from a list of agent configs.
     #[must_use]
     pub fn from_configs(configs: &[crate::config::AgentConfig]) -> Self {
+        Self::from_configs_with_github_apps(configs, HashMap::new())
+    }
+
+    /// Creates a registry with managed per-agent GitHub App credentials.
+    ///
+    /// The outer map is keyed by the agent's forge-mcp bearer token and the
+    /// inner map by forge alias. Keeping the refreshable credentials in the
+    /// resolved agent makes both API and git-proxy authentication select the
+    /// App identity associated with the caller.
+    #[must_use]
+    pub fn from_configs_with_github_apps(
+        configs: &[crate::config::AgentConfig],
+        mut github_apps: HashMap<String, HashMap<String, forge::github::GitHubAppCredential>>,
+    ) -> Self {
         let mut agents = HashMap::new();
         for agent in configs {
             agents.insert(
                 agent.token.clone(),
                 ResolvedAgent {
                     forge_identities: agent.forge_identity.clone(),
+                    github_app_credentials: github_apps.remove(&agent.token).unwrap_or_default(),
                     identity: AgentIdentity {
                         agent_id: agent.agent_id.clone(),
                         session_id: agent.session_id.clone(),
@@ -106,6 +122,7 @@ mod tests {
         vec![AgentConfig {
             agent_id: "codex".to_string(),
             forge_identity: std::collections::HashMap::new(),
+            github_app: std::collections::HashMap::new(),
             policy: AgentPolicyConfig {
                 allowed_repos: vec!["test/org/repo".to_string()],
                 branch_prefix: Some("agent/codex/".to_string()),

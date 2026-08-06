@@ -403,6 +403,7 @@ mod tests {
     use std::sync::Arc;
 
     use axum::{body::Body, http::Request};
+    use base64::Engine;
     use domain::{
         ChangeRequest, ChangeRequestCommentDetail, ChangeRequestState, CommitPatchResponse,
         GetChangeRequestCommentsRequest, GetChangeRequestRequest, ListChangeRequestsRequest,
@@ -417,7 +418,9 @@ mod tests {
     use crate::auth::AgentRegistry;
     use crate::config::AgentPolicyConfig;
 
-    struct FakeForgeAdapter;
+    struct FakeForgeAdapter {
+        managed_token: Option<String>,
+    }
 
     impl forge::ForgeWebhookAdapter for FakeForgeAdapter {
         fn verify_and_parse_webhook_event(
@@ -435,6 +438,18 @@ mod tests {
 
     #[async_trait::async_trait]
     impl forge::ForgeAdapter for FakeForgeAdapter {
+        fn effective_credential(
+            &self,
+            credential: &domain::ForgeCredential,
+        ) -> domain::ForgeCredential {
+            domain::ForgeCredential {
+                token: self
+                    .managed_token
+                    .clone()
+                    .or_else(|| credential.token.clone()),
+            }
+        }
+
         async fn get_change_request_ci_details(
             &self,
             _: &domain::RepositoryRef,
@@ -1040,7 +1055,9 @@ mod tests {
 
     fn test_forge_instance(base_url: &str) -> crate::registry::ForgeInstance {
         crate::registry::ForgeInstance {
-            adapter: Arc::new(FakeForgeAdapter),
+            adapter: Arc::new(FakeForgeAdapter {
+                managed_token: None,
+            }),
             alias: "test-forge".to_string(),
             base_url: base_url.to_string(),
             client: reqwest::Client::new(),
@@ -1050,7 +1067,30 @@ mod tests {
             read_service: Arc::new(FakeReadService),
             token: Some("upstream-token".to_string()),
             webhook: None,
-            webhook_adapter: Arc::new(FakeForgeAdapter),
+            webhook_adapter: Arc::new(FakeForgeAdapter {
+                managed_token: None,
+            }),
+            write_service: Arc::new(FakeWriteService),
+        }
+    }
+
+    fn test_forge_instance_with_managed_token(base_url: &str) -> crate::registry::ForgeInstance {
+        crate::registry::ForgeInstance {
+            adapter: Arc::new(FakeForgeAdapter {
+                managed_token: Some("installation-token".to_string()),
+            }),
+            alias: "test-forge".to_string(),
+            base_url: base_url.to_string(),
+            client: reqwest::Client::new(),
+            forge_kind: domain::ForgeKind::GitHub,
+            forge_type: "github".to_string(),
+            git_auth_user: "x-access-token".to_string(),
+            read_service: Arc::new(FakeReadService),
+            token: None,
+            webhook: None,
+            webhook_adapter: Arc::new(FakeForgeAdapter {
+                managed_token: Some("installation-token".to_string()),
+            }),
             write_service: Arc::new(FakeWriteService),
         }
     }
@@ -1059,6 +1099,7 @@ mod tests {
         let configs = vec![crate::config::AgentConfig {
             agent_id: "codex".to_string(),
             forge_identity: std::collections::HashMap::new(),
+            github_app: std::collections::HashMap::new(),
             policy: AgentPolicyConfig {
                 allowed_repos: vec!["test-forge/*".to_string()],
                 branch_prefix: Some("agent/".to_string()),
@@ -1265,6 +1306,7 @@ mod tests {
         let configs = vec![crate::config::AgentConfig {
             agent_id: "codex".to_string(),
             forge_identity: std::collections::HashMap::new(),
+            github_app: std::collections::HashMap::new(),
             policy: AgentPolicyConfig {
                 allowed_repos: vec!["test-forge/org/allowed-only".to_string()],
                 branch_prefix: Some("agent/".to_string()),
@@ -1324,6 +1366,7 @@ mod tests {
         let configs = vec![crate::config::AgentConfig {
             agent_id: "codex".to_string(),
             forge_identity,
+            github_app: std::collections::HashMap::new(),
             policy: AgentPolicyConfig {
                 allowed_repos: vec!["test-forge/*".to_string()],
                 branch_prefix: Some("agent/".to_string()),
@@ -1350,6 +1393,76 @@ mod tests {
             forge_registry: Arc::new(crate::registry::ForgeRegistry::new(forges)),
         };
         (state, audit_sink)
+    }
+
+    fn test_state_with_managed_token(base_url: &str) -> AppState {
+        let configs = vec![crate::config::AgentConfig {
+            agent_id: "codex".to_string(),
+            forge_identity: std::collections::HashMap::new(),
+            github_app: std::collections::HashMap::new(),
+            policy: AgentPolicyConfig {
+                allowed_repos: vec!["test-forge/*".to_string()],
+                branch_prefix: Some("agent/".to_string()),
+                protected_paths: vec![],
+            },
+            session_id: "default".to_string(),
+            token: "test-token".to_string(),
+        }];
+        let audit_sink = Arc::new(audit::InMemoryAuditSink::new());
+        let mut forges = std::collections::HashMap::new();
+        forges.insert(
+            "test-forge".to_string(),
+            test_forge_instance_with_managed_token(base_url),
+        );
+        let forge_registry = Arc::new(crate::registry::ForgeRegistry::new(forges));
+        AppState {
+            agent_registry: AgentRegistry::from_configs(&configs),
+            audit_sink,
+            auto_merge_service: Arc::new(crate::auto_merge::AutoMergeService::new(
+                crate::events::EventBus::new(),
+                Arc::clone(&forge_registry),
+            )),
+            event_bus: crate::events::EventBus::new(),
+            forge_registry,
+        }
+    }
+
+    #[tokio::test]
+    async fn info_refs_uses_adapter_managed_credential() {
+        let mock_server = MockServer::start().await;
+        let encoded =
+            base64::engine::general_purpose::STANDARD.encode("x-access-token:installation-token");
+        Mock::given(method("GET"))
+            .and(path_regex(r"/org/repo\.git/info/refs"))
+            .and(query_param("service", "git-upload-pack"))
+            .and(wiremock::matchers::header(
+                "authorization",
+                format!("Basic {encoded}"),
+            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_bytes(b"001e# service=git-upload-pack\n" as &[u8])
+                    .insert_header(
+                        "content-type",
+                        "application/x-git-upload-pack-advertisement",
+                    ),
+            )
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let app = git_proxy_router(test_state_with_managed_token(&mock_server.uri()));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/git/test-forge/org/repo.git/info/refs?service=git-upload-pack")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]
