@@ -477,9 +477,11 @@ pub struct RebaseBranchTool {
     /// Forge alias -- use `forge_info` to discover available aliases.
     pub forge: String,
     /// List of rebase operations as JSON objects. Each object must have a
-    /// `"type"` field. Supported: `{"type": "fixup", "commit": "<sha>", "into": "<sha>"}`,
-    /// `{"type": "drop", "commit": "<sha>"}`,
-    /// `{"type": "rebase_onto"}` (rebase all commits onto the latest base branch; must be the sole operation).
+    /// `"type"` field. Use `rebase_onto` only to update the branch base; it
+    /// preserves every branch commit separately and must be the sole operation.
+    /// For squash/fixup cleanup, `{"type":"rebase_onto"}` is wrong; use
+    /// `{"type":"fixup","commit":"<fix_sha>","into":"<original_sha>"}`.
+    /// Supported operations also include `{"type":"drop","commit":"<sha>"}`.
     pub operations: Vec<RebaseBranchOperationTool>,
     /// Repository owner or organization.
     pub owner: String,
@@ -494,14 +496,17 @@ pub enum RebaseBranchOperationTool {
         /// Full SHA of the commit to remove.
         commit: String,
     },
+    /// Correct operation for folding a later fixup or cleanup commit into an
+    /// earlier original commit. Select both commits by their explicit full SHAs.
     Fixup {
         /// Full SHA of the commit to squash.
         commit: String,
         /// Full SHA of the commit to squash into.
         into: String,
     },
-    /// Rebase all branch commits onto the latest base branch head.
-    /// Must be the sole operation in the list.
+    /// Update only the branch base by replaying all branch commits onto the
+    /// latest base branch head. Preserves every branch commit separately, must
+    /// be the sole operation, and is not for squash, fixup, or history cleanup.
     RebaseOnto {},
 }
 
@@ -2008,10 +2013,10 @@ impl McpShim {
         self.gateway_post(url, &gw.token, &body).await
     }
 
-    /// Rebase a branch by squashing (fixup) or removing (drop) commits.
+    /// Rewrite a branch with explicit operations or update its base.
     #[tool(
         name = "rebase_branch",
-        description = "Rebase a branch by squashing (fixup), removing (drop) commits, or rebasing onto the latest base branch (rebase_onto). This is the REQUIRED way to rewrite history and force-push (raw `git push` is strictly blocked). Use this for squash/fixup after review instead of leaving multiple cleanup commits. Performs a full clone, validates operations, runs the rebase, and force-pushes with lease. Only works on branches matching your configured branch prefix."
+        description = "Rewrite a branch with explicit operations or update its base. Use `rebase_onto` only to replay the existing branch commits onto the latest `base_branch` tip. It preserves the branch's commits as separate commits and does not squash, fix up, drop, rename, or reorder them. For review-driven commit hygiene, use explicit `fixup` and/or `drop` operations with full commit SHAs. This is the REQUIRED way to rewrite history and force-push (raw `git push` is strictly blocked). Performs a full clone, validates operations, runs the rebase, and force-pushes with lease. Only works on branches matching your configured branch prefix."
     )]
     async fn rebase_branch(
         &self,
@@ -2686,6 +2691,28 @@ mod tests {
             server_name: "forge-mcp-shim".to_string(),
             server_version: "0.1.0-test".to_string(),
         }
+    }
+
+    #[test]
+    fn rebase_branch_tool_metadata_distinguishes_base_updates_from_cleanup() {
+        let shim = McpShim::new(test_config("http://localhost"));
+        let tool = shim
+            .tool_router
+            .get("rebase_branch")
+            .expect("rebase_branch tool metadata");
+        let description = tool.description.as_deref().expect("tool description");
+
+        assert!(description.contains("replay the existing branch commits"));
+        assert!(description.contains("preserves the branch's commits as separate commits"));
+        assert!(description.contains("use explicit `fixup` and/or `drop` operations"));
+
+        let schema = serde_json::to_string(&tool.input_schema).expect("serialize input schema");
+        assert!(schema.contains("Preserves every branch commit separately"));
+        assert!(schema.contains("Correct operation for folding a later fixup or cleanup commit"));
+        assert!(schema.contains("For squash/fixup cleanup"));
+        assert!(schema.contains("is wrong; use"));
+        assert!(schema.contains("<fix_sha>"));
+        assert!(schema.contains("<original_sha>"));
     }
 
     #[test]
