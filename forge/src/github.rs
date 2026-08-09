@@ -3261,10 +3261,14 @@ fn parse_review_webhook(
 #[allow(clippy::expect_used, clippy::panic)]
 mod tests {
     use std::fmt::Write as _;
-    use std::sync::{Arc, RwLock};
+    use std::io::{self, Read as _, Write as IoWrite};
+    use std::net::TcpListener;
+    use std::sync::{Arc, Mutex, RwLock};
+    use std::thread::JoinHandle;
 
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
+    use tracing::instrument::WithSubscriber as _;
     use wiremock::matchers::{body_json, header, header_exists, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -3324,6 +3328,112 @@ rRwzv5g6zr/Xm2UKcduXYVQs
         }
     }
 
+    struct TraceWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl IoWrite for TraceWriter {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .map_err(|_| io::Error::other("trace buffer lock poisoned"))?
+                .extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn one_shot_http_response(response: Vec<u8>) -> (String, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind one-shot HTTP fixture");
+        let address = listener.local_addr().expect("one-shot fixture address");
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept one-shot HTTP request");
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request).expect("read one-shot request");
+            stream
+                .write_all(&response)
+                .expect("write one-shot HTTP response");
+        });
+        (format!("http://{address}"), handle)
+    }
+
+    fn actions_check(id: u64, suite_id: u64, name: &str) -> GitHubCheckRun {
+        GitHubCheckRun {
+            id: Some(id),
+            conclusion: Some("failure".to_string()),
+            details_url: Some(format!("https://github.example/checks/{id}")),
+            name: name.to_string(),
+            status: "completed".to_string(),
+            check_suite: Some(GitHubCheckSuite { id: Some(suite_id) }),
+            app: Some(GitHubCheckApp {
+                slug: Some("github-actions".to_string()),
+            }),
+        }
+    }
+
+    async fn mount_actions_resolution(
+        server: &MockServer,
+        suite_id: u64,
+        run_id: u64,
+        check_id: u64,
+        job_id: u64,
+        steps: Vec<serde_json::Value>,
+        log: &str,
+    ) {
+        Mock::given(method("GET"))
+            .and(path("/repos/org/repo/actions/runs"))
+            .and(query_param("check_suite_id", suite_id.to_string()))
+            .and(query_param("head_sha", "head-sha"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "total_count": 1,
+                "workflow_runs": [{
+                    "id": run_id,
+                    "check_suite_id": suite_id,
+                    "head_sha": "head-sha",
+                    "run_attempt": 1,
+                    "html_url": format!("https://github.example/actions/runs/{run_id}")
+                }]
+            })))
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/repos/org/repo/actions/runs/{run_id}/attempts/1/jobs"
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "total_count": 1,
+                "jobs": [{
+                    "id": job_id,
+                    "run_id": run_id,
+                    "head_sha": "head-sha",
+                    "name": format!("job-{job_id}"),
+                    "conclusion": "failure",
+                    "check_run_url": format!(
+                        "{}/repos/org/repo/check-runs/{check_id}",
+                        server.uri()
+                    ),
+                    "steps": steps
+                }]
+            })))
+            .mount(server)
+            .await;
+        let signed_path = format!("/signed-log-{job_id}");
+        Mock::given(method("GET"))
+            .and(path(format!("/repos/org/repo/actions/jobs/{job_id}/logs")))
+            .respond_with(ResponseTemplate::new(302).insert_header(
+                "Location",
+                format!("{}{signed_path}?secret=hidden-{job_id}", server.uri()),
+            ))
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(signed_path))
+            .respond_with(ResponseTemplate::new(200).set_body_string(log))
+            .mount(server)
+            .await;
+    }
+
     fn issue_json(number: u64, id: u64) -> serde_json::Value {
         serde_json::json!({
             "assignees": [{"login": "octocat"}],
@@ -3335,6 +3445,109 @@ rRwzv5g6zr/Xm2UKcduXYVQs
             "state": "open",
             "title": "Issue"
         })
+    }
+
+    #[test]
+    fn actions_limits_reject_zero_inconsistent_and_overflowing_values() {
+        let defaults = GitHubActionsResolutionLimits::default();
+        assert!(defaults.validate().is_ok());
+        assert!(
+            GitHubActionsResolutionLimits {
+                api_requests: 0,
+                ..defaults
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            GitHubActionsResolutionLimits {
+                json_page_bytes: defaults.json_total_bytes + 1,
+                ..defaults
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            GitHubActionsResolutionLimits {
+                excerpt_lines: usize::MAX,
+                excerpt_line_bytes: 2,
+                excerpt_bytes: usize::MAX,
+                ..defaults
+            }
+            .validate()
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn actions_excerpt_clips_on_utf8_boundary() {
+        assert_eq!(utf8_prefix("abéz", 3), "ab");
+        assert_eq!(utf8_prefix("abéz", 4), "abé");
+    }
+
+    #[test]
+    fn actions_signed_log_destination_enforces_scheme_and_credentials() {
+        let https_api = Url::parse("https://api.github.example/api/v3").expect("API URL");
+        let explicitly_insecure_api =
+            Url::parse("http://api.github.example/api/v3").expect("API URL");
+        assert!(
+            validate_signed_log_destination(
+                &https_api,
+                Url::parse("https://storage.example/log?secret=value").expect("destination"),
+                7,
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_signed_log_destination(
+                &explicitly_insecure_api,
+                Url::parse("http://storage.example/log?secret=value").expect("destination"),
+                7,
+            )
+            .is_ok()
+        );
+        for invalid in [
+            "http://storage.example/log",
+            "https://user:password@storage.example/log",
+            "ftp://storage.example/log",
+        ] {
+            let error = validate_signed_log_destination(
+                &https_api,
+                Url::parse(invalid).expect("parseable invalid destination"),
+                7,
+            )
+            .expect_err("destination must be rejected");
+            assert!(!error.0.contains(invalid));
+        }
+    }
+
+    #[test]
+    fn actions_check_run_url_supports_enterprise_api_prefix() {
+        let adapter = adapter("https://ghe.example/api/v3");
+        let repository = repository();
+        let credential = credential();
+        let resolver = GitHubActionsResolver::new(
+            &adapter,
+            &repository,
+            "head-sha",
+            &credential,
+            GitHubActionsResolutionLimits::default(),
+        )
+        .expect("resolver");
+
+        assert_eq!(
+            resolver
+                .check_run_id_from_job_url(
+                    "https://ghe.example/api/v3/repos/org/repo/check-runs/42",
+                )
+                .expect("enterprise check-run URL"),
+            42
+        );
+        assert!(
+            resolver
+                .check_run_id_from_job_url("https://ghe.example/repos/org/repo/check-runs/42")
+                .is_err()
+        );
     }
 
     fn pull_json(number: u64) -> serde_json::Value {
@@ -3767,6 +3980,7 @@ rRwzv5g6zr/Xm2UKcduXYVQs
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn ci_details_aggregate_all_status_and_check_run_pages() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
@@ -3856,17 +4070,843 @@ rRwzv5g6zr/Xm2UKcduXYVQs
             .expect("CI details");
         assert_eq!(details.state, domain::CommitStatusState::Failure);
         assert_eq!(details.details.len(), 4);
-        assert!(
+        assert_eq!(
             details
                 .details
                 .iter()
-                .any(|detail| detail.context == "status-late")
+                .map(|detail| detail.context.as_str())
+                .collect::<Vec<_>>(),
+            ["status-first", "status-late", "check-first", "check-late"]
+        );
+        assert_eq!(
+            details
+                .details
+                .iter()
+                .map(|detail| &detail.state)
+                .collect::<Vec<_>>(),
+            [
+                &domain::CommitStatusState::Success,
+                &domain::CommitStatusState::Failure,
+                &domain::CommitStatusState::Success,
+                &domain::CommitStatusState::Error,
+            ]
         );
         assert!(
             details
                 .details
                 .iter()
-                .any(|detail| detail.context == "check-late")
+                .all(|detail| matches!(detail.resolution, domain::CiResolution::Unsupported))
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn ci_details_resolves_github_actions_failure_with_job_log() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/org/repo/commits/head-sha/status"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "sha": "head-sha",
+                "statuses": [],
+                "total_count": 0
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/org/repo/commits/head-sha/check-runs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "check_runs": [{
+                    "id": 42,
+                    "app": {"slug": "github-actions"},
+                    "check_suite": {"id": 9},
+                    "conclusion": "failure",
+                    "details_url": "https://github.example/checks/42",
+                    "name": "build",
+                    "status": "completed"
+                }],
+                "total_count": 1
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/org/repo/actions/runs"))
+            .and(query_param("check_suite_id", "9"))
+            .and(query_param("head_sha", "head-sha"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "total_count": 2,
+                "workflow_runs": [
+                    {
+                        "id": 99,
+                        "check_suite_id": 9,
+                        "head_sha": "head-sha",
+                        "run_attempt": 1,
+                        "html_url": "https://github.example/actions/runs/100"
+                    },
+                    {
+                        "id": 100,
+                        "check_suite_id": 9,
+                        "head_sha": "head-sha",
+                        "run_attempt": 2,
+                        "html_url": "https://github.example/actions/runs/100/attempts/2"
+                    }
+                ]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/org/repo/actions/runs/100/attempts/2/jobs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "total_count": 1,
+                "jobs": [{
+                    "id": 77,
+                    "run_id": 100,
+                    "head_sha": "head-sha",
+                    "name": "linux",
+                    "conclusion": "failure",
+                    "check_run_url": format!("{}/repos/org/repo/check-runs/42", server.uri()),
+                    "steps": [
+                        {"name": "compile", "conclusion": "success"},
+                        {"name": "test", "conclusion": "failure"},
+                        {"name": "lint", "conclusion": "timed_out"}
+                    ]
+                }]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/org/repo/actions/jobs/77/logs"))
+            .and(header("authorization", "Bearer user-token"))
+            .respond_with(ResponseTemplate::new(302).insert_header(
+                "Location",
+                format!("{}/signed-log?secret=hidden", server.uri()),
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/signed-log"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string("\ncompile ok\nassertion failed\n"),
+            )
+            .mount(&server)
+            .await;
+
+        let details = adapter(&server.uri())
+            .get_change_request_ci_details(&repository(), "head-sha", &credential())
+            .await
+            .expect("CI details");
+        assert_eq!(details.state, domain::CommitStatusState::Failure);
+        let domain::CiResolution::Resolved {
+            provider,
+            pipeline_url,
+            failed_steps,
+        } = &details.details[0].resolution
+        else {
+            panic!("expected resolved GitHub Actions check")
+        };
+        assert_eq!(*provider, domain::CiProvider::GithubActions);
+        assert_eq!(
+            pipeline_url,
+            "https://github.example/actions/runs/100/attempts/2"
+        );
+        assert_eq!(failed_steps.len(), 2);
+        assert_eq!(failed_steps[0].name, "linux / test");
+        assert_eq!(
+            failed_steps[0]
+                .log_excerpt
+                .as_ref()
+                .expect("first excerpt")
+                .lines,
+            ["compile ok", "assertion failed"]
+        );
+        assert!(failed_steps[1].log_excerpt.is_none());
+
+        let requests = server.received_requests().await.expect("request log");
+        let signed = requests
+            .iter()
+            .find(|request| request.url.path() == "/signed-log")
+            .expect("signed request");
+        assert!(!signed.headers.contains_key("authorization"));
+        // reqwest supplies its generic default, never the GitHub API media type.
+        assert_eq!(
+            signed
+                .headers
+                .get("accept")
+                .and_then(|value| value.to_str().ok()),
+            Some("*/*")
+        );
+        assert!(!signed.headers.contains_key("x-github-api-version"));
+    }
+
+    #[tokio::test]
+    async fn actions_many_failed_steps_are_atomic_and_preserve_other_details() {
+        let server = MockServer::start().await;
+        mount_actions_resolution(
+            &server,
+            11,
+            101,
+            1,
+            1001,
+            vec![
+                serde_json::json!({"name": "first", "conclusion": "failure"}),
+                serde_json::json!({"name": "second", "conclusion": "timed_out"}),
+            ],
+            "first excerpt\n",
+        )
+        .await;
+        mount_actions_resolution(
+            &server,
+            22,
+            202,
+            2,
+            2002,
+            vec![
+                serde_json::json!({"name": "one", "conclusion": "failure"}),
+                serde_json::json!({"name": "two", "conclusion": "failure"}),
+                serde_json::json!({"name": "three", "conclusion": "failure"}),
+            ],
+            "must not be downloaded\n",
+        )
+        .await;
+        let mut external = actions_check(3, 33, "external");
+        external.app = Some(GitHubCheckApp {
+            slug: Some("external-ci".to_string()),
+        });
+        let details = build_change_request_ci_details(
+            &adapter(&server.uri()),
+            &repository(),
+            "head-sha",
+            &credential(),
+            vec![domain::CommitStatus {
+                context: "legacy".to_string(),
+                description: "ok".to_string(),
+                state: domain::CommitStatusState::Success,
+                target_url: "https://legacy.example".to_string(),
+            }],
+            vec![
+                actions_check(1, 11, "within-budget"),
+                actions_check(2, 22, "oversized"),
+                external,
+            ],
+            GitHubActionsResolutionLimits {
+                emitted_steps: 4,
+                ..GitHubActionsResolutionLimits::default()
+            },
+        )
+        .await
+        .expect("bounded CI details");
+
+        assert_eq!(details.state, domain::CommitStatusState::Failure);
+        assert_eq!(
+            details
+                .details
+                .iter()
+                .map(|detail| detail.context.as_str())
+                .collect::<Vec<_>>(),
+            ["legacy", "within-budget", "oversized", "external"]
+        );
+        let domain::CiResolution::Resolved { failed_steps, .. } = &details.details[1].resolution
+        else {
+            panic!("the earlier check should remain resolved")
+        };
+        assert_eq!(failed_steps.len(), 2);
+        assert_eq!(
+            failed_steps
+                .iter()
+                .filter(|step| step.log_excerpt.is_some())
+                .count(),
+            1
+        );
+        let domain::CiResolution::Error { message } = &details.details[2].resolution else {
+            panic!("the oversized check must fail atomically")
+        };
+        assert!(message.contains("emitted failure-step limit"));
+        assert!(matches!(
+            details.details[3].resolution,
+            domain::CiResolution::Unsupported
+        ));
+        let requests = server.received_requests().await.expect("request log");
+        assert!(
+            requests
+                .iter()
+                .any(|request| request.url.path().ends_with("/jobs/1001/logs"))
+        );
+        assert!(
+            requests
+                .iter()
+                .all(|request| !request.url.path().ends_with("/jobs/2002/logs"))
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn actions_aggregate_limits_are_shared_across_suites_runs_and_jobs() {
+        let server = MockServer::start().await;
+        for (suite, run, check, job) in [(11, 101, 1, 1001), (22, 202, 2, 2002)] {
+            mount_actions_resolution(
+                &server,
+                suite,
+                run,
+                check,
+                job,
+                vec![serde_json::json!({
+                    "name": "failed",
+                    "conclusion": "failure"
+                })],
+                "bounded excerpt\n",
+            )
+            .await;
+        }
+        let adapter = adapter(&server.uri());
+        let repository = repository();
+        let credential = credential();
+        let first = actions_check(1, 11, "first");
+        let second = actions_check(2, 22, "second");
+
+        let mut requests = GitHubActionsResolver::new(
+            &adapter,
+            &repository,
+            "head-sha",
+            &credential,
+            GitHubActionsResolutionLimits::default(),
+        )
+        .expect("resolver");
+        requests.resolve(&first).await.expect("first resolution");
+        requests.limits.api_requests = requests.budget.api_requests;
+        assert!(
+            requests
+                .resolve(&second)
+                .await
+                .expect_err("shared request budget")
+                .0
+                .contains("authenticated request count limit")
+        );
+
+        let mut json = GitHubActionsResolver::new(
+            &adapter,
+            &repository,
+            "head-sha",
+            &credential,
+            GitHubActionsResolutionLimits::default(),
+        )
+        .expect("resolver");
+        json.resolve(&first).await.expect("first resolution");
+        json.limits.json_total_bytes = json.budget.json_bytes;
+        assert!(
+            json.resolve(&second)
+                .await
+                .expect_err("shared JSON budget")
+                .0
+                .contains("JSON byte limit")
+        );
+
+        let mut records = GitHubActionsResolver::new(
+            &adapter,
+            &repository,
+            "head-sha",
+            &credential,
+            GitHubActionsResolutionLimits::default(),
+        )
+        .expect("resolver");
+        records.resolve(&first).await.expect("first resolution");
+        records.limits.workflow_runs = records.budget.workflow_runs;
+        assert!(
+            records
+                .resolve(&second)
+                .await
+                .expect_err("shared record budget")
+                .0
+                .contains("workflow-run record limit")
+        );
+
+        let mut steps = GitHubActionsResolver::new(
+            &adapter,
+            &repository,
+            "head-sha",
+            &credential,
+            GitHubActionsResolutionLimits::default(),
+        )
+        .expect("resolver");
+        steps.resolve(&first).await.expect("first resolution");
+        steps.limits.job_steps = steps.budget.job_steps;
+        assert!(
+            steps
+                .resolve(&second)
+                .await
+                .expect_err("shared raw-step budget")
+                .0
+                .contains("job-step record limit")
+        );
+
+        let mut downloads = GitHubActionsResolver::new(
+            &adapter,
+            &repository,
+            "head-sha",
+            &credential,
+            GitHubActionsResolutionLimits::default(),
+        )
+        .expect("resolver");
+        downloads.resolve(&first).await.expect("first resolution");
+        downloads.limits.log_downloads = downloads.budget.log_downloads;
+        assert!(
+            downloads
+                .resolve(&second)
+                .await
+                .expect_err("shared download budget")
+                .0
+                .contains("signed log download count limit")
+        );
+
+        let mut output = GitHubActionsResolver::new(
+            &adapter,
+            &repository,
+            "head-sha",
+            &credential,
+            GitHubActionsResolutionLimits::default(),
+        )
+        .expect("resolver");
+        output.resolve(&first).await.expect("first resolution");
+        output.limits.output_bytes = output.budget.output_bytes;
+        assert!(
+            output
+                .resolve(&second)
+                .await
+                .expect_err("shared output budget")
+                .0
+                .contains("resolved output byte limit")
+        );
+    }
+
+    #[tokio::test]
+    async fn ci_details_gates_actions_enrichment_and_reports_missing_ids() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/org/repo/commits/head-sha/status"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "sha": "head-sha",
+                "statuses": [],
+                "total_count": 0
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/org/repo/commits/head-sha/check-runs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "total_count": 4,
+                "check_runs": [
+                    {"id": 1, "app": {"slug": "github-actions"}, "check_suite": {"id": 1}, "conclusion": "success", "name": "success", "status": "completed"},
+                    {"id": 2, "app": {"slug": "github-actions"}, "check_suite": {"id": 1}, "conclusion": null, "name": "pending", "status": "in_progress"},
+                    {"id": 3, "app": {"slug": "external-ci"}, "check_suite": {"id": 1}, "conclusion": "failure", "name": "external", "status": "completed"},
+                    {"app": {"slug": "github-actions"}, "check_suite": {}, "conclusion": "startup_failure", "name": "missing", "status": "completed"}
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let details = adapter(&server.uri())
+            .get_change_request_ci_details(&repository(), "head-sha", &credential())
+            .await
+            .expect("CI details");
+        assert!(matches!(
+            details.details[0].resolution,
+            domain::CiResolution::Unsupported
+        ));
+        assert!(matches!(
+            details.details[1].resolution,
+            domain::CiResolution::Unsupported
+        ));
+        assert!(matches!(
+            details.details[2].resolution,
+            domain::CiResolution::Unsupported
+        ));
+        let domain::CiResolution::Error { message } = &details.details[3].resolution else {
+            panic!("identified Actions check with missing IDs must be an error")
+        };
+        assert!(message.contains("missing its ID"));
+    }
+
+    #[tokio::test]
+    async fn actions_log_errors_do_not_expose_signed_secrets() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/org/repo/actions/jobs/77/logs"))
+            .respond_with(ResponseTemplate::new(302).insert_header(
+                "Location",
+                format!("{}/signed-log?first-secret=alpha", server.uri()),
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/signed-log"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header(
+                        "Location",
+                        format!("{}/other?second-secret=bravo", server.uri()),
+                    )
+                    .set_body_string("destination-body-secret-charlie"),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/org/repo/actions/jobs/78/logs"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("upstream-body-secret-delta"))
+            .mount(&server)
+            .await;
+
+        let trace = Arc::new(Mutex::new(Vec::new()));
+        let trace_writer = Arc::clone(&trace);
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_writer(move || TraceWriter(Arc::clone(&trace_writer)))
+            .finish();
+        let serialized = async {
+            let adapter = adapter(&server.uri());
+            let repository = repository();
+            let credential = credential();
+            let mut resolver = GitHubActionsResolver::new(
+                &adapter,
+                &repository,
+                "head-sha",
+                &credential,
+                GitHubActionsResolutionLimits::default(),
+            )
+            .expect("resolver");
+            let redirect_error = resolver.job_log(77).await.expect_err("second redirect");
+            let permission_error = resolver.job_log(78).await.expect_err("permission error");
+            serde_json::to_string(&domain::CiResolution::Error {
+                message: format!("{}; {}", redirect_error.0, permission_error.0),
+            })
+            .expect("serialize error resolution")
+        }
+        .with_subscriber(subscriber)
+        .await;
+        let captured = String::from_utf8(trace.lock().expect("trace buffer").clone())
+            .expect("UTF-8 tracing output");
+        for secret in ["alpha", "bravo", "charlie", "delta", "signed-log"] {
+            assert!(!serialized.contains(secret));
+            assert!(!captured.contains(secret));
+        }
+        assert!(serialized.contains("Actions: read"));
+        assert!(serialized.contains("re-approve"));
+    }
+
+    #[tokio::test]
+    async fn actions_json_reader_bounds_and_sanitizes_errors() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/org/repo/actions/runs"))
+            .and(query_param("check_suite_id", "1"))
+            .respond_with(
+                ResponseTemplate::new(403).set_body_string("permission-body-secret-alpha"),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/org/repo/actions/runs"))
+            .and(query_param("check_suite_id", "2"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{"))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/org/repo/actions/runs"))
+            .and(query_param("check_suite_id", "3"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("x".repeat(65)))
+            .mount(&server)
+            .await;
+
+        let adapter = adapter(&server.uri());
+        let repository = repository();
+        let credential = credential();
+        let mut resolver = GitHubActionsResolver::new(
+            &adapter,
+            &repository,
+            "head-sha",
+            &credential,
+            GitHubActionsResolutionLimits {
+                json_page_bytes: 64,
+                json_total_bytes: 128,
+                ..GitHubActionsResolutionLimits::default()
+            },
+        )
+        .expect("resolver");
+        let permission = resolver.workflow_run(1).await.expect_err("permission");
+        assert!(permission.0.contains("Actions: read"));
+        assert!(!permission.0.contains("permission-body-secret-alpha"));
+        let malformed = resolver.workflow_run(2).await.expect_err("malformed JSON");
+        assert!(malformed.0.contains("malformed JSON"));
+        let overflow = resolver.workflow_run(3).await.expect_err("bounded JSON");
+        assert!(overflow.0.contains("JSON byte limit"));
+    }
+
+    #[tokio::test]
+    async fn actions_rejected_chunks_do_not_consume_shared_byte_budgets() {
+        let oversized = "x".repeat(65);
+        let json_response = format!(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{:x}\r\n{oversized}\r\n0\r\n\r\n",
+            oversized.len()
+        )
+        .into_bytes();
+        let (json_url, json_fixture) = one_shot_http_response(json_response);
+        let json_adapter = adapter(&json_url);
+        let repository = repository();
+        let credential = credential();
+        let mut resolver = GitHubActionsResolver::new(
+            &json_adapter,
+            &repository,
+            "head-sha",
+            &credential,
+            GitHubActionsResolutionLimits {
+                json_page_bytes: 64,
+                json_total_bytes: 64,
+                ..GitHubActionsResolutionLimits::default()
+            },
+        )
+        .expect("JSON resolver");
+        let response = json_adapter
+            .client
+            .get(&json_url)
+            .send()
+            .await
+            .expect("chunked JSON response");
+        let error = resolver
+            .read_json::<serde_json::Value>(response, "test lookup")
+            .await
+            .expect_err("oversized chunk");
+        assert!(error.0.contains("JSON byte limit"));
+        assert_eq!(resolver.budget.json_bytes, 0);
+        json_fixture.join().expect("JSON fixture");
+
+        let log_response = format!(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{:x}\r\n{oversized}\r\n0\r\n\r\n",
+            oversized.len()
+        )
+        .into_bytes();
+        let (log_url, log_fixture) = one_shot_http_response(log_response);
+        let api = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/org/repo/actions/jobs/7/logs"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("Location", format!("{log_url}?secret=hidden")),
+            )
+            .mount(&api)
+            .await;
+        let log_adapter = adapter(&api.uri());
+        let mut resolver = GitHubActionsResolver::new(
+            &log_adapter,
+            &repository,
+            "head-sha",
+            &credential,
+            GitHubActionsResolutionLimits {
+                log_bytes: 64,
+                log_total_bytes: 64,
+                ..GitHubActionsResolutionLimits::default()
+            },
+        )
+        .expect("log resolver");
+        let error = resolver.job_log(7).await.expect_err("oversized log chunk");
+        assert!(error.0.contains("signed log byte limit"));
+        assert!(!error.0.contains("hidden"));
+        assert_eq!(resolver.budget.log_bytes, 0);
+        log_fixture.join().expect("log fixture");
+    }
+
+    #[tokio::test]
+    async fn actions_truncated_log_stream_sanitizes_transport_error() {
+        let (log_url, fixture) = one_shot_http_response(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\ndestination-body-secret"
+                .to_vec(),
+        );
+        let api = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/org/repo/actions/jobs/7/logs"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("Location", format!("{log_url}?location-query-secret")),
+            )
+            .mount(&api)
+            .await;
+
+        let adapter = adapter(&api.uri());
+        let repository = repository();
+        let credential = credential();
+        let mut resolver = GitHubActionsResolver::new(
+            &adapter,
+            &repository,
+            "head-sha",
+            &credential,
+            GitHubActionsResolutionLimits::default(),
+        )
+        .expect("resolver");
+        let error = resolver.job_log(7).await.expect_err("truncated log stream");
+        assert!(error.0.contains("signed job-log stream"));
+        assert!(!error.0.contains("location-query-secret"));
+        assert!(!error.0.contains("destination-body-secret"));
+        fixture.join().expect("truncated fixture");
+    }
+
+    #[tokio::test]
+    async fn actions_job_lookup_paginates_and_sanitizes_permission_errors() {
+        let server = MockServer::start().await;
+        let endpoint = "/repos/org/repo/actions/runs/100/attempts/2/jobs";
+        Mock::given(method("GET"))
+            .and(path(endpoint))
+            .and(query_param("page", "1"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("Link", format!("<{}{endpoint}?page=2>; rel=\"next\"", server.uri()))
+                    .set_body_json(serde_json::json!({
+                        "total_count": 2,
+                        "jobs": [{
+                            "id": 1,
+                            "run_id": 100,
+                            "head_sha": "head-sha",
+                            "name": "first",
+                            "conclusion": "success",
+                            "check_run_url": format!("{}/repos/org/repo/check-runs/1", server.uri()),
+                            "steps": []
+                        }]
+                    })),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(endpoint))
+            .and(query_param("page", "2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "total_count": 2,
+                "jobs": [{
+                    "id": 2,
+                    "run_id": 100,
+                    "head_sha": "head-sha",
+                    "name": "second",
+                    "conclusion": "failure",
+                    "check_run_url": format!("{}/repos/org/repo/check-runs/2", server.uri()),
+                    "steps": []
+                }]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/org/repo/actions/runs/200/attempts/1/jobs"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("jobs-body-secret"))
+            .mount(&server)
+            .await;
+
+        let adapter = adapter(&server.uri());
+        let repository = repository();
+        let credential = credential();
+        let mut resolver = GitHubActionsResolver::new(
+            &adapter,
+            &repository,
+            "head-sha",
+            &credential,
+            GitHubActionsResolutionLimits::default(),
+        )
+        .expect("resolver");
+        let jobs = resolver
+            .workflow_jobs(&GitHubWorkflowRun {
+                id: 100,
+                check_suite_id: 9,
+                head_sha: "head-sha".to_string(),
+                run_attempt: 2,
+                html_url: "https://github.example/actions/runs/100".to_string(),
+            })
+            .await
+            .expect("paginated jobs");
+        assert_eq!(jobs.iter().map(|job| job.id).collect::<Vec<_>>(), [1, 2]);
+
+        let error = resolver
+            .workflow_jobs(&GitHubWorkflowRun {
+                id: 200,
+                check_suite_id: 10,
+                head_sha: "head-sha".to_string(),
+                run_attempt: 1,
+                html_url: "https://github.example/actions/runs/200".to_string(),
+            })
+            .await
+            .expect_err("jobs permission error");
+        assert!(error.0.contains("Actions: read"));
+        assert!(error.0.contains("re-approve"));
+        assert!(!error.0.contains("jobs-body-secret"));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn actions_run_lookup_rejects_incomplete_duplicate_and_mismatched_records() {
+        let server = MockServer::start().await;
+        let run = |id: u64, suite: u64, sha: &str| {
+            serde_json::json!({
+                "id": id,
+                "check_suite_id": suite,
+                "head_sha": sha,
+                "run_attempt": 1,
+                "html_url": format!("https://github.example/actions/runs/{id}")
+            })
+        };
+        Mock::given(method("GET"))
+            .and(path("/repos/org/repo/actions/runs"))
+            .and(query_param("check_suite_id", "1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "total_count": 2,
+                "workflow_runs": [run(1, 1, "head-sha")]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/org/repo/actions/runs"))
+            .and(query_param("check_suite_id", "2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "total_count": 2,
+                "workflow_runs": [run(2, 2, "head-sha"), run(2, 2, "head-sha")]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/org/repo/actions/runs"))
+            .and(query_param("check_suite_id", "3"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "total_count": 1,
+                "workflow_runs": [run(3, 999, "other-sha")]
+            })))
+            .mount(&server)
+            .await;
+
+        let adapter = adapter(&server.uri());
+        let repository = repository();
+        let credential = credential();
+        let mut resolver = GitHubActionsResolver::new(
+            &adapter,
+            &repository,
+            "head-sha",
+            &credential,
+            GitHubActionsResolutionLimits::default(),
+        )
+        .expect("resolver");
+        assert!(
+            resolver
+                .workflow_run(1)
+                .await
+                .expect_err("incomplete")
+                .0
+                .contains("incomplete")
+        );
+        assert!(
+            resolver
+                .workflow_run(2)
+                .await
+                .expect_err("duplicate")
+                .0
+                .contains("duplicate")
+        );
+        assert!(
+            resolver
+                .workflow_run(3)
+                .await
+                .expect_err("mismatch")
+                .0
+                .contains("correlation")
         );
     }
 

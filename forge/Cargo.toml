@@ -23,4 +23,5 @@ tracing = "0.1"
 urlencoding = "2.1"
 
 [dev-dependencies]
+tracing-subscriber = "0.3"
 wiremock = "0.6"
