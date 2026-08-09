@@ -629,6 +629,7 @@ pub async fn get_pull_ci_details(
                         failed_steps,
                     } => CiResolutionResult::Resolved {
                         provider: match provider {
+                            domain::CiProvider::GithubActions => CiProviderResult::GithubActions,
                             domain::CiProvider::Woodpecker => CiProviderResult::Woodpecker,
                         },
                         pipeline_url,
@@ -2405,8 +2406,8 @@ mod tests {
                     state: domain::CommitStatusState::Failure,
                     target_url: "https://ci.example/1".into(),
                     resolution: domain::CiResolution::Resolved {
-                        provider: domain::CiProvider::Woodpecker,
-                        pipeline_url: "https://ci.example/1".into(),
+                        provider: domain::CiProvider::GithubActions,
+                        pipeline_url: "https://github.example/actions/runs/1".into(),
                         failed_steps: vec![domain::CiFailureStep {
                             name: "test".into(),
                             state: "failure".into(),
@@ -2927,8 +2928,8 @@ mod tests {
                     state: domain::CommitStatusState::Failure,
                     target_url: "https://ci.example/1".into(),
                     resolution: domain::CiResolution::Resolved {
-                        provider: domain::CiProvider::Woodpecker,
-                        pipeline_url: "https://ci.example/1".into(),
+                        provider: domain::CiProvider::GithubActions,
+                        pipeline_url: "https://github.example/actions/runs/1".into(),
                         failed_steps: vec![domain::CiFailureStep {
                             name: "test".into(),
                             state: "failure".into(),
@@ -4381,6 +4382,14 @@ mod tests {
         // We want to ensure it's lowercase.
         assert_eq!(json["state"], "failure");
         assert_eq!(json["details"][0]["state"], "failure");
+        assert_eq!(
+            json["details"][0]["resolution"]["provider"],
+            "github_actions"
+        );
+        assert_eq!(
+            json["details"][0]["resolution"]["failed_steps"][0]["log_excerpt"]["lines"][0],
+            "error log"
+        );
     }
 
     #[tokio::test]

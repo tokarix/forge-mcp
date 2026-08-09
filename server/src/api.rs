@@ -267,6 +267,7 @@ pub enum CiResolutionResult {
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CiProviderResult {
+    GithubActions,
     Woodpecker,
 }
 

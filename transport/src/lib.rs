@@ -5742,15 +5742,19 @@ mod tests {
                     "state": "failure",
                     "details": [
                         {
-                            "context": "ci/woodpecker",
+                            "context": "build",
                             "description": "failed",
                             "state": "failure",
                             "target_url": "https://ci.example/1",
                             "resolution": {
                                 "type": "resolved",
-                                "provider": "woodpecker",
-                                "pipeline_url": "https://ci.example/1",
-                                "failed_steps": []
+                                "provider": "github_actions",
+                                "pipeline_url": "https://github.example/actions/runs/1",
+                                "failed_steps": [{
+                                    "name": "build / test",
+                                    "state": "failure",
+                                    "log_excerpt": {"lines": ["error log"]}
+                                }]
                             }
                         }
                     ]
@@ -5776,7 +5780,15 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(&result)?;
         assert_eq!(json["head_sha"], "abc123");
         assert_eq!(json["state"], "failure");
-        assert_eq!(json["details"][0]["context"], "ci/woodpecker");
+        assert_eq!(json["details"][0]["context"], "build");
+        assert_eq!(
+            json["details"][0]["resolution"]["provider"],
+            "github_actions"
+        );
+        assert_eq!(
+            json["details"][0]["resolution"]["failed_steps"][0]["log_excerpt"]["lines"][0],
+            "error log"
+        );
 
         Ok(())
     }
