@@ -8,11 +8,12 @@ use domain::{
     RepositoryMergeSettings, RepositoryRef,
 };
 use hmac::{Hmac, Mac};
-use reqwest::{RequestBuilder, StatusCode};
+use reqwest::{RequestBuilder, StatusCode, Url};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use sha2::Sha256;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 pub use crate::github_app::{GitHubAppConfig, GitHubAppCredential};
@@ -28,6 +29,118 @@ const PAGE_SIZE: u32 = 100;
 const MAX_BRANCH_PAGES: u64 = 5;
 const MAX_PAGES: u64 = 1_000;
 const PAGINATION_DEADLINE: Duration = Duration::from_secs(60);
+
+#[derive(Clone, Copy, Debug)]
+struct GitHubActionsResolutionLimits {
+    deadline: Duration,
+    suite_lookups: usize,
+    job_lookups: usize,
+    api_requests: usize,
+    json_page_bytes: usize,
+    json_total_bytes: usize,
+    workflow_runs: usize,
+    workflow_jobs: usize,
+    job_steps: usize,
+    log_downloads: usize,
+    log_bytes: usize,
+    log_total_bytes: usize,
+    emitted_steps: usize,
+    output_bytes: usize,
+    excerpt_lines: usize,
+    excerpt_line_bytes: usize,
+    excerpt_bytes: usize,
+}
+
+impl Default for GitHubActionsResolutionLimits {
+    fn default() -> Self {
+        Self {
+            deadline: Duration::from_secs(30),
+            suite_lookups: 16,
+            job_lookups: 16,
+            api_requests: 64,
+            json_page_bytes: 2 * 1024 * 1024,
+            json_total_bytes: 8 * 1024 * 1024,
+            workflow_runs: 1_000,
+            workflow_jobs: 1_000,
+            job_steps: 4_096,
+            log_downloads: 16,
+            log_bytes: 512 * 1024,
+            log_total_bytes: 2 * 1024 * 1024,
+            emitted_steps: 64,
+            output_bytes: 256 * 1024,
+            excerpt_lines: 20,
+            excerpt_line_bytes: 512,
+            excerpt_bytes: 8 * 1024,
+        }
+    }
+}
+
+impl GitHubActionsResolutionLimits {
+    fn validate(self) -> Result<Self, ForgeError> {
+        let counts = [
+            self.suite_lookups,
+            self.job_lookups,
+            self.api_requests,
+            self.json_page_bytes,
+            self.json_total_bytes,
+            self.workflow_runs,
+            self.workflow_jobs,
+            self.job_steps,
+            self.log_downloads,
+            self.log_bytes,
+            self.log_total_bytes,
+            self.emitted_steps,
+            self.output_bytes,
+            self.excerpt_lines,
+            self.excerpt_line_bytes,
+            self.excerpt_bytes,
+        ];
+        if self.deadline.is_zero() || counts.contains(&0) {
+            return Err(ForgeError::InvalidPayload(
+                "GitHub Actions resolution limits must be non-zero".to_string(),
+            ));
+        }
+        if self.json_page_bytes > self.json_total_bytes
+            || self.log_bytes > self.log_total_bytes
+            || self.excerpt_line_bytes > self.excerpt_bytes
+        {
+            return Err(ForgeError::InvalidPayload(
+                "GitHub Actions resolution limits are inconsistent".to_string(),
+            ));
+        }
+        self.excerpt_lines
+            .checked_mul(self.excerpt_line_bytes)
+            .ok_or_else(|| {
+                ForgeError::InvalidPayload("GitHub Actions resolution limits overflow".to_string())
+            })?;
+        Ok(self)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ActionsError(String);
+
+type CachedActionsResult<T> = Result<Arc<T>, ActionsError>;
+
+impl ActionsError {
+    fn limit(name: &str) -> Self {
+        Self(format!("GitHub Actions {name} limit exhausted"))
+    }
+}
+
+#[derive(Debug)]
+struct GitHubActionsResolutionBudget {
+    deadline: Instant,
+    api_requests: usize,
+    json_bytes: usize,
+    workflow_runs: usize,
+    workflow_jobs: usize,
+    job_steps: usize,
+    log_downloads: usize,
+    log_bytes: usize,
+    emitted_steps: usize,
+    output_bytes: usize,
+}
 
 #[derive(Clone)]
 pub struct GitHubConfig {
@@ -428,6 +541,8 @@ impl GitHubAdapter {
             .checked_add(PAGINATION_DEADLINE)
             .ok_or_else(|| pagination_error("deadline overflow"))?;
         let mut check_runs = Vec::new();
+        let mut expected_total = None;
+        let mut ids = HashSet::new();
         let mut page = 1_u64;
         for _ in 0..MAX_PAGES {
             let response = Self::check_response(
@@ -447,9 +562,25 @@ impl GitHubAdapter {
             .await?;
             let headers = response.headers().clone();
             let checks: GitHubCheckRuns = response.json().await?;
+            if expected_total.is_some_and(|total| total != checks.total_count) {
+                return Err(pagination_error(
+                    "GitHub changed the check-run total_count between pages",
+                ));
+            }
+            expected_total.get_or_insert(checks.total_count);
+            for check in &checks.check_runs {
+                if check.id.is_some_and(|id| !ids.insert(id)) {
+                    return Err(pagination_error("GitHub returned a duplicate check-run ID"));
+                }
+            }
             check_runs.extend(checks.check_runs);
             let next = validate_next_page(page, next_page_from_link_header(&headers)?)?;
             let Some(next) = next else {
+                if u64::try_from(check_runs.len()).ok() != expected_total {
+                    return Err(pagination_error(
+                        "GitHub returned an incomplete check-run collection",
+                    ));
+                }
                 return Ok(check_runs);
             };
             page = next;
@@ -835,21 +966,76 @@ struct GitHubStatus {
 
 #[derive(Debug, Deserialize)]
 struct GitHubCheckRuns {
+    total_count: u64,
     #[serde(default)]
     check_runs: Vec<GitHubCheckRun>,
 }
 
 #[derive(Debug, Deserialize)]
 struct GitHubCheckRun {
+    id: Option<u64>,
     conclusion: Option<String>,
     details_url: Option<String>,
     name: String,
     status: String,
+    check_suite: Option<GitHubCheckSuite>,
+    app: Option<GitHubCheckApp>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubCheckSuite {
+    id: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubCheckApp {
+    slug: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct GitHubWorkflowRuns {
+    total_count: u64,
+    #[serde(default)]
+    workflow_runs: Vec<GitHubWorkflowRun>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct GitHubWorkflowRun {
+    id: u64,
+    check_suite_id: u64,
+    head_sha: String,
+    run_attempt: u64,
+    html_url: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct GitHubWorkflowJobs {
+    total_count: u64,
+    #[serde(default)]
+    jobs: Vec<GitHubWorkflowJob>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct GitHubWorkflowJob {
+    id: u64,
+    run_id: u64,
+    head_sha: String,
+    name: String,
+    conclusion: Option<String>,
+    check_run_url: String,
+    #[serde(default)]
+    steps: Vec<GitHubWorkflowStep>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct GitHubWorkflowStep {
+    name: String,
+    conclusion: Option<String>,
 }
 
 fn parse_status_state(state: &str) -> domain::CommitStatusState {
     match state {
-        "action_required" | "cancelled" | "error" | "stale" | "timed_out" => {
+        "action_required" | "cancelled" | "error" | "stale" | "startup_failure" | "timed_out" => {
             domain::CommitStatusState::Error
         }
         "failure" => domain::CommitStatusState::Failure,
@@ -882,6 +1068,929 @@ fn aggregate_statuses(statuses: &[domain::CommitStatus]) -> domain::CommitStatus
     } else {
         domain::CommitStatusState::Success
     }
+}
+
+struct GitHubActionsResolver<'a> {
+    adapter: &'a GitHubAdapter,
+    repository: &'a RepositoryRef,
+    head_sha: &'a str,
+    credential: &'a ForgeCredential,
+    limits: GitHubActionsResolutionLimits,
+    budget: GitHubActionsResolutionBudget,
+    runs: HashMap<u64, CachedActionsResult<GitHubWorkflowRun>>,
+    jobs: HashMap<(u64, u64), CachedActionsResult<Vec<GitHubWorkflowJob>>>,
+    logs: HashMap<u64, CachedActionsResult<domain::CiLogExcerpt>>,
+}
+
+impl<'a> GitHubActionsResolver<'a> {
+    fn new(
+        adapter: &'a GitHubAdapter,
+        repository: &'a RepositoryRef,
+        head_sha: &'a str,
+        credential: &'a ForgeCredential,
+        limits: GitHubActionsResolutionLimits,
+    ) -> Result<Self, ForgeError> {
+        let limits = limits.validate()?;
+        let deadline = Instant::now()
+            .checked_add(limits.deadline)
+            .ok_or_else(|| ForgeError::InvalidPayload("deadline overflow".to_string()))?;
+        Ok(Self {
+            adapter,
+            repository,
+            head_sha,
+            credential,
+            limits,
+            budget: GitHubActionsResolutionBudget {
+                deadline,
+                api_requests: 0,
+                json_bytes: 0,
+                workflow_runs: 0,
+                workflow_jobs: 0,
+                job_steps: 0,
+                log_downloads: 0,
+                log_bytes: 0,
+                emitted_steps: 0,
+                output_bytes: 0,
+            },
+            runs: HashMap::new(),
+            jobs: HashMap::new(),
+            logs: HashMap::new(),
+        })
+    }
+
+    fn remaining(&self) -> Result<Duration, ActionsError> {
+        self.budget
+            .deadline
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or_else(|| ActionsError::limit("deadline"))
+    }
+
+    fn checked_charge(
+        used: &mut usize,
+        amount: usize,
+        maximum: usize,
+        name: &str,
+    ) -> Result<(), ActionsError> {
+        let next = used
+            .checked_add(amount)
+            .ok_or_else(|| ActionsError::limit(name))?;
+        if next > maximum {
+            return Err(ActionsError::limit(name));
+        }
+        *used = next;
+        Ok(())
+    }
+
+    async fn send_authenticated(
+        &mut self,
+        builder: RequestBuilder,
+        phase: &str,
+    ) -> Result<reqwest::Response, ActionsError> {
+        Self::checked_charge(
+            &mut self.budget.api_requests,
+            1,
+            self.limits.api_requests,
+            "authenticated request count",
+        )?;
+        let timeout = self.remaining()?;
+        self.adapter
+            .request(builder.timeout(timeout), self.credential)
+            .send()
+            .await
+            .map_err(|error| {
+                let sanitized = error.without_url();
+                let failure = if sanitized.is_timeout() {
+                    "timed out"
+                } else {
+                    "failed"
+                };
+                ActionsError(format!("GitHub Actions {phase} request {failure}"))
+            })
+    }
+
+    fn response_status(response: &reqwest::Response, phase: &str) -> Result<(), ActionsError> {
+        if response.status() == StatusCode::FORBIDDEN {
+            return Err(ActionsError(
+                "GitHub Actions access was denied; grant Actions: read and re-approve the installation"
+                    .to_string(),
+            ));
+        }
+        if !response.status().is_success() {
+            return Err(ActionsError(format!(
+                "GitHub Actions {phase} returned status {}",
+                response.status()
+            )));
+        }
+        Ok(())
+    }
+
+    async fn read_json<T: DeserializeOwned>(
+        &mut self,
+        mut response: reqwest::Response,
+        phase: &str,
+    ) -> Result<T, ActionsError> {
+        Self::response_status(&response, phase)?;
+        let remaining_total = self
+            .limits
+            .json_total_bytes
+            .checked_sub(self.budget.json_bytes)
+            .ok_or_else(|| ActionsError::limit("JSON byte"))?;
+        let page_limit = self.limits.json_page_bytes.min(remaining_total);
+        if response.content_length().is_some_and(|length| {
+            usize::try_from(length).map_or(true, |length| length > page_limit)
+        }) {
+            return Err(ActionsError::limit("JSON byte"));
+        }
+        let mut bytes = Vec::new();
+        if let Some(length) = response.content_length() {
+            bytes
+                .try_reserve_exact(usize::try_from(length).unwrap_or(page_limit))
+                .map_err(|_| ActionsError::limit("JSON allocation"))?;
+        }
+        loop {
+            let chunk = tokio::time::timeout(self.remaining()?, response.chunk())
+                .await
+                .map_err(|_| ActionsError::limit("deadline"))?
+                .map_err(|error| {
+                    let sanitized = error.without_url();
+                    let failure = if sanitized.is_timeout() {
+                        "timed out"
+                    } else {
+                        "failed"
+                    };
+                    ActionsError(format!("GitHub Actions {phase} response stream {failure}"))
+                })?;
+            let Some(chunk) = chunk else { break };
+            let next_page = bytes
+                .len()
+                .checked_add(chunk.len())
+                .ok_or_else(|| ActionsError::limit("JSON byte"))?;
+            let next_total = self
+                .budget
+                .json_bytes
+                .checked_add(chunk.len())
+                .ok_or_else(|| ActionsError::limit("JSON byte"))?;
+            if next_page > self.limits.json_page_bytes || next_total > self.limits.json_total_bytes
+            {
+                return Err(ActionsError::limit("JSON byte"));
+            }
+            self.budget.json_bytes = next_total;
+            bytes
+                .try_reserve_exact(chunk.len())
+                .map_err(|_| ActionsError::limit("JSON allocation"))?;
+            bytes.extend_from_slice(&chunk);
+        }
+        serde_json::from_slice(&bytes)
+            .map_err(|_| ActionsError(format!("GitHub Actions {phase} returned malformed JSON")))
+    }
+
+    async fn workflow_run(
+        &mut self,
+        suite_id: u64,
+    ) -> Result<Arc<GitHubWorkflowRun>, ActionsError> {
+        if let Some(cached) = self.runs.get(&suite_id) {
+            return cached.clone();
+        }
+        if self.runs.len() >= self.limits.suite_lookups {
+            return Err(ActionsError::limit("distinct check-suite lookup"));
+        }
+        let result = self.fetch_workflow_run(suite_id).await;
+        self.runs.insert(suite_id, result.clone());
+        result
+    }
+
+    async fn fetch_workflow_run(
+        &mut self,
+        suite_id: u64,
+    ) -> Result<Arc<GitHubWorkflowRun>, ActionsError> {
+        let endpoint = format!(
+            "{}/repos/{}/actions/runs",
+            self.adapter.api_base(),
+            GitHubAdapter::repo_path(self.repository)
+        );
+        let mut page = 1_u64;
+        let mut expected_total = None;
+        let mut ids = HashSet::new();
+        let mut runs = Vec::new();
+        for _ in 0..MAX_PAGES {
+            let response = self
+                .send_authenticated(
+                    self.adapter.client.get(&endpoint).query(&[
+                        ("check_suite_id", suite_id.to_string()),
+                        ("head_sha", self.head_sha.to_string()),
+                        ("per_page", PAGE_SIZE.to_string()),
+                        ("page", page.to_string()),
+                    ]),
+                    &format!("workflow-run lookup for suite {suite_id}"),
+                )
+                .await?;
+            let headers = response.headers().clone();
+            let wrapper: GitHubWorkflowRuns = self
+                .read_json(
+                    response,
+                    &format!("workflow-run lookup for suite {suite_id}"),
+                )
+                .await?;
+            if usize::try_from(wrapper.total_count).map_or(true, |total| {
+                total > self.limits.workflow_runs.saturating_sub(runs.len())
+            }) {
+                return Err(ActionsError::limit("workflow-run record"));
+            }
+            Self::checked_charge(
+                &mut self.budget.workflow_runs,
+                wrapper.workflow_runs.len(),
+                self.limits.workflow_runs,
+                "workflow-run record",
+            )?;
+            if expected_total.is_some_and(|total| total != wrapper.total_count) {
+                return Err(ActionsError(
+                    "GitHub Actions changed workflow-run total_count between pages".to_string(),
+                ));
+            }
+            expected_total.get_or_insert(wrapper.total_count);
+            for run in &wrapper.workflow_runs {
+                if !ids.insert(run.id) {
+                    return Err(ActionsError(
+                        "GitHub Actions returned a duplicate workflow-run ID".to_string(),
+                    ));
+                }
+                if run.check_suite_id != suite_id || run.head_sha != self.head_sha {
+                    return Err(ActionsError(format!(
+                        "GitHub Actions workflow-run correlation failed for suite {suite_id}"
+                    )));
+                }
+            }
+            runs.extend(wrapper.workflow_runs);
+            let next = next_page_from_link_header(&headers).map_err(|_| {
+                ActionsError(
+                    "GitHub Actions returned an invalid workflow-run Link header".to_string(),
+                )
+            })?;
+            let next = validate_next_page(page, next).map_err(|_| {
+                ActionsError(
+                    "GitHub Actions returned a non-monotonic workflow-run Link header".to_string(),
+                )
+            })?;
+            let Some(next) = next else { break };
+            page = next;
+        }
+        if u64::try_from(runs.len()).ok() != expected_total {
+            return Err(ActionsError(
+                "GitHub Actions returned an incomplete workflow-run collection".to_string(),
+            ));
+        }
+        runs.into_iter()
+            .max_by_key(|run| (run.run_attempt, run.id))
+            .map(Arc::new)
+            .ok_or_else(|| {
+                ActionsError(format!(
+                    "GitHub Actions found no workflow run for suite {suite_id} and the requested commit"
+                ))
+            })
+    }
+
+    async fn workflow_jobs(
+        &mut self,
+        run: &GitHubWorkflowRun,
+    ) -> Result<Arc<Vec<GitHubWorkflowJob>>, ActionsError> {
+        let key = (run.id, run.run_attempt);
+        if let Some(cached) = self.jobs.get(&key) {
+            return cached.clone();
+        }
+        if self.jobs.len() >= self.limits.job_lookups {
+            return Err(ActionsError::limit("distinct run-attempt job lookup"));
+        }
+        let result = self.fetch_workflow_jobs(run).await;
+        self.jobs.insert(key, result.clone());
+        result
+    }
+
+    async fn fetch_workflow_jobs(
+        &mut self,
+        run: &GitHubWorkflowRun,
+    ) -> Result<Arc<Vec<GitHubWorkflowJob>>, ActionsError> {
+        let endpoint = format!(
+            "{}/repos/{}/actions/runs/{}/attempts/{}/jobs",
+            self.adapter.api_base(),
+            GitHubAdapter::repo_path(self.repository),
+            run.id,
+            run.run_attempt
+        );
+        let mut page = 1_u64;
+        let mut expected_total = None;
+        let mut ids = HashSet::new();
+        let mut jobs = Vec::new();
+        for _ in 0..MAX_PAGES {
+            let response = self
+                .send_authenticated(
+                    self.adapter.client.get(&endpoint).query(&[
+                        ("per_page", PAGE_SIZE.to_string()),
+                        ("page", page.to_string()),
+                    ]),
+                    &format!("job lookup for run {} attempt {}", run.id, run.run_attempt),
+                )
+                .await?;
+            let headers = response.headers().clone();
+            let wrapper: GitHubWorkflowJobs = self
+                .read_json(
+                    response,
+                    &format!("job lookup for run {} attempt {}", run.id, run.run_attempt),
+                )
+                .await?;
+            if usize::try_from(wrapper.total_count).map_or(true, |total| {
+                total > self.limits.workflow_jobs.saturating_sub(jobs.len())
+            }) {
+                return Err(ActionsError::limit("workflow-job record"));
+            }
+            Self::checked_charge(
+                &mut self.budget.workflow_jobs,
+                wrapper.jobs.len(),
+                self.limits.workflow_jobs,
+                "workflow-job record",
+            )?;
+            let step_count = wrapper
+                .jobs
+                .iter()
+                .try_fold(0_usize, |total, job| total.checked_add(job.steps.len()))
+                .ok_or_else(|| ActionsError::limit("job-step record"))?;
+            Self::checked_charge(
+                &mut self.budget.job_steps,
+                step_count,
+                self.limits.job_steps,
+                "job-step record",
+            )?;
+            if expected_total.is_some_and(|total| total != wrapper.total_count) {
+                return Err(ActionsError(
+                    "GitHub Actions changed workflow-job total_count between pages".to_string(),
+                ));
+            }
+            expected_total.get_or_insert(wrapper.total_count);
+            for job in &wrapper.jobs {
+                if !ids.insert(job.id) {
+                    return Err(ActionsError(
+                        "GitHub Actions returned a duplicate workflow-job ID".to_string(),
+                    ));
+                }
+                if job.run_id != run.id || job.head_sha != self.head_sha {
+                    return Err(ActionsError(format!(
+                        "GitHub Actions job correlation failed for run {} attempt {}",
+                        run.id, run.run_attempt
+                    )));
+                }
+            }
+            jobs.extend(wrapper.jobs);
+            let next = next_page_from_link_header(&headers).map_err(|_| {
+                ActionsError(
+                    "GitHub Actions returned an invalid workflow-job Link header".to_string(),
+                )
+            })?;
+            let next = validate_next_page(page, next).map_err(|_| {
+                ActionsError(
+                    "GitHub Actions returned a non-monotonic workflow-job Link header".to_string(),
+                )
+            })?;
+            let Some(next) = next else { break };
+            page = next;
+        }
+        if u64::try_from(jobs.len()).ok() != expected_total {
+            return Err(ActionsError(
+                "GitHub Actions returned an incomplete workflow-job collection".to_string(),
+            ));
+        }
+        Ok(Arc::new(jobs))
+    }
+
+    fn check_run_id_from_job_url(&self, value: &str) -> Result<u64, ActionsError> {
+        let url = Url::parse(value).map_err(|_| {
+            ActionsError("GitHub Actions job contains a malformed check_run_url".to_string())
+        })?;
+        let api = Url::parse(self.adapter.api_base())
+            .map_err(|_| ActionsError("configured GitHub API origin is invalid".to_string()))?;
+        if !matches!(url.scheme(), "http" | "https")
+            || url.username() != ""
+            || url.password().is_some()
+            || !same_url_origin(&url, &api)
+        {
+            return Err(ActionsError(
+                "GitHub Actions job check_run_url is outside the configured API origin".to_string(),
+            ));
+        }
+        let expected_prefix = format!(
+            "{}/repos/{}/check-runs/",
+            api.path().trim_end_matches('/'),
+            GitHubAdapter::repo_path(self.repository)
+        );
+        let id = url.path().strip_prefix(&expected_prefix).ok_or_else(|| {
+            ActionsError("GitHub Actions job contains an unexpected check_run_url path".to_string())
+        })?;
+        if id.is_empty() || id.contains('/') || url.query().is_some() || url.fragment().is_some() {
+            return Err(ActionsError(
+                "GitHub Actions job contains an unexpected check_run_url path".to_string(),
+            ));
+        }
+        id.parse().map_err(|_| {
+            ActionsError("GitHub Actions job contains a non-numeric check-run ID".to_string())
+        })
+    }
+
+    async fn job_log(&mut self, job_id: u64) -> Result<Arc<domain::CiLogExcerpt>, ActionsError> {
+        if let Some(cached) = self.logs.get(&job_id) {
+            return cached.clone();
+        }
+        if self.budget.log_downloads >= self.limits.log_downloads {
+            return Err(ActionsError::limit("signed log download count"));
+        }
+        if self.budget.log_bytes >= self.limits.log_total_bytes {
+            return Err(ActionsError::limit("signed log byte"));
+        }
+        let result = self.fetch_job_log(job_id).await;
+        self.logs.insert(job_id, result.clone());
+        result
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn fetch_job_log(
+        &mut self,
+        job_id: u64,
+    ) -> Result<Arc<domain::CiLogExcerpt>, ActionsError> {
+        let endpoint = format!(
+            "{}/repos/{}/actions/jobs/{job_id}/logs",
+            self.adapter.api_base(),
+            GitHubAdapter::repo_path(self.repository)
+        );
+        let response = self
+            .send_authenticated(
+                self.adapter.client.get(endpoint),
+                &format!("job-log lookup for job {job_id}"),
+            )
+            .await?;
+        if response.status() == StatusCode::FORBIDDEN {
+            return Err(ActionsError(
+                "GitHub Actions access was denied; grant Actions: read and re-approve the installation"
+                    .to_string(),
+            ));
+        }
+        if response.status() != StatusCode::FOUND {
+            return Err(ActionsError(format!(
+                "GitHub Actions job-log lookup for job {job_id} returned status {}",
+                response.status()
+            )));
+        }
+        let mut locations = response.headers().get_all(reqwest::header::LOCATION).iter();
+        let location = locations.next().ok_or_else(|| {
+            ActionsError(format!(
+                "GitHub Actions job-log lookup for job {job_id} omitted Location"
+            ))
+        })?;
+        if locations.next().is_some() {
+            return Err(ActionsError(format!(
+                "GitHub Actions job-log lookup for job {job_id} returned multiple Location headers"
+            )));
+        }
+        let destination = location
+            .to_str()
+            .ok()
+            .and_then(|value| Url::parse(value).ok())
+            .ok_or_else(|| {
+                ActionsError(format!(
+                    "GitHub Actions job-log lookup for job {job_id} returned an invalid destination"
+                ))
+            })?;
+        let api = Url::parse(self.adapter.api_base())
+            .map_err(|_| ActionsError("configured GitHub API origin is invalid".to_string()))?;
+        let destination = validate_signed_log_destination(&api, destination, job_id)?;
+        Self::checked_charge(
+            &mut self.budget.log_downloads,
+            1,
+            self.limits.log_downloads,
+            "signed log download count",
+        )?;
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|_| {
+                ActionsError(format!(
+                    "GitHub Actions could not prepare job-log download for job {job_id}"
+                ))
+            })?;
+        let mut request = client
+            .get(destination)
+            .timeout(self.remaining()?)
+            .build()
+            .map_err(|error| {
+                let sanitized = error.without_url();
+                let failure = if sanitized.is_builder() {
+                    "was invalid"
+                } else {
+                    "could not be prepared"
+                };
+                ActionsError(format!(
+                    "GitHub Actions signed job-log request for job {job_id} {failure}"
+                ))
+            })?;
+        request.headers_mut().remove(reqwest::header::ACCEPT);
+        request.headers_mut().remove(reqwest::header::AUTHORIZATION);
+        request.headers_mut().remove(reqwest::header::USER_AGENT);
+        request.headers_mut().remove("x-github-api-version");
+        let mut response = client.execute(request).await.map_err(|error| {
+            let sanitized = error.without_url();
+            let failure = if sanitized.is_timeout() {
+                "timed out"
+            } else {
+                "failed"
+            };
+            ActionsError(format!(
+                "GitHub Actions signed job-log request {failure} for job {job_id}"
+            ))
+        })?;
+        if response.status().is_redirection() {
+            return Err(ActionsError(format!(
+                "GitHub Actions signed job-log response redirected for job {job_id} with status {}",
+                response.status()
+            )));
+        }
+        if !response.status().is_success() {
+            return Err(ActionsError(format!(
+                "GitHub Actions signed job-log response failed for job {job_id} with status {}",
+                response.status()
+            )));
+        }
+        let remaining_total = self
+            .limits
+            .log_total_bytes
+            .checked_sub(self.budget.log_bytes)
+            .ok_or_else(|| ActionsError::limit("signed log byte"))?;
+        let body_limit = self.limits.log_bytes.min(remaining_total);
+        if response.content_length().is_some_and(|length| {
+            usize::try_from(length).map_or(true, |length| length > body_limit)
+        }) {
+            return Err(ActionsError::limit("signed log byte"));
+        }
+        let mut bytes = Vec::new();
+        if let Some(length) = response.content_length() {
+            bytes
+                .try_reserve_exact(usize::try_from(length).unwrap_or(body_limit))
+                .map_err(|_| ActionsError::limit("signed log allocation"))?;
+        }
+        loop {
+            let chunk = tokio::time::timeout(self.remaining()?, response.chunk())
+                .await
+                .map_err(|_| ActionsError::limit("deadline"))?
+                .map_err(|error| {
+                    let sanitized = error.without_url();
+                    let failure = if sanitized.is_timeout() {
+                        "timed out"
+                    } else {
+                        "failed"
+                    };
+                    ActionsError(format!(
+                        "GitHub Actions signed job-log stream {failure} for job {job_id}"
+                    ))
+                })?;
+            let Some(chunk) = chunk else { break };
+            let next_body = bytes
+                .len()
+                .checked_add(chunk.len())
+                .ok_or_else(|| ActionsError::limit("signed log byte"))?;
+            let next_total = self
+                .budget
+                .log_bytes
+                .checked_add(chunk.len())
+                .ok_or_else(|| ActionsError::limit("signed log byte"))?;
+            if next_body > self.limits.log_bytes || next_total > self.limits.log_total_bytes {
+                return Err(ActionsError::limit("signed log byte"));
+            }
+            self.budget.log_bytes = next_total;
+            bytes
+                .try_reserve_exact(chunk.len())
+                .map_err(|_| ActionsError::limit("signed log allocation"))?;
+            bytes.extend_from_slice(&chunk);
+        }
+        let text = String::from_utf8(bytes).map_err(|_| {
+            ActionsError(format!(
+                "GitHub Actions job log for job {job_id} is not valid UTF-8"
+            ))
+        })?;
+        let mut selected = Vec::new();
+        for line in text.lines().rev().filter(|line| !line.trim().is_empty()) {
+            if selected.len() == self.limits.excerpt_lines {
+                break;
+            }
+            let line = utf8_prefix(line, self.limits.excerpt_line_bytes);
+            let used = selected
+                .iter()
+                .try_fold(0_usize, |total, line: &String| {
+                    total.checked_add(line.len())
+                })
+                .ok_or_else(|| ActionsError::limit("excerpt byte"))?;
+            if used
+                .checked_add(line.len())
+                .is_none_or(|total| total > self.limits.excerpt_bytes)
+            {
+                break;
+            }
+            selected
+                .try_reserve_exact(1)
+                .map_err(|_| ActionsError::limit("excerpt allocation"))?;
+            selected.push(line.to_string());
+        }
+        selected.reverse();
+        if selected.is_empty() {
+            return Err(ActionsError(format!(
+                "GitHub Actions job log for job {job_id} contained no usable lines"
+            )));
+        }
+        Ok(Arc::new(domain::CiLogExcerpt { lines: selected }))
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn resolve(
+        &mut self,
+        check: &GitHubCheckRun,
+    ) -> Result<domain::CiResolution, ActionsError> {
+        self.remaining()?;
+        let check_id = check.id.ok_or_else(|| {
+            ActionsError("GitHub Actions check run is missing its ID".to_string())
+        })?;
+        let suite_id = check
+            .check_suite
+            .as_ref()
+            .and_then(|suite| suite.id)
+            .ok_or_else(|| {
+                ActionsError("GitHub Actions check run is missing its check-suite ID".to_string())
+            })?;
+        let run = self.workflow_run(suite_id).await?;
+        let jobs = self.workflow_jobs(&run).await?;
+        let mut matches = Vec::new();
+        for job in jobs.iter() {
+            if self.check_run_id_from_job_url(&job.check_run_url)? == check_id {
+                matches.push(job);
+            }
+        }
+        if matches.len() != 1 {
+            return Err(ActionsError(format!(
+                "GitHub Actions expected exactly one job for check run {check_id}, found {}",
+                matches.len()
+            )));
+        }
+        let job = matches[0];
+        let job_state = job.conclusion.as_deref().unwrap_or("error");
+        if !is_failure_state(&parse_status_state(job_state)) {
+            return Err(ActionsError(format!(
+                "GitHub Actions job {} is not failed or errored",
+                job.id
+            )));
+        }
+        let is_failed_step = |step: &&GitHubWorkflowStep| {
+            is_failure_state(&parse_status_state(
+                step.conclusion.as_deref().unwrap_or("pending"),
+            ))
+        };
+        let failed_step_count = job.steps.iter().filter(is_failed_step).count();
+        let emitted = failed_step_count.max(1);
+        let mut added_bytes = run.html_url.len();
+        if failed_step_count == 0 {
+            added_bytes = added_bytes
+                .checked_add(job.name.len())
+                .and_then(|value| value.checked_add(job_state.len()))
+                .ok_or_else(|| ActionsError::limit("resolved output byte"))?;
+        } else {
+            for step in job.steps.iter().filter(is_failed_step) {
+                added_bytes = added_bytes
+                    .checked_add(job.name.len())
+                    .and_then(|value| value.checked_add(3))
+                    .and_then(|value| value.checked_add(step.name.len()))
+                    .and_then(|value| {
+                        value.checked_add(step.conclusion.as_deref().unwrap_or("error").len())
+                    })
+                    .ok_or_else(|| ActionsError::limit("resolved output byte"))?;
+            }
+        }
+        let preflight_steps = self
+            .budget
+            .emitted_steps
+            .checked_add(emitted)
+            .ok_or_else(|| ActionsError::limit("emitted failure-step"))?;
+        let preflight_bytes = self
+            .budget
+            .output_bytes
+            .checked_add(added_bytes)
+            .ok_or_else(|| ActionsError::limit("resolved output byte"))?;
+        if preflight_steps > self.limits.emitted_steps {
+            return Err(ActionsError::limit("emitted failure-step"));
+        }
+        if preflight_bytes > self.limits.output_bytes {
+            return Err(ActionsError::limit("resolved output byte"));
+        }
+        let excerpt = self.job_log(job.id).await?;
+        // The excerpt size is known only after its bounded download. Repeat the
+        // aggregate output preflight before allocating or cloning public output.
+        added_bytes = excerpt
+            .lines
+            .iter()
+            .try_fold(added_bytes, |total, line| total.checked_add(line.len()))
+            .ok_or_else(|| ActionsError::limit("resolved output byte"))?;
+        let next_steps = self
+            .budget
+            .emitted_steps
+            .checked_add(emitted)
+            .ok_or_else(|| ActionsError::limit("emitted failure-step"))?;
+        let next_bytes = self
+            .budget
+            .output_bytes
+            .checked_add(added_bytes)
+            .ok_or_else(|| ActionsError::limit("resolved output byte"))?;
+        if next_steps > self.limits.emitted_steps {
+            return Err(ActionsError::limit("emitted failure-step"));
+        }
+        if next_bytes > self.limits.output_bytes {
+            return Err(ActionsError::limit("resolved output byte"));
+        }
+        self.remaining()?;
+        let mut output = Vec::new();
+        output
+            .try_reserve_exact(emitted)
+            .map_err(|_| ActionsError::limit("resolved output allocation"))?;
+        let excerpt = copy_actions_excerpt(&excerpt)?;
+        if failed_step_count == 0 {
+            output.push(domain::CiFailureStep {
+                name: copy_actions_output(&job.name)?,
+                state: copy_actions_output(job_state)?,
+                log_excerpt: Some(excerpt),
+            });
+        } else {
+            let mut excerpt = Some(excerpt);
+            for (index, step) in job.steps.iter().filter(is_failed_step).enumerate() {
+                output.push(domain::CiFailureStep {
+                    name: actions_step_name(&job.name, &step.name)?,
+                    state: copy_actions_output(step.conclusion.as_deref().unwrap_or("error"))?,
+                    log_excerpt: if index == 0 { excerpt.take() } else { None },
+                });
+            }
+        }
+        self.remaining()?;
+        let pipeline_url = copy_actions_output(&run.html_url)?;
+        self.budget.emitted_steps = next_steps;
+        self.budget.output_bytes = next_bytes;
+        Ok(domain::CiResolution::Resolved {
+            provider: domain::CiProvider::GithubActions,
+            pipeline_url,
+            failed_steps: output,
+        })
+    }
+}
+
+fn is_failure_state(state: &domain::CommitStatusState) -> bool {
+    matches!(
+        state,
+        domain::CommitStatusState::Failure | domain::CommitStatusState::Error
+    )
+}
+
+fn same_url_origin(left: &Url, right: &Url) -> bool {
+    left.scheme() == right.scheme()
+        && left.host_str() == right.host_str()
+        && left.port_or_known_default() == right.port_or_known_default()
+}
+
+fn validate_signed_log_destination(
+    api: &Url,
+    destination: Url,
+    job_id: u64,
+) -> Result<Url, ActionsError> {
+    if !matches!(destination.scheme(), "http" | "https")
+        || destination.host_str().is_none_or(str::is_empty)
+        || !destination.username().is_empty()
+        || destination.password().is_some()
+        || (api.scheme() == "https" && destination.scheme() != "https")
+    {
+        return Err(ActionsError(format!(
+            "GitHub Actions job-log destination for job {job_id} failed security validation"
+        )));
+    }
+    Ok(destination)
+}
+
+fn utf8_prefix(value: &str, maximum: usize) -> &str {
+    if value.len() <= maximum {
+        return value;
+    }
+    let mut end = maximum;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
+}
+
+fn copy_actions_output(value: &str) -> Result<String, ActionsError> {
+    let mut output = String::new();
+    output
+        .try_reserve_exact(value.len())
+        .map_err(|_| ActionsError::limit("resolved output allocation"))?;
+    output.push_str(value);
+    Ok(output)
+}
+
+fn actions_step_name(job: &str, step: &str) -> Result<String, ActionsError> {
+    let length = job
+        .len()
+        .checked_add(3)
+        .and_then(|length| length.checked_add(step.len()))
+        .ok_or_else(|| ActionsError::limit("resolved output byte"))?;
+    let mut output = String::new();
+    output
+        .try_reserve_exact(length)
+        .map_err(|_| ActionsError::limit("resolved output allocation"))?;
+    output.push_str(job);
+    output.push_str(" / ");
+    output.push_str(step);
+    Ok(output)
+}
+
+fn copy_actions_excerpt(
+    excerpt: &domain::CiLogExcerpt,
+) -> Result<domain::CiLogExcerpt, ActionsError> {
+    let mut lines = Vec::new();
+    lines
+        .try_reserve_exact(excerpt.lines.len())
+        .map_err(|_| ActionsError::limit("resolved output allocation"))?;
+    for line in &excerpt.lines {
+        lines.push(copy_actions_output(line)?);
+    }
+    Ok(domain::CiLogExcerpt { lines })
+}
+
+async fn build_change_request_ci_details(
+    adapter: &GitHubAdapter,
+    repository: &RepositoryRef,
+    sha: &str,
+    credential: &ForgeCredential,
+    legacy_statuses: Vec<domain::CommitStatus>,
+    checks: Vec<GitHubCheckRun>,
+    limits: GitHubActionsResolutionLimits,
+) -> Result<domain::ChangeRequestCiDetails, ForgeError> {
+    let check_statuses: Vec<_> = checks
+        .iter()
+        .map(|check| {
+            let state = if check.status == "completed" {
+                parse_status_state(check.conclusion.as_deref().unwrap_or("error"))
+            } else {
+                domain::CommitStatusState::Pending
+            };
+            domain::CommitStatus {
+                context: check.name.clone(),
+                description: check
+                    .conclusion
+                    .clone()
+                    .unwrap_or_else(|| check.status.clone()),
+                state,
+                target_url: check.details_url.clone().unwrap_or_default(),
+            }
+        })
+        .collect();
+    let mut statuses = legacy_statuses.clone();
+    statuses.extend(check_statuses.iter().cloned());
+    let state = aggregate_statuses(&statuses);
+    let mut details: Vec<_> = legacy_statuses
+        .into_iter()
+        .map(|status| domain::CiCheckDetail {
+            context: status.context,
+            description: status.description,
+            state: status.state,
+            target_url: status.target_url,
+            resolution: domain::CiResolution::Unsupported,
+        })
+        .collect();
+    let mut resolver = GitHubActionsResolver::new(adapter, repository, sha, credential, limits)?;
+    details.try_reserve_exact(checks.len()).map_err(|_| {
+        ForgeError::InvalidPayload("unable to allocate CI check details".to_string())
+    })?;
+    for (check, status) in checks.iter().zip(check_statuses) {
+        let eligible = check.status == "completed"
+            && is_failure_state(&status.state)
+            && check.app.as_ref().and_then(|app| app.slug.as_deref()) == Some("github-actions");
+        let resolution = if eligible {
+            match resolver.resolve(check).await {
+                Ok(resolution) => resolution,
+                Err(error) => domain::CiResolution::Error { message: error.0 },
+            }
+        } else {
+            domain::CiResolution::Unsupported
+        };
+        details.push(domain::CiCheckDetail {
+            context: status.context,
+            description: status.description,
+            state: status.state,
+            target_url: status.target_url,
+            resolution,
+        });
+    }
+    Ok(domain::ChangeRequestCiDetails {
+        head_sha: sha.to_string(),
+        state,
+        details,
+    })
 }
 
 #[async_trait]
@@ -1328,7 +2437,7 @@ impl crate::ForgeAdapter for GitHubAdapter {
         sha: &str,
         credential: &ForgeCredential,
     ) -> Result<domain::ChangeRequestCiDetails, ForgeError> {
-        let mut statuses = self
+        let legacy_statuses = self
             .get_combined_commit_status(repository, sha, credential)
             .await?
             .statuses;
@@ -1339,35 +2448,16 @@ impl crate::ForgeAdapter for GitHubAdapter {
             urlencoding::encode(sha)
         );
         let checks = self.get_check_run_pages(&url, credential).await?;
-        statuses.extend(checks.into_iter().map(|check| {
-            let state = if check.status == "completed" {
-                parse_status_state(check.conclusion.as_deref().unwrap_or("error"))
-            } else {
-                domain::CommitStatusState::Pending
-            };
-            domain::CommitStatus {
-                context: check.name,
-                description: check.conclusion.unwrap_or(check.status),
-                state,
-                target_url: check.details_url.unwrap_or_default(),
-            }
-        }));
-        let state = aggregate_statuses(&statuses);
-        let details = statuses
-            .into_iter()
-            .map(|status| domain::CiCheckDetail {
-                context: status.context,
-                description: status.description,
-                state: status.state,
-                target_url: status.target_url,
-                resolution: domain::CiResolution::Unsupported,
-            })
-            .collect();
-        Ok(domain::ChangeRequestCiDetails {
-            head_sha: sha.to_string(),
-            state,
-            details,
-        })
+        build_change_request_ci_details(
+            self,
+            repository,
+            sha,
+            credential,
+            legacy_statuses,
+            checks,
+            GitHubActionsResolutionLimits::default(),
+        )
+        .await
     }
 
     async fn get_default_merge_style(
