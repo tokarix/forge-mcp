@@ -115,7 +115,11 @@ these repository permissions:
 - **Issues:** read and write
 - **Pull requests:** read and write
 - **Commit statuses:** read and write
-- **Checks:** read
+- **Checks:** read (discovers check runs)
+- **Actions:** read (resolves workflow runs, attempts, jobs, and logs)
+
+Existing GitHub App installations must approve the added **Actions: read**
+permission before failed-job resolution works for private repositories.
 
 If webhooks are enabled, subscribe each App to **Issues**, **Issue comments**,
 **Pull requests**, and **Pull request reviews**, and configure the same webhook
