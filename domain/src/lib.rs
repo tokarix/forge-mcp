@@ -787,6 +787,7 @@ pub enum CiResolution {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CiProvider {
+    GithubActions,
     Woodpecker,
 }
 
@@ -1780,22 +1781,39 @@ mod tests {
             head_sha: "abc123".to_string(),
             state: CommitStatusState::Failure,
             details: vec![CiCheckDetail {
-                context: "ci/woodpecker".to_string(),
+                context: "build".to_string(),
                 description: "failed".to_string(),
                 state: CommitStatusState::Failure,
-                target_url: "https://ci.example/repos/1/pipeline/42".to_string(),
+                target_url: "https://github.example/checks/42".to_string(),
                 resolution: CiResolution::Resolved {
-                    provider: CiProvider::Woodpecker,
-                    pipeline_url: "https://ci.example/repos/1/pipeline/42".to_string(),
-                    failed_steps: vec![],
+                    provider: CiProvider::GithubActions,
+                    pipeline_url: "https://github.example/actions/runs/7".to_string(),
+                    failed_steps: vec![super::CiFailureStep {
+                        name: "build / test".to_string(),
+                        state: "failure".to_string(),
+                        log_excerpt: Some(super::CiLogExcerpt {
+                            lines: vec!["assertion failed".to_string()],
+                        }),
+                    }],
                 },
             }],
         };
         let json = serde_json::to_value(&details).expect("should serialize");
         assert_eq!(json["head_sha"], "abc123");
         assert_eq!(json["state"], "Failure");
-        assert_eq!(json["details"][0]["context"], "ci/woodpecker");
+        assert_eq!(json["details"][0]["context"], "build");
         assert_eq!(json["details"][0]["resolution"]["type"], "resolved");
-        assert_eq!(json["details"][0]["resolution"]["provider"], "woodpecker");
+        assert_eq!(
+            json["details"][0]["resolution"]["provider"],
+            "github_actions"
+        );
+        assert_eq!(
+            json["details"][0]["resolution"]["failed_steps"][0]["name"],
+            "build / test"
+        );
+        assert_eq!(
+            json["details"][0]["resolution"]["failed_steps"][0]["log_excerpt"]["lines"][0],
+            "assertion failed"
+        );
     }
 }
