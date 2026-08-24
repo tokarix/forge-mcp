@@ -127,6 +127,30 @@ secret on the Apps and in forge-mcp. Webhook-driven auto-merge additionally
 requires a forge-level token or `[forges.github_app]`; auto-merge must also be
 enabled in the target repository.
 
+## Auto-merge scheduling
+
+Approval webhooks schedule auto-merge by default for compatibility. Operators
+can disable only that scheduling side effect while continuing to verify,
+normalize, and deliver webhook events:
+
+```toml
+[forges.webhook]
+secret = "webhook-secret"
+auto_merge = false
+```
+
+Webhook-triggered scheduling is an unattended system action and therefore uses
+the forge-level token or system GitHub App. Authenticated HTTP and MCP callers
+instead retain their resolved per-forge identity (including a managed GitHub
+App), so the upstream scheduling action is attributed to the caller.
+
+The `schedule_auto_merge` merge style is optional. An explicit value must use a
+canonical name: `merge`, `rebase`, `rebase-merge`, `squash`, or
+`fast-forward-only`. When omitted, forge-mcp uses the repository default if it
+is allowed, then prefers `rebase`, `squash`, and `merge` in that order, and
+finally uses the first allowed canonical style. The expected full head SHA
+remains required.
+
 For GitHub.com, `base_url = "https://github.com"` automatically selects
 `https://api.github.com`. For GitHub Enterprise Server, forge-mcp derives
 `<base_url>/api/v3`; set `api_url` explicitly for a nonstandard API endpoint.

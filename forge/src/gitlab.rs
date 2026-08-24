@@ -556,6 +556,15 @@ struct GitLabProjectResponse {
 }
 
 impl GitLabProjectResponse {
+    fn canonical_merge_style(provider_style: &str) -> Option<&'static str> {
+        match provider_style {
+            "merge" => Some("merge"),
+            "rebase_merge" => Some("rebase-merge"),
+            "ff" => Some("fast-forward-only"),
+            _ => None,
+        }
+    }
+
     fn allowed_merge_styles(&self) -> Vec<String> {
         // GitLab's merge_method can be: "merge", "rebase_merge", or "ff".
         // Squash is controlled separately via squash_option.
@@ -563,13 +572,13 @@ impl GitLabProjectResponse {
         match self.merge_method.as_deref() {
             Some("merge") => {
                 styles.push("merge".to_string());
-                styles.push("rebase_merge".to_string());
+                styles.push("rebase-merge".to_string());
             }
             Some("rebase_merge") => {
-                styles.push("rebase_merge".to_string());
+                styles.push("rebase-merge".to_string());
             }
             Some("ff") => {
-                styles.push("ff".to_string());
+                styles.push("fast-forward-only".to_string());
             }
             _ => {
                 styles.push("merge".to_string());
@@ -584,7 +593,10 @@ impl GitLabProjectResponse {
     }
 
     fn default_merge_style(&self) -> Option<String> {
-        self.merge_method.clone()
+        self.merge_method
+            .as_deref()
+            .and_then(Self::canonical_merge_style)
+            .map(str::to_string)
     }
 
     fn into_repository_merge_settings(self) -> RepositoryMergeSettings {
@@ -2404,10 +2416,41 @@ mod tests {
             squash_option: Some("default_off".to_string()),
             remove_source_branch_after_merge: Some(true),
         };
-        let styles = project.allowed_merge_styles();
-        assert!(styles.contains(&"merge".to_string()));
-        assert!(styles.contains(&"rebase_merge".to_string()));
-        assert!(styles.contains(&"squash".to_string()));
+        let settings = project.into_repository_merge_settings();
+        assert_eq!(
+            settings.allowed_styles,
+            vec!["merge", "rebase-merge", "squash"]
+        );
+        assert_eq!(settings.default_merge_style.as_deref(), Some("merge"));
+        assert_eq!(settings.default_delete_branch_after_merge, Some(true));
+        assert!(
+            !settings
+                .allowed_styles
+                .iter()
+                .any(|style| style == "rebase_merge" || style == "ff")
+        );
+    }
+
+    #[test]
+    fn project_merge_styles_rebase_merge_method() {
+        let project = GitLabProjectResponse {
+            merge_method: Some("rebase_merge".to_string()),
+            squash_option: Some("default_on".to_string()),
+            remove_source_branch_after_merge: Some(false),
+        };
+        let settings = project.into_repository_merge_settings();
+        assert_eq!(settings.allowed_styles, vec!["rebase-merge", "squash"]);
+        assert_eq!(
+            settings.default_merge_style.as_deref(),
+            Some("rebase-merge")
+        );
+        assert_eq!(settings.default_delete_branch_after_merge, Some(false));
+        assert!(
+            !settings
+                .allowed_styles
+                .iter()
+                .any(|style| style == "rebase_merge" || style == "ff")
+        );
     }
 
     #[test]
@@ -2417,8 +2460,19 @@ mod tests {
             squash_option: Some("never".to_string()),
             remove_source_branch_after_merge: None,
         };
-        let styles = project.allowed_merge_styles();
-        assert_eq!(styles, vec!["ff"]);
+        let settings = project.into_repository_merge_settings();
+        assert_eq!(settings.allowed_styles, vec!["fast-forward-only"]);
+        assert_eq!(
+            settings.default_merge_style.as_deref(),
+            Some("fast-forward-only")
+        );
+        assert_eq!(settings.default_delete_branch_after_merge, None);
+        assert!(
+            !settings
+                .allowed_styles
+                .iter()
+                .any(|style| style == "rebase_merge" || style == "ff")
+        );
     }
 
     #[test]

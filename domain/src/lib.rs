@@ -115,8 +115,15 @@ pub struct ChangeRequest {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepositoryMergeSettings {
+    /// Merge styles in the canonical scheduler namespace: `merge`, `rebase`,
+    /// `rebase-merge`, `squash`, or `fast-forward-only`.
+    ///
+    /// Forge adapters must translate provider-native names before constructing
+    /// this domain type.
     pub allowed_styles: Vec<String>,
     pub default_delete_branch_after_merge: Option<bool>,
+    /// The repository default in the same canonical scheduler namespace as
+    /// `allowed_styles`.
     pub default_merge_style: Option<String>,
 }
 
@@ -956,7 +963,9 @@ pub struct ScheduleAutoMergeRequest {
     pub delete_branch_after_merge: Option<bool>,
     pub expected_head_sha: String,
     pub index: u64,
-    pub merge_style: String,
+    /// An explicit canonical merge style, or `None` to select from repository
+    /// merge settings.
+    pub merge_style: Option<String>,
     pub repository: RepositoryRef,
 }
 

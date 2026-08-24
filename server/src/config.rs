@@ -73,7 +73,13 @@ pub struct ForgeConfig {
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct ForgeWebhookConfig {
+    #[serde(default = "default_webhook_auto_merge")]
+    pub auto_merge: bool,
     pub secret: String,
+}
+
+const fn default_webhook_auto_merge() -> bool {
+    true
 }
 
 /// Credentials for a GitHub App installation.
@@ -553,6 +559,9 @@ type = "forgejo"
 base_url = "https://forge.example"
 token = "forgejo-api-token"
 
+[forges.webhook]
+secret = "distinctive-webhook-secret"
+
 [[forges]]
 alias = "client-a"
 type = "forgejo"
@@ -732,6 +741,45 @@ session_id = "s"
                 .as_ref()
                 .map(|webhook| webhook.secret.as_str()),
             Some("super-secret")
+        );
+        assert!(
+            config.forges[0]
+                .webhook
+                .as_ref()
+                .expect("webhook")
+                .auto_merge
+        );
+    }
+
+    #[test]
+    fn parses_disabled_forge_webhook_auto_merge() {
+        let toml_str = r#"
+[server]
+listen = "0.0.0.0:8443"
+
+[[forges]]
+alias = "public"
+type = "forgejo"
+base_url = "https://public.example"
+
+[forges.webhook]
+secret = "super-secret"
+auto_merge = false
+
+[[agents]]
+token = "t"
+agent_id = "a"
+session_id = "s"
+
+[agents.policy]
+"#;
+        let config = parse_config(toml_str).expect("should parse");
+        assert!(
+            !config.forges[0]
+                .webhook
+                .as_ref()
+                .expect("webhook")
+                .auto_merge
         );
     }
 
@@ -1638,6 +1686,7 @@ allowed_repos = ["github/org/repo"]
         assert!(!debug.contains("bearer-token-for-claude"));
         assert!(!debug.contains("codex-bot-forgejo-token"));
         assert!(!debug.contains("claude-bot-forgejo-token"));
+        assert!(!debug.contains("distinctive-webhook-secret"));
         assert!(debug.contains("[REDACTED]"));
     }
 }

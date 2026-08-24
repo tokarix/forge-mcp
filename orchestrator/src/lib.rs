@@ -531,6 +531,43 @@ fn validate_rebase_operations(
     Ok(())
 }
 
+fn validate_merge_style(style: &str) -> Result<(), ServiceError> {
+    match style {
+        "fast-forward-only" | "merge" | "rebase" | "rebase-merge" | "squash" => Ok(()),
+        other => Err(ServiceError::Validation(format!(
+            "invalid merge style '{other}': must be rebase, rebase-merge, merge, squash, or fast-forward-only"
+        ))),
+    }
+}
+
+fn choose_merge_style(settings: &domain::RepositoryMergeSettings) -> Result<String, ServiceError> {
+    if settings.allowed_styles.is_empty() {
+        return Err(ServiceError::Validation(
+            "repository has no allowed merge styles".to_string(),
+        ));
+    }
+
+    if let Some(default) = settings.default_merge_style.as_ref()
+        && settings.allowed_styles.contains(default)
+    {
+        return Ok(default.clone());
+    }
+
+    for preferred in ["rebase", "squash", "merge"] {
+        if settings
+            .allowed_styles
+            .iter()
+            .any(|style| style == preferred)
+        {
+            return Ok(preferred.to_string());
+        }
+    }
+
+    settings.allowed_styles.first().cloned().ok_or_else(|| {
+        ServiceError::Validation("repository has no allowed merge styles".to_string())
+    })
+}
+
 pub struct WriteOrchestrator<A, S>
 where
     A: ForgeAdapter,
@@ -1301,14 +1338,9 @@ where
         _authorized: domain::policy::AuthorizedWrite,
         credential: &ForgeCredential,
     ) -> Result<(), ServiceError> {
-        // 1. Validate merge_style
-        match request.merge_style.as_str() {
-            "fast-forward-only" | "merge" | "rebase" | "rebase-merge" | "squash" => {}
-            other => {
-                return Err(ServiceError::Validation(format!(
-                    "invalid merge style '{other}': must be rebase, rebase-merge, merge, squash, or fast-forward-only"
-                )));
-            }
+        // 1. Validate an explicit merge style before making upstream calls.
+        if let Some(style) = request.merge_style.as_deref() {
+            validate_merge_style(style)?;
         }
 
         // 2. Fetch PR to verify head SHA
@@ -1340,14 +1372,20 @@ where
             .await
             .map_err(|e| ServiceError::Upstream(e.to_string()))?;
 
+        let merge_style = match request.merge_style {
+            Some(style) => style,
+            None => choose_merge_style(&merge_settings)?,
+        };
+        validate_merge_style(&merge_style)?;
+
         if !merge_settings
             .allowed_styles
             .iter()
-            .any(|s| s == &request.merge_style)
+            .any(|s| s == &merge_style)
         {
             return Err(ServiceError::Validation(format!(
                 "merge style '{}' is not allowed by this repository (allowed: {})",
-                request.merge_style,
+                merge_style,
                 merge_settings.allowed_styles.join(", "),
             )));
         }
@@ -1364,7 +1402,7 @@ where
                 repository: request.repository.clone(),
                 target: format!(
                     "schedule_auto_merge {} head:{} #{}",
-                    request.merge_style, current_sha, request.index
+                    merge_style, current_sha, request.index
                 ),
             })
             .await
@@ -1375,7 +1413,7 @@ where
             .schedule_auto_merge(
                 &request.repository,
                 request.index,
-                &request.merge_style,
+                &merge_style,
                 &current_sha,
                 delete_branch_after_merge,
                 credential,
@@ -5090,9 +5128,11 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
     struct AutoMergeTestForgeAdapter {
         allowed_merge_styles: Vec<String>,
         default_delete_branch_after_merge: Option<bool>,
+        default_merge_style: Option<String>,
         head_sha: Option<String>,
         recorded_commit_statuses: Mutex<Vec<(String, String)>>,
         recorded_delete_branch_after_merge: Mutex<Vec<Option<bool>>>,
+        recorded_merge_styles: Mutex<Vec<String>>,
     }
 
     impl AutoMergeTestForgeAdapter {
@@ -5100,9 +5140,11 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             Self {
                 allowed_merge_styles: vec!["rebase".to_string(), "squash".to_string()],
                 default_delete_branch_after_merge: Some(true),
+                default_merge_style: Some("rebase".to_string()),
                 head_sha: Some(head_sha.to_string()),
                 recorded_commit_statuses: Mutex::new(Vec::new()),
                 recorded_delete_branch_after_merge: Mutex::new(Vec::new()),
+                recorded_merge_styles: Mutex::new(Vec::new()),
             }
         }
 
@@ -5115,6 +5157,13 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
 
         fn recorded_delete_branch_after_merge(&self) -> Vec<Option<bool>> {
             self.recorded_delete_branch_after_merge
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
+
+        fn recorded_merge_styles(&self) -> Vec<String> {
+            self.recorded_merge_styles
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone()
@@ -5414,7 +5463,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             Ok(domain::RepositoryMergeSettings {
                 allowed_styles: self.allowed_merge_styles.clone(),
                 default_delete_branch_after_merge: self.default_delete_branch_after_merge,
-                default_merge_style: Some("rebase".to_string()),
+                default_merge_style: self.default_merge_style.clone(),
             })
         }
 
@@ -5445,11 +5494,15 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             &self,
             _repository: &RepositoryRef,
             _index: u64,
-            _merge_style: &str,
+            merge_style: &str,
             _head_commit_id: &str,
             delete_branch_after_merge: Option<bool>,
             _credential: &domain::ForgeCredential,
         ) -> Result<(), ForgeError> {
+            self.recorded_merge_styles
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(merge_style.to_string());
             self.recorded_delete_branch_after_merge
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -5532,7 +5585,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             delete_branch_after_merge: None,
             expected_head_sha: expected_head_sha.to_string(),
             index: 42,
-            merge_style: merge_style.to_string(),
+            merge_style: Some(merge_style.to_string()),
             repository: RepositoryRef {
                 alias: "test".to_string(),
                 forge: ForgeKind::Forgejo,
@@ -5541,6 +5594,14 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
                 owner: "org".to_string(),
             },
         }
+    }
+
+    fn omitted_auto_merge_test_request(
+        expected_head_sha: &str,
+    ) -> domain::ScheduleAutoMergeRequest {
+        let mut request = auto_merge_test_request("rebase", expected_head_sha);
+        request.merge_style = None;
+        request
     }
 
     #[tokio::test]
@@ -5557,6 +5618,122 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             )
             .await
             .expect("should succeed");
+    }
+
+    #[tokio::test]
+    async fn schedule_auto_merge_uses_allowed_repository_default_when_style_omitted() {
+        let mut fake = AutoMergeTestForgeAdapter::new("abc123");
+        fake.allowed_merge_styles = vec!["merge".to_string(), "squash".to_string()];
+        fake.default_merge_style = Some("squash".to_string());
+        let adapter = Arc::new(fake);
+        let audit = Arc::new(InMemoryAuditSink::new());
+        let orchestrator = WriteOrchestrator::new(Arc::clone(&adapter), audit, None);
+
+        orchestrator
+            .schedule_auto_merge(
+                omitted_auto_merge_test_request("abc123"),
+                default_authorized(),
+                &domain::ForgeCredential { token: None },
+            )
+            .await
+            .expect("should use repository default");
+
+        assert_eq!(adapter.recorded_merge_styles(), vec!["squash"]);
+    }
+
+    #[tokio::test]
+    async fn schedule_auto_merge_uses_fallback_order_when_default_disallowed() {
+        let mut fake = AutoMergeTestForgeAdapter::new("abc123");
+        fake.allowed_merge_styles = vec!["merge".to_string(), "squash".to_string()];
+        fake.default_merge_style = Some("rebase".to_string());
+        let adapter = Arc::new(fake);
+        let audit = Arc::new(InMemoryAuditSink::new());
+        let orchestrator = WriteOrchestrator::new(Arc::clone(&adapter), audit, None);
+
+        orchestrator
+            .schedule_auto_merge(
+                omitted_auto_merge_test_request("abc123"),
+                default_authorized(),
+                &domain::ForgeCredential { token: None },
+            )
+            .await
+            .expect("should use fallback order");
+
+        assert_eq!(adapter.recorded_merge_styles(), vec!["squash"]);
+    }
+
+    #[tokio::test]
+    async fn schedule_auto_merge_uses_first_allowed_style_as_last_resort() {
+        let mut fake = AutoMergeTestForgeAdapter::new("abc123");
+        fake.allowed_merge_styles =
+            vec!["rebase-merge".to_string(), "fast-forward-only".to_string()];
+        fake.default_merge_style = None;
+        let adapter = Arc::new(fake);
+        let audit = Arc::new(InMemoryAuditSink::new());
+        let orchestrator = WriteOrchestrator::new(Arc::clone(&adapter), audit, None);
+
+        orchestrator
+            .schedule_auto_merge(
+                omitted_auto_merge_test_request("abc123"),
+                default_authorized(),
+                &domain::ForgeCredential { token: None },
+            )
+            .await
+            .expect("should use first allowed style");
+
+        assert_eq!(adapter.recorded_merge_styles(), vec!["rebase-merge"]);
+    }
+
+    #[tokio::test]
+    async fn schedule_auto_merge_rejects_empty_allowed_styles_when_style_omitted() {
+        let mut fake = AutoMergeTestForgeAdapter::new("abc123");
+        fake.allowed_merge_styles = Vec::new();
+        fake.default_merge_style = None;
+        let adapter = Arc::new(fake);
+        let audit = Arc::new(InMemoryAuditSink::new());
+        let orchestrator = WriteOrchestrator::new(Arc::clone(&adapter), Arc::clone(&audit), None);
+
+        let error = orchestrator
+            .schedule_auto_merge(
+                omitted_auto_merge_test_request("abc123"),
+                default_authorized(),
+                &domain::ForgeCredential { token: None },
+            )
+            .await
+            .expect_err("empty allowed styles should fail");
+
+        assert!(matches!(error, ServiceError::Validation(_)));
+        assert!(adapter.recorded_merge_styles().is_empty());
+        assert!(audit.records().expect("audit records").is_empty());
+    }
+
+    #[tokio::test]
+    async fn schedule_auto_merge_preserves_canonical_gitlab_defaults() {
+        for style in ["rebase-merge", "fast-forward-only"] {
+            let mut fake = AutoMergeTestForgeAdapter::new("abc123");
+            fake.allowed_merge_styles = vec![style.to_string(), "squash".to_string()];
+            fake.default_merge_style = Some(style.to_string());
+            let adapter = Arc::new(fake);
+            let audit = Arc::new(InMemoryAuditSink::new());
+            let orchestrator =
+                WriteOrchestrator::new(Arc::clone(&adapter), Arc::clone(&audit), None);
+
+            orchestrator
+                .schedule_auto_merge(
+                    omitted_auto_merge_test_request("abc123"),
+                    default_authorized(),
+                    &domain::ForgeCredential { token: None },
+                )
+                .await
+                .expect("canonical GitLab default should schedule");
+
+            assert_eq!(adapter.recorded_merge_styles(), vec![style]);
+            assert!(
+                audit.records().expect("audit records")[0]
+                    .target
+                    .contains(style)
+            );
+        }
     }
 
     #[tokio::test]
@@ -5602,9 +5779,11 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
         let adapter = Arc::new(AutoMergeTestForgeAdapter {
             allowed_merge_styles: vec!["rebase".to_string(), "squash".to_string()],
             default_delete_branch_after_merge: Some(true),
+            default_merge_style: Some("rebase".to_string()),
             head_sha: None,
             recorded_commit_statuses: Mutex::new(Vec::new()),
             recorded_delete_branch_after_merge: Mutex::new(Vec::new()),
+            recorded_merge_styles: Mutex::new(Vec::new()),
         });
         let audit = Arc::new(InMemoryAuditSink::new());
         let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit), None);

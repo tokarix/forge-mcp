@@ -349,6 +349,7 @@ pub async fn post_webhook(
         );
 
         if let domain::WebhookEvent::PullRequestReview(ref review) = event
+            && webhook.auto_merge
             && matches!(status, crate::events::PublishStatus::Enqueued { .. })
             && review.review_state == domain::ReviewState::Approved
         {
@@ -2373,6 +2374,41 @@ mod tests {
 
     struct FakeForgeAdapter;
 
+    struct ApprovedReviewWebhookAdapter;
+
+    impl forge::ForgeWebhookAdapter for ApprovedReviewWebhookAdapter {
+        fn verify_and_parse_webhook_event(
+            &self,
+            _headers: &[(String, String)],
+            _body: &[u8],
+            forge_alias: &str,
+            forge_kind: domain::ForgeKind,
+            host: &str,
+            _secret: &str,
+        ) -> Result<Option<domain::WebhookEvent>, forge::ForgeWebhookError> {
+            Ok(Some(domain::WebhookEvent::PullRequestReview(
+                domain::PullRequestReviewEvent {
+                    action: domain::PullRequestReviewEventAction::Submitted,
+                    delivery_id: "approved-review-delivery".to_string(),
+                    head_sha: "abc123".to_string(),
+                    index: 42,
+                    repository: domain::RepositoryRef {
+                        alias: forge_alias.to_string(),
+                        forge: forge_kind,
+                        host: host.to_string(),
+                        name: "repo".to_string(),
+                        owner: "org".to_string(),
+                    },
+                    review_body: "approved".to_string(),
+                    review_id: 7,
+                    review_state: domain::ReviewState::Approved,
+                    title: "Fix".to_string(),
+                    url: "https://forge.example/org/repo/pulls/42".to_string(),
+                },
+            )))
+        }
+    }
+
     impl forge::ForgeWebhookAdapter for FakeForgeAdapter {
         fn verify_and_parse_webhook_event(
             &self,
@@ -3014,10 +3050,13 @@ mod tests {
         }
     }
 
+    type CapturedAutoMerge = Vec<(domain::ScheduleAutoMergeRequest, Option<String>)>;
+
     #[allow(clippy::struct_field_names)]
     struct FakeWriteService {
         captured_close_msg: Arc<Mutex<Option<String>>>,
         captured_add_dep: Arc<Mutex<Option<domain::AddIssueDependencyRequest>>>,
+        captured_auto_merge: Arc<Mutex<CapturedAutoMerge>>,
         captured_remove_dep: Arc<Mutex<Option<domain::RemoveIssueDependencyRequest>>>,
     }
 
@@ -3026,6 +3065,7 @@ mod tests {
             Self {
                 captured_close_msg: Arc::new(Mutex::new(None)),
                 captured_add_dep: Arc::new(Mutex::new(None)),
+                captured_auto_merge: Arc::new(Mutex::new(Vec::new())),
                 captured_remove_dep: Arc::new(Mutex::new(None)),
             }
         }
@@ -3240,10 +3280,14 @@ mod tests {
 
         async fn schedule_auto_merge(
             &self,
-            _request: domain::ScheduleAutoMergeRequest,
+            request: domain::ScheduleAutoMergeRequest,
             _authorized: domain::policy::AuthorizedWrite,
-            _credential: &domain::ForgeCredential,
+            credential: &domain::ForgeCredential,
         ) -> Result<(), ServiceError> {
+            self.captured_auto_merge
+                .lock()
+                .expect("poisoned")
+                .push((request, credential.token.clone()));
             Ok(())
         }
 
@@ -3337,7 +3381,7 @@ mod tests {
             forge_type: "forgejo".to_string(),
             git_auth_user: String::new(),
             read_service: Arc::new(FakeReadService::new()),
-            token: None,
+            token: Some("forge-fallback-token".to_string()),
             webhook: None,
             webhook_adapter: Arc::new(FakeForgeAdapter),
             write_service,
@@ -3358,9 +3402,15 @@ mod tests {
     }
 
     fn test_state_with_write(write_svc: Arc<FakeWriteService>) -> AppState {
+        let forge_identity = std::collections::HashMap::from([(
+            "test-forge".to_string(),
+            crate::config::ForgeIdentityConfig {
+                token: "caller-forge-token".to_string(),
+            },
+        )]);
         let configs = vec![crate::config::AgentConfig {
             agent_id: "codex".to_string(),
-            forge_identity: std::collections::HashMap::new(),
+            forge_identity,
             github_app: std::collections::HashMap::new(),
             policy: AgentPolicyConfig {
                 allowed_repos: vec!["test-forge/org/repo".to_string()],
@@ -3384,6 +3434,46 @@ mod tests {
             event_bus: crate::events::EventBus::new(),
             forge_registry: Arc::new(crate::registry::ForgeRegistry::new(forges)),
         }
+    }
+
+    fn webhook_test_state(
+        auto_merge: bool,
+        write_svc: Arc<FakeWriteService>,
+    ) -> (
+        AppState,
+        tokio::sync::mpsc::Receiver<crate::events::QueuedEvent>,
+    ) {
+        let event_bus = crate::events::EventBus::new();
+        let receiver = event_bus.subscribe(
+            "codex".to_string(),
+            AgentPolicyConfig {
+                allowed_repos: vec!["test-forge/org/repo".to_string()],
+                branch_prefix: Some("agent/".to_string()),
+                protected_paths: vec![],
+            },
+            "webhook-test".to_string(),
+            None,
+        );
+        let mut forge = test_forge_instance("test-forge", "https://forge.example", write_svc);
+        forge.webhook = Some(crate::config::ForgeWebhookConfig {
+            auto_merge,
+            secret: "distinctive-webhook-secret".to_string(),
+        });
+        forge.webhook_adapter = Arc::new(ApprovedReviewWebhookAdapter);
+        let registry = Arc::new(crate::registry::ForgeRegistry::new(
+            std::collections::HashMap::from([("test-forge".to_string(), forge)]),
+        ));
+        let state = AppState {
+            agent_registry: AgentRegistry::from_configs(&[]),
+            audit_sink: Arc::new(audit::InMemoryAuditSink::new()),
+            auto_merge_service: Arc::new(crate::auto_merge::AutoMergeService::new(
+                event_bus.clone(),
+                Arc::clone(&registry),
+            )),
+            event_bus,
+            forge_registry: registry,
+        };
+        (state, receiver)
     }
 
     fn test_state_with_read(
@@ -4274,6 +4364,132 @@ mod tests {
                 .expect("error field is a string")
                 .contains("message is required"),
         );
+    }
+
+    #[tokio::test]
+    async fn webhook_approval_does_not_schedule_when_auto_merge_disabled() {
+        let write_svc = Arc::new(FakeWriteService::new());
+        let (state, mut events) = webhook_test_state(false, Arc::clone(&write_svc));
+        let app = crate::build_router(state, false);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/forges/test-forge/webhook")
+                    .body(Body::from("{}"))
+                    .expect("build request"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let published = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
+            .await
+            .expect("event should be published");
+        assert!(published.is_some());
+        assert!(
+            write_svc
+                .captured_auto_merge
+                .lock()
+                .expect("poisoned")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn webhook_approval_schedules_when_auto_merge_enabled() {
+        let write_svc = Arc::new(FakeWriteService::new());
+        let (state, mut events) = webhook_test_state(true, Arc::clone(&write_svc));
+        let app = crate::build_router(state, false);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/forges/test-forge/webhook")
+                    .body(Body::from("{}"))
+                    .expect("build request"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        assert!(events.recv().await.is_some());
+        for _ in 0..10 {
+            if !write_svc
+                .captured_auto_merge
+                .lock()
+                .expect("poisoned")
+                .is_empty()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        let records = write_svc.captured_auto_merge.lock().expect("poisoned");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].0.merge_style, None);
+        assert_eq!(records[0].0.delete_branch_after_merge, None);
+        assert_eq!(records[0].1.as_deref(), Some("forge-fallback-token"));
+    }
+
+    #[tokio::test]
+    async fn schedule_auto_merge_without_style_uses_caller_forge_identity() {
+        let write_svc = Arc::new(FakeWriteService::new());
+        let app = crate::build_router(test_state_with_write(Arc::clone(&write_svc)), false);
+        let body = serde_json::json!({"expected_head_sha": "abc123"});
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos/test-forge/org/repo/pulls/42/automerge")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&body).expect("serialize body"),
+                    ))
+                    .expect("build request"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let records = write_svc.captured_auto_merge.lock().expect("poisoned");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].0.merge_style, None);
+        assert_eq!(records[0].1.as_deref(), Some("caller-forge-token"));
+        assert_ne!(records[0].1.as_deref(), Some("forge-fallback-token"));
+    }
+
+    #[tokio::test]
+    async fn schedule_auto_merge_preserves_explicit_style() {
+        let write_svc = Arc::new(FakeWriteService::new());
+        let app = crate::build_router(test_state_with_write(Arc::clone(&write_svc)), false);
+        let body = serde_json::json!({
+            "expected_head_sha": "abc123",
+            "merge_style": "rebase-merge"
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos/test-forge/org/repo/pulls/42/automerge")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&body).expect("serialize body"),
+                    ))
+                    .expect("build request"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let records = write_svc.captured_auto_merge.lock().expect("poisoned");
+        assert_eq!(records[0].0.merge_style.as_deref(), Some("rebase-merge"));
     }
 
     #[tokio::test]

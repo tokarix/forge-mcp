@@ -573,8 +573,10 @@ pub struct ScheduleAutoMergeTool {
     /// Change request index number.
     #[serde(deserialize_with = "serde_aux::field_attributes::deserialize_number_from_string")]
     pub index: u64,
-    /// Merge style: rebase, rebase-merge, merge, squash, or fast-forward-only.
-    pub merge_style: String,
+    /// Optional canonical merge style: rebase, rebase-merge, merge, squash,
+    /// or fast-forward-only. Omit to use the allowed repository default, then
+    /// the scheduler fallback order.
+    pub merge_style: Option<String>,
     /// Repository owner or organization.
     pub owner: String,
     /// Repository name.
@@ -586,7 +588,8 @@ struct ScheduleAutoMergeBody {
     #[serde(skip_serializing_if = "Option::is_none")]
     delete_branch_after_merge: Option<bool>,
     expected_head_sha: String,
-    merge_style: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    merge_style: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -2073,7 +2076,7 @@ impl McpShim {
     /// Schedule a pull request for automatic merge when all checks pass.
     #[tool(
         name = "schedule_auto_merge",
-        description = "Schedule a pull request for automatic merge when all branch protection requirements are met. Requires the expected head SHA to prevent scheduling on a stale PR."
+        description = "Schedule a pull request for automatic merge when all branch protection requirements are met. Requires the expected head SHA to prevent scheduling on a stale PR. The merge style is optional; when omitted, the repository default is used when allowed, followed by the scheduler fallback order."
     )]
     async fn schedule_auto_merge(
         &self,
@@ -3664,7 +3667,7 @@ mod tests {
             expected_head_sha: "sha".to_string(),
             forge: "test".to_string(),
             index: 1,
-            merge_style: "rebase".to_string(),
+            merge_style: Some("rebase".to_string()),
             owner: "owner".to_string(),
             repo: "repo".to_string(),
         };
@@ -4000,6 +4003,53 @@ mod tests {
         assert_eq!(body["delete_branch_after_merge"], true);
         assert_eq!(body["expected_head_sha"], "abc123");
         assert_eq!(body["merge_style"], "rebase");
+
+        drop(client);
+        server_handle.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn schedule_auto_merge_omits_merge_style_when_unspecified()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mock_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path(
+                "/api/v1/repos/test-forge/org/repo/pulls/42/automerge",
+            ))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&mock_server)
+            .await;
+
+        let (client, server_handle) =
+            spawn_shim_and_client(test_config(&mock_server.uri())).await?;
+        let args = serde_json::json!({
+            "forge": "test-forge",
+            "owner": "org",
+            "repo": "repo",
+            "index": 42,
+            "expected_head_sha": "abc123"
+        })
+        .as_object()
+        .expect("json args as object")
+        .clone();
+
+        client
+            .call_tool(CallToolRequestParams::new("schedule_auto_merge").with_arguments(args))
+            .await?;
+
+        let requests: Vec<_> = mock_server
+            .received_requests()
+            .await
+            .expect("received requests")
+            .into_iter()
+            .filter(|request| request.url.path().contains("automerge"))
+            .collect();
+        assert_eq!(requests.len(), 1);
+        let body: serde_json::Value =
+            serde_json::from_slice(&requests[0].body).expect("valid JSON");
+        assert_eq!(body["expected_head_sha"], "abc123");
+        assert!(body.get("merge_style").is_none());
 
         drop(client);
         server_handle.await??;

@@ -108,7 +108,7 @@ pub struct ListPullsQuery {
 pub struct ScheduleAutoMergeBody {
     pub delete_branch_after_merge: Option<bool>,
     pub expected_head_sha: String,
-    pub merge_style: String,
+    pub merge_style: Option<String>,
 }
 
 /// PATCH /api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}

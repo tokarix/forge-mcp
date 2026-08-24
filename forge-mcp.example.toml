@@ -42,6 +42,10 @@ base_url = "https://github.com"
 # Optional GitHub webhook verification.
 # [forges.webhook]
 # secret = "github-webhook-secret"
+# auto_merge = true
+# Approval-triggered scheduling is enabled by default. Set this to false when
+# a caller-owned orchestrator schedules auto-merge under its authenticated
+# forge identity; verified webhook events continue to be delivered.
 
 # Each [[agents]] entry defines a bearer token that maps to an agent
 # identity and policy.
