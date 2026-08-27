@@ -1,0 +1,31 @@
+when:
+  - event: pull_request
+  - event: push
+    branch: master
+
+depends_on:
+  - checks
+
+steps:
+  forgejo:
+    image: codeberg.org/forgejo/forgejo:16.0.3-rootless
+    detach: true
+    commands:
+      - ci/forgejo-service.sh
+    environment:
+      FORGEJO_BOOTSTRAP_USERNAME: forge-mcp-ci
+      FORGEJO_BOOTSTRAP_PASSWORD: forge-mcp-ci-disposable-password
+      FORGEJO_BOOTSTRAP_EMAIL: forge-mcp-ci@example.invalid
+
+  integration:
+    image: rust:1.94-slim
+    depends_on:
+      - forgejo
+    environment:
+      CARGO_TARGET_DIR: /tmp/target
+      FORGEJO_TEST_BASE_URL: http://forgejo:3000
+      FORGEJO_TEST_USERNAME: forge-mcp-ci
+      FORGEJO_TEST_PASSWORD: forge-mcp-ci-disposable-password
+    commands:
+      - cargo test -p forge --test forgejo_ci_smoke -- --ignored --nocapture
+      - cargo test -p forge --test forgejo_issue_dependencies -- --ignored --nocapture
