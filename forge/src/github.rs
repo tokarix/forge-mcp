@@ -2542,6 +2542,8 @@ impl crate::ForgeAdapter for GitHubAdapter {
                 .into_iter()
                 .map(GitHubIssue::into_issue)
                 .collect(),
+            depends_on_read_contract: None,
+            opaque_depends_on_count: None,
         })
     }
 
@@ -4940,6 +4942,37 @@ rRwzv5g6zr/Xm2UKcduXYVQs
             .await
             .expect("dependency");
         assert_eq!(issue.index, 3);
+    }
+
+    #[tokio::test]
+    async fn issue_dependencies_remain_unmarked_for_github() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/org/repo/issues/3/dependencies/blocked_by"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!([issue_json(9, 9009)])),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/org/repo/issues/3/dependencies/blocking"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let dependencies = adapter(&server.uri())
+            .get_issue_dependencies(&repository(), 3, &credential())
+            .await
+            .expect("dependency read");
+
+        assert_eq!(dependencies.depends_on[0].index, 9);
+        assert_eq!(dependencies.depends_on_read_contract, None);
+        assert_eq!(dependencies.opaque_depends_on_count, None);
+        let json = serde_json::to_value(dependencies).expect("serialize dependencies");
+        assert!(json.get("depends_on_read_contract").is_none());
+        assert!(json.get("opaque_depends_on_count").is_none());
     }
 
     #[tokio::test]

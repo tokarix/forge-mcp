@@ -1604,7 +1604,7 @@ pub async fn get_issue_comments(
         ("index" = u64, Path, description = "Issue index"),
     ),
     responses(
-        (status = 200, description = "Issue dependencies"),
+        (status = 200, description = "Issue dependencies", body = domain::IssueDependencies),
         (status = 401, description = "Unauthorized", body = ErrorBody),
     ),
     security(("bearer" = []))
@@ -2814,6 +2814,7 @@ mod tests {
     }
 
     struct FakeReadService {
+        issue_dependencies: Arc<Mutex<Option<Result<domain::IssueDependencies, ServiceError>>>>,
         list_branches: Arc<Mutex<Option<ListBranchesResponse>>>,
         get_branch: Arc<Mutex<Option<BranchDetails>>>,
         get_change_request: Arc<Mutex<Option<ChangeRequest>>>,
@@ -2823,6 +2824,7 @@ mod tests {
     impl FakeReadService {
         fn new() -> Self {
             Self {
+                issue_dependencies: Arc::new(Mutex::new(None)),
                 list_branches: Arc::new(Mutex::new(None)),
                 get_branch: Arc::new(Mutex::new(None)),
                 get_change_request: Arc::new(Mutex::new(None)),
@@ -2832,6 +2834,7 @@ mod tests {
 
         fn with_list_branches(resp: ListBranchesResponse) -> Arc<Self> {
             let svc = Self {
+                issue_dependencies: Arc::new(Mutex::new(None)),
                 list_branches: Arc::new(Mutex::new(Some(resp))),
                 get_branch: Arc::new(Mutex::new(None)),
                 get_change_request: Arc::new(Mutex::new(None)),
@@ -2842,6 +2845,7 @@ mod tests {
 
         fn with_get_branch(resp: BranchDetails) -> Arc<Self> {
             let svc = Self {
+                issue_dependencies: Arc::new(Mutex::new(None)),
                 list_branches: Arc::new(Mutex::new(None)),
                 get_branch: Arc::new(Mutex::new(Some(resp))),
                 get_change_request: Arc::new(Mutex::new(None)),
@@ -2852,6 +2856,7 @@ mod tests {
 
         fn with_get_change_request(resp: ChangeRequest) -> Arc<Self> {
             let svc = Self {
+                issue_dependencies: Arc::new(Mutex::new(None)),
                 list_branches: Arc::new(Mutex::new(None)),
                 get_branch: Arc::new(Mutex::new(None)),
                 get_change_request: Arc::new(Mutex::new(Some(resp))),
@@ -2862,12 +2867,25 @@ mod tests {
 
         fn with_list_change_requests(resp: Vec<ChangeRequest>) -> Arc<Self> {
             let svc = Self {
+                issue_dependencies: Arc::new(Mutex::new(None)),
                 list_branches: Arc::new(Mutex::new(None)),
                 get_branch: Arc::new(Mutex::new(None)),
                 get_change_request: Arc::new(Mutex::new(None)),
                 list_change_requests: Arc::new(Mutex::new(Some(resp))),
             };
             Arc::new(svc)
+        }
+
+        fn with_issue_dependencies(
+            result: Result<domain::IssueDependencies, ServiceError>,
+        ) -> Arc<Self> {
+            Arc::new(Self {
+                issue_dependencies: Arc::new(Mutex::new(Some(result))),
+                list_branches: Arc::new(Mutex::new(None)),
+                get_branch: Arc::new(Mutex::new(None)),
+                get_change_request: Arc::new(Mutex::new(None)),
+                list_change_requests: Arc::new(Mutex::new(None)),
+            })
         }
     }
 
@@ -2892,7 +2910,11 @@ mod tests {
             _: domain::GetIssueDependenciesRequest,
             _: &domain::ForgeCredential,
         ) -> Result<domain::IssueDependencies, ServiceError> {
-            todo!()
+            self.issue_dependencies
+                .lock()
+                .expect("lock issue dependencies")
+                .take()
+                .expect("issue dependency result configured")
         }
         async fn list_issues(
             &self,
@@ -4732,6 +4754,85 @@ mod tests {
             .expect("request should succeed");
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn get_issue_dependencies_returns_authoritative_metadata_and_arrays() {
+        let issue = domain::Issue {
+            assignees: vec![],
+            body: String::new(),
+            index: 2,
+            labels: vec![],
+            state: "closed".to_string(),
+            title: "Dependency".to_string(),
+            url: "https://forge.example/org/repo/issues/2".to_string(),
+        };
+        let read_svc = FakeReadService::with_issue_dependencies(Ok(domain::IssueDependencies {
+            blocks: vec![],
+            depends_on: vec![issue.clone()],
+            depends_on_read_contract: Some(domain::DependsOnReadContract::ExhaustiveV1),
+            opaque_depends_on_count: Some(0),
+        }));
+        let state = test_state_with_read(
+            read_svc,
+            vec!["test-forge/org/repo".to_string()],
+            Arc::new(FakeWriteService::new()),
+        );
+        let response = crate::build_router(state, false)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/repos/test-forge/org/repo/issues/1/dependencies")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read response body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("parse JSON response");
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "blocks": [],
+                "depends_on": [issue],
+                "depends_on_read_contract": "exhaustive-v1",
+                "opaque_depends_on_count": 0
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn get_issue_dependencies_upstream_failure_has_no_authoritative_metadata() {
+        let read_svc = FakeReadService::with_issue_dependencies(Err(ServiceError::Upstream(
+            "dependency response failed".to_string(),
+        )));
+        let state = test_state_with_read(
+            read_svc,
+            vec!["test-forge/org/repo".to_string()],
+            Arc::new(FakeWriteService::new()),
+        );
+        let response = crate::build_router(state, false)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/repos/test-forge/org/repo/issues/1/dependencies")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read response body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("parse JSON response");
+        assert!(json.get("depends_on_read_contract").is_none());
+        assert!(json.get("opaque_depends_on_count").is_none());
     }
 
     #[tokio::test]

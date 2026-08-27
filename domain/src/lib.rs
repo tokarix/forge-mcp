@@ -329,6 +329,7 @@ pub struct ChangeRequestReview {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct Issue {
     pub assignees: Vec<String>,
     pub body: String,
@@ -340,11 +341,25 @@ pub struct Issue {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub enum DependsOnReadContract {
+    #[serde(rename = "exhaustive-v1")]
+    ExhaustiveV1,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct IssueDependencies {
     /// Issues that this issue blocks (they depend on this issue).
     pub blocks: Vec<Issue>,
     /// Issues that this issue depends on (they block this issue).
     pub depends_on: Vec<Issue>,
+    /// Contract describing the completeness of the direct dependency read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub depends_on_read_contract: Option<DependsOnReadContract>,
+    /// Dependency rows that could not be represented in `depends_on`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub opaque_depends_on_count: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1445,8 +1460,84 @@ pub trait RepositoryWriteService: Send + Sync {
 mod tests {
     use super::validate_repository_path;
     use super::{
-        ChangeRequest, ChangeRequestEventAction, ChangeRequestState, ForgeCredential, Mergeability,
+        ChangeRequest, ChangeRequestEventAction, ChangeRequestState, DependsOnReadContract,
+        ForgeCredential, Issue, IssueDependencies, Mergeability,
     };
+
+    fn dependency_issue(index: u64) -> Issue {
+        Issue {
+            assignees: vec![],
+            body: String::new(),
+            index,
+            labels: vec![],
+            state: "open".to_string(),
+            title: format!("Issue {index}"),
+            url: format!("https://forge.example/issues/{index}"),
+        }
+    }
+
+    #[test]
+    fn issue_dependencies_serializes_exhaustive_contract_and_zero_count() {
+        let dependencies = IssueDependencies {
+            blocks: vec![dependency_issue(2)],
+            depends_on: vec![dependency_issue(3)],
+            depends_on_read_contract: Some(DependsOnReadContract::ExhaustiveV1),
+            opaque_depends_on_count: Some(0),
+        };
+
+        let json = serde_json::to_value(dependencies).expect("should serialize");
+        assert_eq!(json["depends_on_read_contract"], "exhaustive-v1");
+        assert_eq!(json["opaque_depends_on_count"], 0);
+    }
+
+    #[test]
+    fn issue_dependencies_omits_unset_read_metadata() {
+        let dependencies = IssueDependencies {
+            blocks: vec![],
+            depends_on: vec![],
+            depends_on_read_contract: None,
+            opaque_depends_on_count: None,
+        };
+
+        let json = serde_json::to_value(dependencies).expect("should serialize");
+        assert_eq!(json, serde_json::json!({"blocks": [], "depends_on": []}));
+    }
+
+    #[test]
+    fn issue_dependencies_deserializes_legacy_shape() {
+        let dependencies: IssueDependencies = serde_json::from_value(serde_json::json!({
+            "blocks": [dependency_issue(2)],
+            "depends_on": [dependency_issue(3)]
+        }))
+        .expect("legacy response should deserialize");
+
+        assert_eq!(dependencies.blocks[0].index, 2);
+        assert_eq!(dependencies.depends_on[0].index, 3);
+        assert_eq!(dependencies.depends_on_read_contract, None);
+        assert_eq!(dependencies.opaque_depends_on_count, None);
+    }
+
+    #[test]
+    fn issue_dependencies_marked_shape_is_compatible_with_legacy_consumer() {
+        #[derive(serde::Deserialize)]
+        struct LegacyIssueDependencies {
+            blocks: Vec<Issue>,
+            depends_on: Vec<Issue>,
+        }
+
+        let json = serde_json::to_value(IssueDependencies {
+            blocks: vec![dependency_issue(2)],
+            depends_on: vec![dependency_issue(3)],
+            depends_on_read_contract: Some(DependsOnReadContract::ExhaustiveV1),
+            opaque_depends_on_count: Some(0),
+        })
+        .expect("should serialize");
+        let legacy: LegacyIssueDependencies =
+            serde_json::from_value(json).expect("legacy consumer should ignore added fields");
+
+        assert_eq!(legacy.blocks[0].index, 2);
+        assert_eq!(legacy.depends_on[0].index, 3);
+    }
 
     #[test]
     fn forge_credential_debug_redacts_token() {

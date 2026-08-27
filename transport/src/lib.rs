@@ -1818,7 +1818,7 @@ impl McpShim {
     /// Get the dependency relationships for an issue.
     #[tool(
         name = "get_issue_dependencies",
-        description = "Get the dependency relationships for an issue. Returns issues that this issue depends on (blocks it) and issues that it blocks."
+        description = "Get the dependency relationships for an issue. Returns issues that this issue depends on (blocks it) and issues that it blocks. For Forgejo, depends_on_read_contract: \"exhaustive-v1\" together with opaque_depends_on_count: 0 signals that every direct depends_on row returned by the provider is present."
     )]
     async fn get_issue_dependencies(
         &self,
@@ -3167,6 +3167,70 @@ mod tests {
             .await
             .expect("received requests");
         assert!(requests.is_empty(), "no requests should reach the gateway");
+    }
+
+    #[tokio::test]
+    async fn get_issue_dependencies_preserves_gateway_response() {
+        let mock_server = wiremock::MockServer::start().await;
+        let gateway_body = serde_json::json!({
+            "blocks": [{"index": 4, "state": "open"}],
+            "depends_on": [{"index": 2, "state": "closed"}],
+            "depends_on_read_contract": "exhaustive-v1",
+            "opaque_depends_on_count": 0
+        });
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(
+                "/api/v1/repos/test/owner/repo/issues/1/dependencies",
+            ))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(gateway_body.clone()))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+        let shim = McpShim::new(test_config(&mock_server.uri()));
+
+        let response = shim
+            .get_issue_dependencies(Parameters(GetIssueDependenciesTool {
+                forge: "test".to_string(),
+                index: 1,
+                owner: "owner".to_string(),
+                repo: "repo".to_string(),
+            }))
+            .await
+            .expect("dependency read should succeed");
+
+        let returned: serde_json::Value = serde_json::from_str(&response).expect("JSON response");
+        assert_eq!(returned, gateway_body);
+    }
+
+    #[tokio::test]
+    async fn get_issue_dependencies_gateway_failure_is_mcp_error() {
+        let mock_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(
+                "/api/v1/repos/test/owner/repo/issues/1/dependencies",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(502)
+                    .set_body_string(r#"{"error":"upstream failed"}"#),
+            )
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+        let shim = McpShim::new(test_config(&mock_server.uri()));
+
+        let error = shim
+            .get_issue_dependencies(Parameters(GetIssueDependenciesTool {
+                forge: "test".to_string(),
+                index: 1,
+                owner: "owner".to_string(),
+                repo: "repo".to_string(),
+            }))
+            .await
+            .expect_err("gateway failure should be an MCP error");
+
+        assert!(error.message.contains("upstream failed"));
+        assert!(!error.message.contains("depends_on_read_contract"));
+        assert!(!error.message.contains("opaque_depends_on_count"));
     }
 
     #[tokio::test]

@@ -2390,6 +2390,8 @@ impl ForgeAdapter for ForgejoAdapter {
                 .into_iter()
                 .map(ForgejoIssueResponse::into_issue)
                 .collect(),
+            depends_on_read_contract: Some(domain::DependsOnReadContract::ExhaustiveV1),
+            opaque_depends_on_count: Some(0),
         })
     }
 
@@ -3362,6 +3364,154 @@ mod tests {
             name: "repo".to_string(),
             owner: "org".to_string(),
         }
+    }
+
+    fn dependency_issue_json(number: u64, state: &str, url: &str) -> serde_json::Value {
+        serde_json::json!({
+            "assignees": [],
+            "body": "",
+            "html_url": url,
+            "id": number + 1000,
+            "labels": [],
+            "number": number,
+            "state": state,
+            "title": format!("Issue {number}")
+        })
+    }
+
+    async fn assert_issue_dependency_read_error(
+        bad_endpoint: &str,
+        bad_response: ResponseTemplate,
+    ) {
+        let mock = MockServer::start().await;
+
+        if bad_endpoint == "blocks" {
+            Mock::given(method("GET"))
+                .and(path_regex(
+                    r"/api/v1/repos/org/repo/issues/10/dependencies$",
+                ))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+                .expect(1)
+                .mount(&mock)
+                .await;
+        }
+        Mock::given(method("GET"))
+            .and(path_regex(format!(
+                r"/api/v1/repos/org/repo/issues/10/{bad_endpoint}$"
+            )))
+            .respond_with(bad_response)
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        test_adapter(&mock.uri())
+            .get_issue_dependencies(&test_repo(), 10, &ForgeCredential { token: None })
+            .await
+            .expect_err("dependency read should fail");
+    }
+
+    #[tokio::test]
+    async fn issue_dependencies_empty_read_is_marked_exhaustive() {
+        let mock = MockServer::start().await;
+
+        for endpoint in ["dependencies", "blocks"] {
+            Mock::given(method("GET"))
+                .and(path_regex(format!(
+                    r"/api/v1/repos/org/repo/issues/10/{endpoint}$"
+                )))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+                .expect(1)
+                .mount(&mock)
+                .await;
+        }
+
+        let result = test_adapter(&mock.uri())
+            .get_issue_dependencies(&test_repo(), 10, &ForgeCredential { token: None })
+            .await
+            .expect("dependency read should succeed");
+
+        assert!(result.blocks.is_empty());
+        assert!(result.depends_on.is_empty());
+        assert_eq!(
+            result.depends_on_read_contract,
+            Some(domain::DependsOnReadContract::ExhaustiveV1)
+        );
+        assert_eq!(result.opaque_depends_on_count, Some(0));
+    }
+
+    #[tokio::test]
+    async fn issue_dependencies_preserves_all_rows_order_and_urls() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex(
+                r"/api/v1/repos/org/repo/issues/10/dependencies$",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                dependency_issue_json(20, "open", "https://forge.example/org/repo/issues/20"),
+                dependency_issue_json(
+                    7,
+                    "closed",
+                    "https://forge.example/other-org/other-repo/issues/7"
+                )
+            ])))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"/api/v1/repos/org/repo/issues/10/blocks$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                dependency_issue_json(30, "closed", "https://forge.example/org/repo/issues/30")
+            ])))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let result = test_adapter(&mock.uri())
+            .get_issue_dependencies(&test_repo(), 10, &ForgeCredential { token: None })
+            .await
+            .expect("dependency read should succeed");
+
+        assert_eq!(
+            result
+                .depends_on
+                .iter()
+                .map(|issue| (issue.index, issue.state.as_str(), issue.url.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (20, "open", "https://forge.example/org/repo/issues/20"),
+                (
+                    7,
+                    "closed",
+                    "https://forge.example/other-org/other-repo/issues/7"
+                )
+            ]
+        );
+        assert_eq!(result.blocks[0].index, 30);
+        assert_eq!(
+            result.depends_on_read_contract,
+            Some(domain::DependsOnReadContract::ExhaustiveV1)
+        );
+        assert_eq!(result.opaque_depends_on_count, Some(0));
+    }
+
+    #[tokio::test]
+    async fn issue_dependencies_fail_closed_for_malformed_responses() {
+        assert_issue_dependency_read_error(
+            "dependencies",
+            ResponseTemplate::new(200).set_body_string("{"),
+        )
+        .await;
+        assert_issue_dependency_read_error(
+            "blocks",
+            ResponseTemplate::new(200).set_body_string("{"),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn issue_dependencies_fail_closed_for_non_success_responses() {
+        assert_issue_dependency_read_error("dependencies", ResponseTemplate::new(500)).await;
+        assert_issue_dependency_read_error("blocks", ResponseTemplate::new(500)).await;
     }
 
     #[test]
