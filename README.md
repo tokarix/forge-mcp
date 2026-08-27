@@ -155,19 +155,34 @@ For GitHub.com, `base_url = "https://github.com"` automatically selects
 `https://api.github.com`. For GitHub Enterprise Server, forge-mcp derives
 `<base_url>/api/v3`; set `api_url` explicitly for a nonstandard API endpoint.
 
-To run the opt-in real-Forgejo dependency lifecycle test, use a disposable
-Forgejo instance and token:
+Real-Forgejo tests use an all-or-nothing disposable-provider contract:
 
 ```text
-FORGEJO_TEST_BASE_URL=https://forgejo.example \
-FORGEJO_TEST_TOKEN=replace-me \
+FORGEJO_TEST_BASE_URL=http://localhost:3000 \
+FORGEJO_TEST_USERNAME=forge-mcp-ci \
+FORGEJO_TEST_PASSWORD=disposable-password \
+cargo test -p forge --test forgejo_ci_smoke -- --ignored --nocapture
+
+FORGEJO_TEST_BASE_URL=http://localhost:3000 \
+FORGEJO_TEST_USERNAME=forge-mcp-ci \
+FORGEJO_TEST_PASSWORD=disposable-password \
 cargo test -p forge --test forgejo_issue_dependencies -- --ignored --nocapture
 ```
 
-The test discovers the authenticated owner and Forgejo version, creates
-temporary repositories and issues, exercises same- and cross-repository
-dependency add/read/remove operations, and best-effort deletes its temporary
-repositories. Never use production repositories or a long-lived production
-token for this test.
+Ordinary local test runs intentionally leave both provider tests ignored.
+Missing local Forgejo access or credentials is expected and is not a blocker.
+Tests consume the configured service but never start Forgejo or a container
+runtime themselves.
+
+Woodpecker is the service-backed integration authority. The separate
+`checks` workflow runs the normal Rust gates and lints both workflow files with
+Woodpecker CLI 2.8.3. After it succeeds, `forgejo-integration` starts the pinned
+`codeberg.org/forgejo/forgejo:16.0.3-rootless` image as a detached `forgejo`
+step. Later steps reach it at `http://forgejo:3000`. The fixture uses bounded
+readiness polling, authenticates the throwaway user, creates a short-lived API
+token, and reports redacted, bounded diagnostics. Repositories and tokens are
+logically cleaned up, while the user, SQLite database, repositories, and all
+other state disappear with the workflow container. No production credential,
+persistent volume, privileged mode, or container socket is used.
 
 Issues & PRs disabled. Development happens on an internal Forgejo instance.
