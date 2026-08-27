@@ -16,6 +16,7 @@ steps:
       FORGEJO_BOOTSTRAP_USERNAME: forge-mcp-ci
       FORGEJO_BOOTSTRAP_PASSWORD: forge-mcp-ci-disposable-password
       FORGEJO_BOOTSTRAP_EMAIL: forge-mcp-ci@example.invalid
+      FORGEJO_WEBHOOK_ALLOWED_HOST_LIST: "*"
 
   integration:
     image: rust:1.94-slim
@@ -26,6 +27,10 @@ steps:
       FORGEJO_TEST_BASE_URL: http://forgejo:3000
       FORGEJO_TEST_USERNAME: forge-mcp-ci
       FORGEJO_TEST_PASSWORD: forge-mcp-ci-disposable-password
+      FORGEJO_TEST_WEBHOOK_LISTEN_ADDR: 0.0.0.0:38080
     commands:
       - cargo test -p forge --test forgejo_ci_smoke -- --ignored --nocapture
       - cargo test -p forge --test forgejo_issue_dependencies -- --ignored --nocapture
+      - for address in $$(hostname -i); do case "$${address}" in *.*) export FORGEJO_TEST_WEBHOOK_CALLBACK_IP=$${address}; break ;; esac; done
+      - test -n "$${FORGEJO_TEST_WEBHOOK_CALLBACK_IP}"
+      - FORGEJO_TEST_WEBHOOK_CALLBACK_BASE_URL=http://$${FORGEJO_TEST_WEBHOOK_CALLBACK_IP}:38080 cargo test -p server --test forgejo_issue_label_webhooks -- --ignored --nocapture

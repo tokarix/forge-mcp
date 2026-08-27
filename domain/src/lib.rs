@@ -509,6 +509,7 @@ impl PublishableEvent for IssueEvent {
 #[serde(rename_all = "snake_case")]
 pub enum IssueEventAction {
     Closed,
+    LabelsChanged,
     Opened,
 }
 
@@ -517,6 +518,7 @@ impl IssueEventAction {
     pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Closed => "closed",
+            Self::LabelsChanged => "labels_changed",
             Self::Opened => "opened",
         }
     }
@@ -1738,7 +1740,7 @@ mod tests {
     fn issue_event_to_channel_event_sets_meta_fields() {
         use super::{ForgeKind, IssueEvent, IssueEventAction, PublishableEvent, RepositoryRef};
         let event = IssueEvent {
-            action: IssueEventAction::Opened,
+            action: IssueEventAction::LabelsChanged,
             delivery_id: "delivery-1".to_string(),
             index: 42,
             repository: RepositoryRef {
@@ -1751,12 +1753,23 @@ mod tests {
             title: "Bug report".to_string(),
             url: "https://forge.example/org/repo/issues/42".to_string(),
         };
+        assert_eq!(
+            serde_json::to_string(&event.action).expect("serialize issue action"),
+            "\"labels_changed\""
+        );
         let channel = event.to_channel_event();
+        assert_eq!(channel.meta.action, "labels_changed");
+        assert_eq!(channel.meta.delivery_id, "delivery-1");
         assert_eq!(channel.meta.event_kind, "issue");
+        assert_eq!(channel.meta.forge_alias, "test");
         assert_eq!(channel.meta.issue, Some(42));
+        assert_eq!(channel.meta.owner, "org");
+        assert_eq!(channel.meta.repo, "repo");
         assert_eq!(channel.meta.change_request, None);
         assert_eq!(channel.meta.head_sha, None);
         assert_eq!(channel.meta.issue_comment, None);
+        assert_eq!(channel.meta.review_state, None);
+        assert_eq!(event.dedupe_key(), "test:delivery-1");
     }
 
     #[test]

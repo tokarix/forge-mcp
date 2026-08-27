@@ -3158,6 +3158,7 @@ fn parse_issue_event(
 
     let action = match payload.action.as_str() {
         "closed" => domain::IssueEventAction::Closed,
+        "label_cleared" | "label_updated" => domain::IssueEventAction::LabelsChanged,
         "opened" => domain::IssueEventAction::Opened,
         _ => return Ok(None),
     };
@@ -4160,6 +4161,115 @@ mod tests {
             write!(&mut signature, "{byte:02x}").expect("writing to String cannot fail");
         }
         signature
+    }
+
+    fn signed_issue_webhook(
+        action: &str,
+        delivery_id: &str,
+        number: Option<u64>,
+        issue_number: Option<u64>,
+    ) -> Option<domain::WebhookEvent> {
+        let adapter = test_adapter("https://forge.example");
+        let body = serde_json::to_vec(&serde_json::json!({
+            "action": action,
+            "issue": {
+                "html_url": "https://forge.example/org/repo/issues/42",
+                "number": issue_number,
+                "title": "Label wake hint"
+            },
+            "number": number,
+            "repository": {
+                "name": "repo",
+                "owner": {
+                    "login": "org"
+                }
+            }
+        }))
+        .expect("valid JSON");
+        let headers = vec![
+            ("x-forgejo-event".to_string(), "issues".to_string()),
+            ("x-forgejo-delivery".to_string(), delivery_id.to_string()),
+            (
+                "x-forgejo-signature".to_string(),
+                sign_payload("super-secret", &body),
+            ),
+        ];
+
+        adapter
+            .verify_and_parse_webhook_event(
+                &headers,
+                &body,
+                "internal",
+                domain::ForgeKind::Forgejo,
+                "https://forge.example",
+                "super-secret",
+            )
+            .expect("webhook should parse")
+    }
+
+    fn assert_issue_webhook(
+        event: domain::WebhookEvent,
+        action: &domain::IssueEventAction,
+        delivery_id: &str,
+    ) {
+        let event = match event {
+            domain::WebhookEvent::Issue(event) => event,
+            other => panic!("expected Issue, got {other:?}"),
+        };
+        assert_eq!(&event.action, action);
+        assert_eq!(event.delivery_id, delivery_id);
+        assert_eq!(event.index, 42);
+        assert_eq!(event.repository.alias, "internal");
+        assert_eq!(event.repository.forge, domain::ForgeKind::Forgejo);
+        assert_eq!(event.repository.host, "https://forge.example");
+        assert_eq!(event.repository.owner, "org");
+        assert_eq!(event.repository.name, "repo");
+        assert_eq!(event.title, "Label wake hint");
+        assert_eq!(event.url, "https://forge.example/org/repo/issues/42");
+    }
+
+    #[test]
+    fn forgejo_webhook_normalizes_issue_label_actions() {
+        let updated = signed_issue_webhook("label_updated", "delivery-label-1", Some(42), None)
+            .expect("label_updated should be supported");
+        assert_issue_webhook(
+            updated,
+            &domain::IssueEventAction::LabelsChanged,
+            "delivery-label-1",
+        );
+
+        let cleared = signed_issue_webhook("label_cleared", "delivery-label-2", None, Some(42))
+            .expect("label_cleared should be supported");
+        assert_issue_webhook(
+            cleared,
+            &domain::IssueEventAction::LabelsChanged,
+            "delivery-label-2",
+        );
+    }
+
+    #[test]
+    fn forgejo_webhook_preserves_opened_and_closed_issue_actions() {
+        for (action, expected, delivery_id) in [
+            (
+                "opened",
+                domain::IssueEventAction::Opened,
+                "delivery-opened",
+            ),
+            (
+                "closed",
+                domain::IssueEventAction::Closed,
+                "delivery-closed",
+            ),
+        ] {
+            let event = signed_issue_webhook(action, delivery_id, Some(42), None)
+                .expect("issue action should be supported");
+            assert_issue_webhook(event, &expected, delivery_id);
+        }
+    }
+
+    #[test]
+    fn forgejo_webhook_ignores_unrelated_issue_action() {
+        assert!(signed_issue_webhook("edited", "delivery-edited", Some(42), None).is_none());
     }
 
     #[test]

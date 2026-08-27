@@ -9,6 +9,7 @@ config_path="$work_path/custom/conf/app.ini"
 : "${FORGEJO_BOOTSTRAP_USERNAME:?FORGEJO_BOOTSTRAP_USERNAME is required}"
 : "${FORGEJO_BOOTSTRAP_PASSWORD:?FORGEJO_BOOTSTRAP_PASSWORD is required}"
 : "${FORGEJO_BOOTSTRAP_EMAIL:?FORGEJO_BOOTSTRAP_EMAIL is required}"
+: "${FORGEJO_WEBHOOK_ALLOWED_HOST_LIST:?FORGEJO_WEBHOOK_ALLOWED_HOST_LIST is required}"
 
 mkdir -p "$work_path/custom/conf" "$work_path/data" "$work_path/log" \
   "$work_path/repositories" "$work_path/tmp/gitea"
@@ -39,6 +40,9 @@ INSTALL_LOCK = true
 
 [service]
 DISABLE_REGISTRATION = true
+
+[webhook]
+ALLOWED_HOST_LIST = $FORGEJO_WEBHOOK_ALLOWED_HOST_LIST
 
 [log]
 MODE = console

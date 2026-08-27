@@ -446,7 +446,7 @@ mod tests {
         );
 
         let event = domain::IssueEvent {
-            action: domain::IssueEventAction::Opened,
+            action: domain::IssueEventAction::LabelsChanged,
             delivery_id: "delivery-issue-1".to_string(),
             index: 42,
             repository: domain::RepositoryRef {
@@ -468,7 +468,17 @@ mod tests {
             .expect("timed out")
             .expect("connected");
         assert_eq!(queued.event_name, "issue");
+        assert_eq!(queued.envelope.meta.action, "labels_changed");
+        assert_eq!(queued.envelope.meta.delivery_id, "delivery-issue-1");
+        assert_eq!(queued.envelope.meta.forge_alias, "test-forge");
         assert_eq!(queued.envelope.meta.issue, Some(42));
+        assert_eq!(queued.envelope.meta.owner, "org");
+        assert_eq!(queued.envelope.meta.repo, "repo");
         assert_eq!(queued.envelope.meta.change_request, None);
+
+        let status = bus.publish(&event).expect("replay should succeed");
+        assert_eq!(status, PublishStatus::Duplicate);
+        let replay = timeout(Duration::from_millis(100), receiver.recv()).await;
+        assert!(replay.is_err(), "duplicate delivery must not be queued");
     }
 }

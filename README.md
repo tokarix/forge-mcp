@@ -167,12 +167,21 @@ FORGEJO_TEST_BASE_URL=http://localhost:3000 \
 FORGEJO_TEST_USERNAME=forge-mcp-ci \
 FORGEJO_TEST_PASSWORD=disposable-password \
 cargo test -p forge --test forgejo_issue_dependencies -- --ignored --nocapture
+
+FORGEJO_TEST_BASE_URL=http://localhost:3000 \
+FORGEJO_TEST_USERNAME=forge-mcp-ci \
+FORGEJO_TEST_PASSWORD=disposable-password \
+FORGEJO_TEST_WEBHOOK_CALLBACK_BASE_URL=http://host-reachable-from-forgejo:38080 \
+FORGEJO_TEST_WEBHOOK_LISTEN_ADDR=0.0.0.0:38080 \
+cargo test -p server --test forgejo_issue_label_webhooks -- --ignored --nocapture
 ```
 
-Ordinary local test runs intentionally leave both provider tests ignored.
+Ordinary local test runs intentionally leave all provider tests ignored.
 Missing local Forgejo access or credentials is expected and is not a blocker.
 Tests consume the configured service but never start Forgejo or a container
-runtime themselves.
+runtime themselves. The label-webhook test additionally needs a listener address
+and a callback base URL that the CI-owned Forgejo service can route back to; the
+ordinary local Rust gates do not require either value.
 
 Woodpecker is the service-backed integration authority. The separate
 `checks` workflow runs the normal Rust gates and lints both workflow files with
