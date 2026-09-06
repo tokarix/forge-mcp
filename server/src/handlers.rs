@@ -1177,6 +1177,102 @@ pub async fn get_pull_comments(
 }
 
 #[utoipa::path(
+    get,
+    path = "/api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}/discussion-comments",
+    params(
+        ("forge" = String, Path, description = "Forge alias"),
+        ("owner" = String, Path, description = "Repository owner"),
+        ("repo" = String, Path, description = "Repository name"),
+        ("index" = u64, Path, description = "Pull request index"),
+    ),
+    responses(
+        (status = 200, description = "General discussion comments only"),
+        (status = 401, description = "Unauthorized", body = ErrorBody),
+    ),
+    security(("bearer" = []))
+)]
+/// GET /api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}/discussion-comments
+pub async fn get_pull_discussion_comments(
+    State(state): State<AppState>,
+    Path(path): Path<PullPath>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let forge = resolve_forge(&state.forge_registry, &path.forge)?;
+    let agent = resolve_agent(
+        &headers,
+        &state.agent_registry,
+        &path.forge,
+        &path.owner,
+        &path.repo,
+    )?;
+
+    let credential = resolve_credential(agent, &path.forge, forge);
+
+    let result = forge
+        .read_service
+        .get_change_request_discussion_comments(
+            domain::GetChangeRequestDiscussionCommentsRequest {
+                agent: agent.identity.clone(),
+                index: path.index,
+                repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
+            },
+            &credential,
+        )
+        .await
+        .map_err(map_service_error)?;
+
+    Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(to_json_value(&result)?))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}/reviews",
+    params(
+        ("forge" = String, Path, description = "Forge alias"),
+        ("owner" = String, Path, description = "Repository owner"),
+        ("repo" = String, Path, description = "Repository name"),
+        ("index" = u64, Path, description = "Pull request index"),
+    ),
+    responses(
+        (status = 200, description = "Formal reviews only"),
+        (status = 401, description = "Unauthorized", body = ErrorBody),
+    ),
+    security(("bearer" = []))
+)]
+/// GET /api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}/reviews
+pub async fn get_pull_reviews(
+    State(state): State<AppState>,
+    Path(path): Path<PullPath>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let forge = resolve_forge(&state.forge_registry, &path.forge)?;
+    let agent = resolve_agent(
+        &headers,
+        &state.agent_registry,
+        &path.forge,
+        &path.owner,
+        &path.repo,
+    )?;
+
+    let credential = resolve_credential(agent, &path.forge, forge);
+
+    let result = forge
+        .read_service
+        .get_change_request_reviews(
+            domain::GetChangeRequestReviewsRequest {
+                agent: agent.identity.clone(),
+                index: path.index,
+                repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
+            },
+            &credential,
+        )
+        .await
+        .map_err(map_service_error)?;
+
+    Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(to_json_value(&result)?))
+}
+
+#[utoipa::path(
     post,
     path = "/api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}/automerge",
     params(
@@ -2660,6 +2756,28 @@ mod tests {
                 "unimplemented in test fake".into(),
             ))
         }
+
+        async fn get_change_request_reviews(
+            &self,
+            _: &domain::RepositoryRef,
+            _: u64,
+            _: &domain::ForgeCredential,
+        ) -> Result<Vec<domain::ChangeRequestCommentDetail>, forge::ForgeError> {
+            Err(forge::ForgeError::Unsupported(
+                "unimplemented in test fake".into(),
+            ))
+        }
+
+        async fn get_change_request_discussion_comments(
+            &self,
+            _: &domain::RepositoryRef,
+            _: u64,
+            _: &domain::ForgeCredential,
+        ) -> Result<Vec<domain::ChangeRequestCommentDetail>, forge::ForgeError> {
+            Err(forge::ForgeError::Unsupported(
+                "unimplemented in test fake".into(),
+            ))
+        }
         async fn get_combined_commit_status(
             &self,
             _: &domain::RepositoryRef,
@@ -2962,6 +3080,50 @@ mod tests {
                     review_state: Some("APPROVED".to_string()),
                 },
             ])
+        }
+
+        async fn get_change_request_reviews(
+            &self,
+            request: domain::GetChangeRequestReviewsRequest,
+            credential: &domain::ForgeCredential,
+        ) -> Result<Vec<ChangeRequestCommentDetail>, ServiceError> {
+            assert_eq!(request.agent.agent_id, "codex");
+            assert_eq!(request.repository.alias, "test-forge");
+            assert_eq!(request.repository.owner, "org");
+            assert_eq!(request.repository.name, "repo");
+            assert_eq!(request.index, 1);
+            assert_eq!(credential.token.as_deref(), Some("caller-forge-token"));
+            Ok(vec![ChangeRequestCommentDetail {
+                author: "reviewer".to_string(),
+                body: "approved".to_string(),
+                commit_id: Some("abc123".to_string()),
+                created_at: "2026-03-18T11:00:00Z".to_string(),
+                id: 2,
+                kind: "review".to_string(),
+                review_state: Some("APPROVED".to_string()),
+            }])
+        }
+
+        async fn get_change_request_discussion_comments(
+            &self,
+            request: domain::GetChangeRequestDiscussionCommentsRequest,
+            credential: &domain::ForgeCredential,
+        ) -> Result<Vec<ChangeRequestCommentDetail>, ServiceError> {
+            assert_eq!(request.agent.agent_id, "codex");
+            assert_eq!(request.repository.alias, "test-forge");
+            assert_eq!(request.repository.owner, "org");
+            assert_eq!(request.repository.name, "repo");
+            assert_eq!(request.index, 1);
+            assert_eq!(credential.token.as_deref(), Some("caller-forge-token"));
+            Ok(vec![ChangeRequestCommentDetail {
+                author: "reviewer".to_string(),
+                body: "looks good".to_string(),
+                commit_id: None,
+                created_at: "2026-03-18T10:00:00Z".to_string(),
+                id: 1,
+                kind: "comment".to_string(),
+                review_state: None,
+            }])
         }
 
         async fn get_change_request_checks(
@@ -4235,6 +4397,63 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).expect("parse JSON response");
         assert_eq!(json["agent_id"], "noprefix");
         assert!(json.get("branch_prefix").is_none());
+    }
+
+    #[tokio::test]
+    async fn narrow_pull_reads_preserve_scope_and_access_control() {
+        for (endpoint, kind) in [("reviews", "review"), ("discussion-comments", "comment")] {
+            for (forge, repo, token, expected) in [
+                ("test-forge", "repo", "test-token", StatusCode::OK),
+                (
+                    "test-forge",
+                    "repo",
+                    "wrong-token",
+                    StatusCode::UNAUTHORIZED,
+                ),
+                ("test-forge", "denied", "test-token", StatusCode::FORBIDDEN),
+                ("unknown", "repo", "test-token", StatusCode::NOT_FOUND),
+            ] {
+                let response = crate::build_router(test_state(), false)
+                    .oneshot(
+                        Request::builder()
+                            .uri(format!(
+                                "/api/v1/repos/{forge}/org/{repo}/pulls/1/{endpoint}"
+                            ))
+                            .header("authorization", format!("Bearer {token}"))
+                            .body(Body::empty())
+                            .expect("request"),
+                    )
+                    .await
+                    .expect("response");
+                assert_eq!(response.status(), expected);
+                if expected == StatusCode::OK {
+                    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                        .await
+                        .expect("body");
+                    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+                    let entries = json.as_array().expect("entries");
+                    assert_eq!(entries.len(), 1);
+                    assert_eq!(entries[0]["kind"], kind);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn openapi_retains_mixed_and_write_routes_with_narrow_reads() {
+        use utoipa::OpenApi;
+        let api = serde_json::to_value(crate::ApiDoc::openapi()).expect("OpenAPI");
+        for (endpoint, methods) in [
+            ("reviews", vec!["get", "post"]),
+            ("discussion-comments", vec!["get"]),
+            ("comments", vec!["get", "post"]),
+        ] {
+            let path =
+                format!("/api/v1/repos/{{forge}}/{{owner}}/{{repo}}/pulls/{{index}}/{endpoint}");
+            for method in methods {
+                assert!(api["paths"][&path][method].is_object());
+            }
+        }
     }
 
     #[tokio::test]

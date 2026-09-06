@@ -2319,14 +2319,27 @@ impl crate::ForgeAdapter for GitHubAdapter {
         index: u64,
         credential: &ForgeCredential,
     ) -> Result<Vec<ChangeRequestCommentDetail>, ForgeError> {
-        let repo = Self::repo_path(repository);
-        let comments_url = format!("{}/repos/{repo}/issues/{index}/comments", self.api_base());
-        let reviews_url = format!("{}/repos/{repo}/pulls/{index}/reviews", self.api_base());
-        let comments = self
-            .get_paginated::<GitHubComment>(&comments_url, &[], credential)
+        let mut details = self
+            .get_change_request_discussion_comments(repository, index, credential)
             .await?;
-        let reviews = self
-            .get_paginated::<GitHubReview>(&reviews_url, &[], credential)
+        details.extend(
+            self.get_change_request_reviews(repository, index, credential)
+                .await?,
+        );
+        details.sort_by(|left, right| left.created_at.cmp(&right.created_at));
+        Ok(details)
+    }
+
+    async fn get_change_request_discussion_comments(
+        &self,
+        repository: &RepositoryRef,
+        index: u64,
+        credential: &ForgeCredential,
+    ) -> Result<Vec<ChangeRequestCommentDetail>, ForgeError> {
+        let repo = Self::repo_path(repository);
+        let url = format!("{}/repos/{repo}/issues/{index}/comments", self.api_base());
+        let comments = self
+            .get_paginated::<GitHubComment>(&url, &[], credential)
             .await?;
         let mut details: Vec<ChangeRequestCommentDetail> = comments
             .into_iter()
@@ -2339,7 +2352,25 @@ impl crate::ForgeAdapter for GitHubAdapter {
                 kind: "comment".to_string(),
                 review_state: None,
             })
-            .chain(reviews.into_iter().filter_map(|review| {
+            .collect();
+        details.sort_by(|left, right| left.created_at.cmp(&right.created_at));
+        Ok(details)
+    }
+
+    async fn get_change_request_reviews(
+        &self,
+        repository: &RepositoryRef,
+        index: u64,
+        credential: &ForgeCredential,
+    ) -> Result<Vec<ChangeRequestCommentDetail>, ForgeError> {
+        let repo = Self::repo_path(repository);
+        let url = format!("{}/repos/{repo}/pulls/{index}/reviews", self.api_base());
+        let reviews = self
+            .get_paginated::<GitHubReview>(&url, &[], credential)
+            .await?;
+        let mut details: Vec<ChangeRequestCommentDetail> = reviews
+            .into_iter()
+            .filter_map(|review| {
                 review
                     .submitted_at
                     .map(|created_at| ChangeRequestCommentDetail {
@@ -2351,7 +2382,7 @@ impl crate::ForgeAdapter for GitHubAdapter {
                         kind: "review".to_string(),
                         review_state: Some(review.state),
                     })
-            }))
+            })
             .collect();
         details.sort_by(|left, right| left.created_at.cmp(&right.created_at));
         Ok(details)

@@ -219,12 +219,29 @@ pub struct ChangeRequestCommentDetail {
     pub id: u64,
     /// "comment" for general comments, "review" for formal reviews.
     pub kind: String,
-    /// For reviews: `APPROVED`, `REQUEST_CHANGES`, or `COMMENT`. None for general comments.
+    /// Provider review state: Forgejo uses `APPROVED`, `REQUEST_CHANGES`,
+    /// `COMMENT`, or `DISMISSED`; GitHub uses `APPROVED`, `CHANGES_REQUESTED`,
+    /// `COMMENTED`, or `DISMISSED`. GitLab exposes current `APPROVED` entries only.
+    /// None for general discussion comments.
     pub review_state: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GetChangeRequestCommentsRequest {
+    pub agent: AgentIdentity,
+    pub index: u64,
+    pub repository: RepositoryRef,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GetChangeRequestReviewsRequest {
+    pub agent: AgentIdentity,
+    pub index: u64,
+    pub repository: RepositoryRef,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GetChangeRequestDiscussionCommentsRequest {
     pub agent: AgentIdentity,
     pub index: u64,
     pub repository: RepositoryRef,
@@ -1116,7 +1133,7 @@ pub trait RepositoryReadService: Send + Sync {
         credential: &ForgeCredential,
     ) -> Result<ChangeRequest, ServiceError>;
 
-    /// Retrieves all comments and reviews for a change request.
+    /// Retrieves the backward-compatible mixed discussion and review feed.
     ///
     /// # Errors
     ///
@@ -1125,6 +1142,32 @@ pub trait RepositoryReadService: Send + Sync {
     async fn get_change_request_comments(
         &self,
         request: GetChangeRequestCommentsRequest,
+        credential: &ForgeCredential,
+    ) -> Result<Vec<ChangeRequestCommentDetail>, ServiceError>;
+
+    /// Reads submitted top-level reviews without fetching discussion or inline comments.
+    /// GitLab exposes current approvals only: ID is 0, body/timestamp are empty,
+    /// and commit references are absent; `REQUEST_CHANGES` events are unavailable.
+    /// GitHub uses bounded pagination; Forgejo reads one upstream page.
+    ///
+    /// # Errors
+    /// Returns an error if audit recording or the selected upstream read fails.
+    async fn get_change_request_reviews(
+        &self,
+        request: GetChangeRequestReviewsRequest,
+        credential: &ForgeCredential,
+    ) -> Result<Vec<ChangeRequestCommentDetail>, ServiceError>;
+
+    /// Reads general discussion without fetching reviews or approvals.
+    /// Entries have kind="comment" and absent commit ID and review state.
+    /// GitLab excludes system notes. Forgejo and GitLab read one upstream page;
+    /// GitHub uses bounded pagination.
+    ///
+    /// # Errors
+    /// Returns an error if audit recording or the selected upstream read fails.
+    async fn get_change_request_discussion_comments(
+        &self,
+        request: GetChangeRequestDiscussionCommentsRequest,
         credential: &ForgeCredential,
     ) -> Result<Vec<ChangeRequestCommentDetail>, ServiceError>;
 

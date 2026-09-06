@@ -23,6 +23,47 @@ Write safety:
 - Audit-before-action on all write operations
 - Git auth via `http.extraHeader` — token never in argv or URLs
 
+### Choosing pull request feedback
+
+`get_change_request_comments` remains the mixed chronological discussion/review
+feed. Use `get_change_request_discussion_comments` for general discussion alone,
+or `get_change_request_reviews` for submitted top-level formal reviews alone.
+These narrow reads fetch only their selected provider resource; an error reading
+the other resource cannot break them. Empty streams return `[]`. Existing comment
+and submit-review writes are unchanged. Inline review comments are not included.
+
+For example, pass `forge="adlevio", owner="tokarix", repo="forge-mcp", index=137`
+to these tools (substitute the pull request index for the task):
+
+- A fresh review starts with `get_change_request` and `get_change_request_diff`.
+  Read historical feedback only when deliberately needed.
+- Rework calls `get_change_request_reviews` and selects the triggering review by
+  its `id` and `commit_id`, where supplied by the provider.
+- Optional conversation inspection uses `get_change_request_discussion_comments`;
+  optional combined history inspection uses `get_change_request_comments`.
+
+The HTTP reads are `GET /api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}/reviews`
+and `GET /api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}/discussion-comments`.
+`GET`/`POST .../comments` and `POST .../reviews` remain available.
+
+Forgejo and GitHub retain review IDs, available commit references, submitted
+empty-body reviews, and dismissed reviews. Drafts without `submitted_at` are
+omitted. State spellings remain provider-specific: Forgejo uses `REQUEST_CHANGES`
+and `COMMENT`; GitHub uses `CHANGES_REQUESTED` and `COMMENTED`. Both also expose
+`APPROVED` and `DISMISSED`. Results use stable chronological timestamp ordering;
+the mixed feed places discussion before reviews for equal timestamps.
+
+GitLab discussion consists of non-system merge request notes. Its reviews read
+exposes **current approvals only**, not a historical formal-review stream:
+`kind="review"`, `review_state="APPROVED"`, `id=0`, empty body and timestamp, and
+`commit_id=null`. It cannot identify a `REQUEST_CHANGES` event. Discussion text
+is never parsed to synthesize review feedback.
+
+GitHub retains bounded pagination and fails the read if a later selected page
+fails. Forgejo comments/reviews and GitLab notes currently fetch **one upstream
+page**; these APIs do not promise exhaustive historical results. Future pagination
+work must preserve isolation between discussion and review resources.
+
 Limitations:
 
 - This thing is not efficient. `commit_patch` and `rebase_branch` do a full clone every time. For small to medium repos, that's fine. For large repos, you'll feel it.

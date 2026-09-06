@@ -338,6 +338,32 @@ pub struct GetChangeRequestCommentsTool {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct GetChangeRequestReviewsTool {
+    /// Forge alias -- use `forge_info` to discover available aliases.
+    pub forge: String,
+    /// Change request index number.
+    #[serde(deserialize_with = "serde_aux::field_attributes::deserialize_number_from_string")]
+    pub index: u64,
+    /// Repository owner or organization.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GetChangeRequestDiscussionCommentsTool {
+    /// Forge alias -- use `forge_info` to discover available aliases.
+    pub forge: String,
+    /// Change request index number.
+    #[serde(deserialize_with = "serde_aux::field_attributes::deserialize_number_from_string")]
+    pub index: u64,
+    /// Repository owner or organization.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct GetChangeRequestTool {
     /// Forge alias -- use `forge_info` to discover available aliases.
     pub forge: String,
@@ -1606,10 +1632,10 @@ impl McpShim {
         self.gateway_post(url, &gw.token, &body).await
     }
 
-    /// Get all comments and reviews for a change request.
+    /// Get the backward-compatible mixed discussion and review feed.
     #[tool(
         name = "get_change_request_comments",
-        description = "Get all comments and reviews for a change request (pull request)."
+        description = "Get the backward-compatible mixed chronological feed of general discussion and formal reviews. Use get_change_request_discussion_comments or get_change_request_reviews for isolated reads; inline review comments are excluded. Provider pagination limits apply."
     )]
     async fn get_change_request_comments(
         &self,
@@ -1628,6 +1654,60 @@ impl McpShim {
                 "pulls",
                 &request.index.to_string(),
                 "comments",
+            ],
+        )?;
+        self.gateway_get(url, &gw.token).await
+    }
+
+    /// Read discussion comments only.
+    #[tool(
+        name = "get_change_request_discussion_comments",
+        description = "Get general PR discussion comments only, excluding formal reviews and inline review comments. GitLab returns non-system merge request notes only. Use get_change_request_comments for the backward-compatible mixed feed."
+    )]
+    async fn get_change_request_discussion_comments(
+        &self,
+        Parameters(request): Parameters<GetChangeRequestDiscussionCommentsTool>,
+    ) -> Result<String, McpError> {
+        let gw = self.resolve_gateway(&request.forge).await?;
+        let url = Self::build_url(
+            &gw.url,
+            &[
+                "api",
+                "v1",
+                "repos",
+                &request.forge,
+                &request.owner,
+                &request.repo,
+                "pulls",
+                &request.index.to_string(),
+                "discussion-comments",
+            ],
+        )?;
+        self.gateway_get(url, &gw.token).await
+    }
+
+    /// Read reviews only.
+    #[tool(
+        name = "get_change_request_reviews",
+        description = "Get submitted top-level formal reviews only, excluding discussion and inline review comments. GitLab returns current approvals only, with no review ID, timestamp, body or commit reference; it cannot identify REQUEST_CHANGES events. Use get_change_request_comments for the backward-compatible mixed feed."
+    )]
+    async fn get_change_request_reviews(
+        &self,
+        Parameters(request): Parameters<GetChangeRequestReviewsTool>,
+    ) -> Result<String, McpError> {
+        let gw = self.resolve_gateway(&request.forge).await?;
+        let url = Self::build_url(
+            &gw.url,
+            &[
+                "api",
+                "v1",
+                "repos",
+                &request.forge,
+                &request.owner,
+                &request.repo,
+                "pulls",
+                &request.index.to_string(),
+                "reviews",
             ],
         )?;
         self.gateway_get(url, &gw.token).await
@@ -2693,6 +2773,40 @@ mod tests {
             read_only: false,
             server_name: "forge-mcp-shim".to_string(),
             server_version: "0.1.0-test".to_string(),
+        }
+    }
+
+    #[test]
+    fn feedback_tools_advertise_distinct_scopes_and_shared_arguments() {
+        let shim = McpShim::new(test_config("http://localhost"));
+        for (name, scope) in [
+            ("get_change_request_comments", "mixed chronological feed"),
+            (
+                "get_change_request_reviews",
+                "top-level formal reviews only",
+            ),
+            (
+                "get_change_request_discussion_comments",
+                "discussion comments only",
+            ),
+        ] {
+            let tool = shim.tool_router.get(name).expect("advertised tool");
+            assert!(
+                tool.description
+                    .as_deref()
+                    .expect("description")
+                    .contains(scope)
+            );
+            let schema = serde_json::to_value(&tool.input_schema).expect("schema");
+            for argument in ["forge", "owner", "repo", "index"] {
+                assert!(schema["properties"][argument].is_object());
+                assert!(
+                    schema["required"]
+                        .as_array()
+                        .expect("required")
+                        .contains(&serde_json::json!(argument))
+                );
+            }
         }
     }
 
@@ -4237,6 +4351,138 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_change_request_discussion_comments_calls_gateway()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mock_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path_regex(
+                r"/api/v1/repos/.+/.+/.+/pulls/\d+/discussion-comments",
+            ))
+            .and(wiremock::matchers::header(
+                "authorization",
+                "Bearer test-token",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                    {
+                        "author": "reviewer",
+                        "body": "looks good",
+                        "created_at": "2026-03-18T10:00:00Z",
+                        "id": 1,
+                        "kind": "comment",
+                        "review_state": null
+                    }
+                ])),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let (client, server_handle) =
+            spawn_shim_and_client(test_config(&mock_server.uri())).await?;
+
+        let args = serde_json::json!({
+            "forge": "test-forge",
+            "owner": "org",
+            "repo": "repo",
+            "index": "1"
+        })
+        .as_object()
+        .expect("json args as object")
+        .clone();
+
+        let result = client
+            .call_tool(
+                CallToolRequestParams::new("get_change_request_discussion_comments")
+                    .with_arguments(args),
+            )
+            .await?;
+
+        let text = result
+            .content
+            .first()
+            .and_then(|c| c.raw.as_text())
+            .map(|t| t.text.clone())
+            .expect("text result");
+        let forwarded: serde_json::Value = serde_json::from_str(&text)?;
+        assert_eq!(
+            forwarded,
+            serde_json::json!([{
+                "author": "reviewer", "body": "looks good", "created_at": "2026-03-18T10:00:00Z",
+                "id": 1, "kind": "comment", "review_state": null
+            }])
+        );
+
+        drop(client);
+        server_handle.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_change_request_reviews_calls_gateway() -> Result<(), Box<dyn std::error::Error>> {
+        let mock_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path_regex(
+                r"/api/v1/repos/.+/.+/.+/pulls/\d+/reviews",
+            ))
+            .and(wiremock::matchers::header(
+                "authorization",
+                "Bearer test-token",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                    {
+                        "author": "reviewer",
+                        "body": "looks good",
+                        "created_at": "2026-03-18T10:00:00Z",
+                        "id": 1,
+                        "kind": "review",
+                        "review_state": null
+                    }
+                ])),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let (client, server_handle) =
+            spawn_shim_and_client(test_config(&mock_server.uri())).await?;
+
+        let args = serde_json::json!({
+            "forge": "test-forge",
+            "owner": "org",
+            "repo": "repo",
+            "index": "1"
+        })
+        .as_object()
+        .expect("json args as object")
+        .clone();
+
+        let result = client
+            .call_tool(
+                CallToolRequestParams::new("get_change_request_reviews").with_arguments(args),
+            )
+            .await?;
+
+        let text = result
+            .content
+            .first()
+            .and_then(|c| c.raw.as_text())
+            .map(|t| t.text.clone())
+            .expect("text result");
+        let forwarded: serde_json::Value = serde_json::from_str(&text)?;
+        assert_eq!(
+            forwarded,
+            serde_json::json!([{
+                "author": "reviewer", "body": "looks good", "created_at": "2026-03-18T10:00:00Z",
+                "id": 1, "kind": "review", "review_state": null
+            }])
+        );
+
+        drop(client);
+        server_handle.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn startup_channel_spike_reaches_client() -> Result<(), Box<dyn std::error::Error>> {
         let mock_server = wiremock::MockServer::start().await;
         let mut config = test_channel_config(&mock_server.uri());
@@ -5182,6 +5428,234 @@ mod tests {
         .clone();
         let result = client
             .call_tool(CallToolRequestParams::new("get_issue").with_arguments(args_beta))
+            .await?;
+        let text = result
+            .content
+            .first()
+            .and_then(|c| c.raw.as_text())
+            .map(|t| t.text.clone())
+            .expect("text result");
+        assert!(text.contains("Beta issue"));
+
+        drop(client);
+        server_handle.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn multi_gateway_discussion_comments_routes_to_correct_gateway()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mock_gw_a = wiremock::MockServer::start().await;
+        let mock_gw_b = wiremock::MockServer::start().await;
+
+        // Gateway A advertises forge "alpha"
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/api/v1/agent/info"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "agent_id": "test",
+                    "forges": [{"alias": "alpha", "type": "forgejo"}]
+                })),
+            )
+            .mount(&mock_gw_a)
+            .await;
+
+        // Gateway B advertises forge "beta"
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/api/v1/agent/info"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "agent_id": "test",
+                    "forges": [{"alias": "beta", "type": "gitlab"}]
+                })),
+            )
+            .mount(&mock_gw_b)
+            .await;
+
+        // Issue endpoint only on gateway A (forge alpha)
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(
+                "/api/v1/repos/alpha/org/repo/pulls/1/discussion-comments",
+            ))
+            .and(wiremock::matchers::header(
+                "authorization",
+                "Bearer token-a",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"number": 1, "title": "Alpha issue"})),
+            )
+            .mount(&mock_gw_a)
+            .await;
+
+        // Issue endpoint only on gateway B (forge beta)
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(
+                "/api/v1/repos/beta/org/repo/pulls/2/discussion-comments",
+            ))
+            .and(wiremock::matchers::header(
+                "authorization",
+                "Bearer token-b",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"number": 2, "title": "Beta issue"})),
+            )
+            .mount(&mock_gw_b)
+            .await;
+
+        let config = test_multi_gateway_config(&[
+            ("gw-a", &mock_gw_a.uri(), "token-a"),
+            ("gw-b", &mock_gw_b.uri(), "token-b"),
+        ]);
+        let (client, server_handle) = spawn_shim_and_client(config).await?;
+
+        // Request to forge "alpha" should hit gateway A
+        let args_alpha = serde_json::json!({
+            "forge": "alpha", "owner": "org", "repo": "repo", "index": 1
+        })
+        .as_object()
+        .expect("json args as object")
+        .clone();
+        let result = client
+            .call_tool(
+                CallToolRequestParams::new("get_change_request_discussion_comments")
+                    .with_arguments(args_alpha),
+            )
+            .await?;
+        let text = result
+            .content
+            .first()
+            .and_then(|c| c.raw.as_text())
+            .map(|t| t.text.clone())
+            .expect("text result");
+        assert!(text.contains("Alpha issue"));
+
+        // Request to forge "beta" should hit gateway B
+        let args_beta = serde_json::json!({
+            "forge": "beta", "owner": "org", "repo": "repo", "index": 2
+        })
+        .as_object()
+        .expect("json args as object")
+        .clone();
+        let result = client
+            .call_tool(
+                CallToolRequestParams::new("get_change_request_discussion_comments")
+                    .with_arguments(args_beta),
+            )
+            .await?;
+        let text = result
+            .content
+            .first()
+            .and_then(|c| c.raw.as_text())
+            .map(|t| t.text.clone())
+            .expect("text result");
+        assert!(text.contains("Beta issue"));
+
+        drop(client);
+        server_handle.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn multi_gateway_reviews_routes_to_correct_gateway()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mock_gw_a = wiremock::MockServer::start().await;
+        let mock_gw_b = wiremock::MockServer::start().await;
+
+        // Gateway A advertises forge "alpha"
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/api/v1/agent/info"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "agent_id": "test",
+                    "forges": [{"alias": "alpha", "type": "forgejo"}]
+                })),
+            )
+            .mount(&mock_gw_a)
+            .await;
+
+        // Gateway B advertises forge "beta"
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/api/v1/agent/info"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "agent_id": "test",
+                    "forges": [{"alias": "beta", "type": "gitlab"}]
+                })),
+            )
+            .mount(&mock_gw_b)
+            .await;
+
+        // Issue endpoint only on gateway A (forge alpha)
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(
+                "/api/v1/repos/alpha/org/repo/pulls/1/reviews",
+            ))
+            .and(wiremock::matchers::header(
+                "authorization",
+                "Bearer token-a",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"number": 1, "title": "Alpha issue"})),
+            )
+            .mount(&mock_gw_a)
+            .await;
+
+        // Issue endpoint only on gateway B (forge beta)
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(
+                "/api/v1/repos/beta/org/repo/pulls/2/reviews",
+            ))
+            .and(wiremock::matchers::header(
+                "authorization",
+                "Bearer token-b",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"number": 2, "title": "Beta issue"})),
+            )
+            .mount(&mock_gw_b)
+            .await;
+
+        let config = test_multi_gateway_config(&[
+            ("gw-a", &mock_gw_a.uri(), "token-a"),
+            ("gw-b", &mock_gw_b.uri(), "token-b"),
+        ]);
+        let (client, server_handle) = spawn_shim_and_client(config).await?;
+
+        // Request to forge "alpha" should hit gateway A
+        let args_alpha = serde_json::json!({
+            "forge": "alpha", "owner": "org", "repo": "repo", "index": 1
+        })
+        .as_object()
+        .expect("json args as object")
+        .clone();
+        let result = client
+            .call_tool(
+                CallToolRequestParams::new("get_change_request_reviews").with_arguments(args_alpha),
+            )
+            .await?;
+        let text = result
+            .content
+            .first()
+            .and_then(|c| c.raw.as_text())
+            .map(|t| t.text.clone())
+            .expect("text result");
+        assert!(text.contains("Alpha issue"));
+
+        // Request to forge "beta" should hit gateway B
+        let args_beta = serde_json::json!({
+            "forge": "beta", "owner": "org", "repo": "repo", "index": 2
+        })
+        .as_object()
+        .expect("json args as object")
+        .clone();
+        let result = client
+            .call_tool(
+                CallToolRequestParams::new("get_change_request_reviews").with_arguments(args_beta),
+            )
             .await?;
         let text = result
             .content

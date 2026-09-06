@@ -492,8 +492,30 @@ pub trait ForgeAdapter: Send + Sync {
         credential: &ForgeCredential,
     ) -> Result<Vec<String>, ForgeError>;
 
-    /// Gets all comments and reviews for a change request.
+    /// Gets the backward-compatible mixed discussion and review feed.
     async fn get_change_request_comments(
+        &self,
+        repository: &RepositoryRef,
+        index: u64,
+        credential: &ForgeCredential,
+    ) -> Result<Vec<ChangeRequestCommentDetail>, ForgeError>;
+
+    /// Reads submitted top-level reviews without fetching discussion or inline comments.
+    /// GitLab exposes current approvals only: ID is 0, body/timestamp are empty,
+    /// and commit references are absent; `REQUEST_CHANGES` events are unavailable.
+    /// GitHub uses bounded pagination; Forgejo reads one upstream page.
+    async fn get_change_request_reviews(
+        &self,
+        repository: &RepositoryRef,
+        index: u64,
+        credential: &ForgeCredential,
+    ) -> Result<Vec<ChangeRequestCommentDetail>, ForgeError>;
+
+    /// Reads general discussion without fetching reviews or approvals.
+    /// Entries have kind="comment" and absent commit ID and review state.
+    /// GitLab excludes system notes. Forgejo and GitLab read one upstream page;
+    /// GitHub uses bounded pagination.
+    async fn get_change_request_discussion_comments(
         &self,
         repository: &RepositoryRef,
         index: u64,
@@ -2201,6 +2223,23 @@ impl ForgeAdapter for ForgejoAdapter {
         index: u64,
         credential: &ForgeCredential,
     ) -> Result<Vec<ChangeRequestCommentDetail>, ForgeError> {
+        let mut result = self
+            .get_change_request_discussion_comments(repository, index, credential)
+            .await?;
+        result.extend(
+            self.get_change_request_reviews(repository, index, credential)
+                .await?,
+        );
+        result.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        Ok(result)
+    }
+
+    async fn get_change_request_discussion_comments(
+        &self,
+        repository: &RepositoryRef,
+        index: u64,
+        credential: &ForgeCredential,
+    ) -> Result<Vec<ChangeRequestCommentDetail>, ForgeError> {
         let effective_token = credential.token.as_deref().or(self.config.token.as_deref());
 
         // Fetch issue comments (general comments on the PR)
@@ -2217,6 +2256,32 @@ impl ForgeAdapter for ForgejoAdapter {
         let comments_response = Self::check_response(comments_req.send().await?).await?;
         let issue_comments: Vec<ForgejoIssueComment> = comments_response.json().await?;
 
+        let mut result = Vec::new();
+
+        for c in issue_comments {
+            result.push(ChangeRequestCommentDetail {
+                author: c.user.login,
+                body: c.body,
+                commit_id: None,
+                created_at: c.created_at,
+                id: c.id,
+                kind: "comment".to_string(),
+                review_state: None,
+            });
+        }
+
+        result.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        Ok(result)
+    }
+
+    async fn get_change_request_reviews(
+        &self,
+        repository: &RepositoryRef,
+        index: u64,
+        credential: &ForgeCredential,
+    ) -> Result<Vec<ChangeRequestCommentDetail>, ForgeError> {
+        let effective_token = credential.token.as_deref().or(self.config.token.as_deref());
+
         // Fetch pull request reviews
         let reviews_url = format!(
             "{}/api/v1/repos/{}/{}/pulls/{index}/reviews",
@@ -2231,20 +2296,7 @@ impl ForgeAdapter for ForgejoAdapter {
         let reviews_response = Self::check_response(reviews_req.send().await?).await?;
         let reviews: Vec<ForgejoPullReview> = reviews_response.json().await?;
 
-        // Merge comments and non-PENDING reviews, sort chronologically
-        let mut result: Vec<ChangeRequestCommentDetail> = Vec::new();
-
-        for c in issue_comments {
-            result.push(ChangeRequestCommentDetail {
-                author: c.user.login,
-                body: c.body,
-                commit_id: None,
-                created_at: c.created_at,
-                id: c.id,
-                kind: "comment".to_string(),
-                review_state: None,
-            });
-        }
+        let mut result = Vec::new();
 
         for r in reviews {
             let Some(submitted_at) = r.submitted_at else {

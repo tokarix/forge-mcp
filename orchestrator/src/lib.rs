@@ -167,6 +167,48 @@ where
             .map_err(|e| ServiceError::Upstream(e.to_string()))
     }
 
+    async fn get_change_request_reviews(
+        &self,
+        request: domain::GetChangeRequestReviewsRequest,
+        credential: &ForgeCredential,
+    ) -> Result<Vec<ChangeRequestCommentDetail>, ServiceError> {
+        self.audit_sink
+            .record(AuditRecord {
+                agent: request.agent,
+                action: "get_change_request_reviews".to_string(),
+                repository: request.repository.clone(),
+                target: request.index.to_string(),
+            })
+            .await
+            .map_err(|e| ServiceError::Audit(e.to_string()))?;
+
+        self.adapter
+            .get_change_request_reviews(&request.repository, request.index, credential)
+            .await
+            .map_err(|e| ServiceError::Upstream(e.to_string()))
+    }
+
+    async fn get_change_request_discussion_comments(
+        &self,
+        request: domain::GetChangeRequestDiscussionCommentsRequest,
+        credential: &ForgeCredential,
+    ) -> Result<Vec<ChangeRequestCommentDetail>, ServiceError> {
+        self.audit_sink
+            .record(AuditRecord {
+                agent: request.agent,
+                action: "get_change_request_discussion_comments".to_string(),
+                repository: request.repository.clone(),
+                target: request.index.to_string(),
+            })
+            .await
+            .map_err(|e| ServiceError::Audit(e.to_string()))?;
+
+        self.adapter
+            .get_change_request_discussion_comments(&request.repository, request.index, credential)
+            .await
+            .map_err(|e| ServiceError::Upstream(e.to_string()))
+    }
+
     async fn get_change_request_diff(
         &self,
         request: GetChangeRequestDiffRequest,
@@ -1627,6 +1669,7 @@ mod tests {
 
     #[derive(Default)]
     struct FakeForgeAdapter {
+        stream_reads: std::sync::Mutex<Vec<(String, RepositoryRef, u64, ForgeCredential)>>,
         authenticated_user_lookups: std::sync::atomic::AtomicUsize,
     }
 
@@ -1879,6 +1922,36 @@ mod tests {
             Err(forge::ForgeError::Unsupported(
                 "unimplemented in test fake".into(),
             ))
+        }
+
+        async fn get_change_request_reviews(
+            &self,
+            repository: &RepositoryRef,
+            index: u64,
+            credential: &ForgeCredential,
+        ) -> Result<Vec<ChangeRequestCommentDetail>, ForgeError> {
+            self.stream_reads.lock().expect("stream reads").push((
+                "get_change_request_reviews".into(),
+                repository.clone(),
+                index,
+                credential.clone(),
+            ));
+            Ok(vec![])
+        }
+
+        async fn get_change_request_discussion_comments(
+            &self,
+            repository: &RepositoryRef,
+            index: u64,
+            credential: &ForgeCredential,
+        ) -> Result<Vec<ChangeRequestCommentDetail>, ForgeError> {
+            self.stream_reads.lock().expect("stream reads").push((
+                "get_change_request_discussion_comments".into(),
+                repository.clone(),
+                index,
+                credential.clone(),
+            ));
+            Ok(vec![])
         }
 
         async fn get_change_request(
@@ -2270,6 +2343,28 @@ mod tests {
             ))
         }
 
+        async fn get_change_request_reviews(
+            &self,
+            _repository: &RepositoryRef,
+            _index: u64,
+            _credential: &domain::ForgeCredential,
+        ) -> Result<Vec<ChangeRequestCommentDetail>, ForgeError> {
+            Err(forge::ForgeError::Unsupported(
+                "unimplemented in test fake".into(),
+            ))
+        }
+
+        async fn get_change_request_discussion_comments(
+            &self,
+            _repository: &RepositoryRef,
+            _index: u64,
+            _credential: &domain::ForgeCredential,
+        ) -> Result<Vec<ChangeRequestCommentDetail>, ForgeError> {
+            Err(forge::ForgeError::Unsupported(
+                "unimplemented in test fake".into(),
+            ))
+        }
+
         async fn get_change_request(
             &self,
             _repository: &RepositoryRef,
@@ -2495,6 +2590,111 @@ mod tests {
             .expect_err("audit failure should propagate");
 
         assert!(matches!(err, ServiceError::Audit(_)));
+    }
+
+    #[tokio::test]
+    async fn narrow_reads_audit_and_forward_identity_and_credentials() {
+        let adapter = Arc::new(FakeForgeAdapter::default());
+        let audit = Arc::new(InMemoryAuditSink::new());
+        let service = ReadOrchestrator::new(Arc::clone(&adapter), Arc::clone(&audit));
+        let request = test_request("unused");
+        let credential = ForgeCredential {
+            token: Some("caller-token".into()),
+        };
+        service
+            .get_change_request_reviews(
+                domain::GetChangeRequestReviewsRequest {
+                    agent: request.agent.clone(),
+                    repository: request.repository.clone(),
+                    index: 137,
+                },
+                &credential,
+            )
+            .await
+            .expect("reviews");
+        service
+            .get_change_request_discussion_comments(
+                domain::GetChangeRequestDiscussionCommentsRequest {
+                    agent: request.agent.clone(),
+                    repository: request.repository.clone(),
+                    index: 138,
+                },
+                &credential,
+            )
+            .await
+            .expect("discussion");
+        let records = audit.records().expect("audit records");
+        let reads = adapter.stream_reads.lock().expect("stream reads");
+        assert_eq!(records.len(), 2);
+        assert_eq!(reads.len(), 2);
+        for (i, (action, index)) in [
+            ("get_change_request_reviews", 137),
+            ("get_change_request_discussion_comments", 138),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(records[i].action, action);
+            assert_eq!(records[i].agent, request.agent);
+            assert_eq!(records[i].repository, request.repository);
+            assert_eq!(records[i].target, index.to_string());
+            assert_eq!(reads[i].0, action);
+            assert_eq!(reads[i].1, request.repository);
+            assert_eq!(reads[i].2, index);
+            assert_eq!(reads[i].3.token, credential.token);
+        }
+    }
+
+    #[tokio::test]
+    async fn narrow_reads_stop_at_audit_failure_and_propagate_upstream_errors() {
+        let request = test_request("unused");
+        let credential = ForgeCredential { token: None };
+        let reviews = domain::GetChangeRequestReviewsRequest {
+            agent: request.agent.clone(),
+            repository: request.repository.clone(),
+            index: 137,
+        };
+        let discussion = domain::GetChangeRequestDiscussionCommentsRequest {
+            agent: request.agent,
+            repository: request.repository,
+            index: 137,
+        };
+        let adapter = Arc::new(FakeForgeAdapter::default());
+        let service = ReadOrchestrator::new(Arc::clone(&adapter), Arc::new(FailingAuditSink));
+        assert!(matches!(
+            service
+                .get_change_request_reviews(reviews.clone(), &credential)
+                .await,
+            Err(ServiceError::Audit(_))
+        ));
+        assert!(matches!(
+            service
+                .get_change_request_discussion_comments(discussion.clone(), &credential)
+                .await,
+            Err(ServiceError::Audit(_))
+        ));
+        assert!(
+            adapter
+                .stream_reads
+                .lock()
+                .expect("stream reads")
+                .is_empty()
+        );
+        let audit = Arc::new(InMemoryAuditSink::new());
+        let service = ReadOrchestrator::new(Arc::new(FailingForgeAdapter), Arc::clone(&audit));
+        assert!(matches!(
+            service
+                .get_change_request_reviews(reviews, &credential)
+                .await,
+            Err(ServiceError::Upstream(_))
+        ));
+        assert!(matches!(
+            service
+                .get_change_request_discussion_comments(discussion, &credential)
+                .await,
+            Err(ServiceError::Upstream(_))
+        ));
+        assert_eq!(audit.records().expect("audit records").len(), 2);
     }
 
     // --- get_change_request_checks tests ---
@@ -2799,6 +2999,28 @@ mod tests {
             })
         }
         async fn get_change_request_comments(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<Vec<ChangeRequestCommentDetail>, ForgeError> {
+            Err(forge::ForgeError::Unsupported(
+                "unimplemented in test fake".into(),
+            ))
+        }
+
+        async fn get_change_request_reviews(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<Vec<ChangeRequestCommentDetail>, ForgeError> {
+            Err(forge::ForgeError::Unsupported(
+                "unimplemented in test fake".into(),
+            ))
+        }
+
+        async fn get_change_request_discussion_comments(
             &self,
             _: &RepositoryRef,
             _: u64,
@@ -3475,6 +3697,28 @@ mod tests {
         }
 
         async fn get_change_request_comments(
+            &self,
+            _repository: &RepositoryRef,
+            _index: u64,
+            _credential: &domain::ForgeCredential,
+        ) -> Result<Vec<ChangeRequestCommentDetail>, ForgeError> {
+            Err(forge::ForgeError::Unsupported(
+                "unimplemented in test fake".into(),
+            ))
+        }
+
+        async fn get_change_request_reviews(
+            &self,
+            _repository: &RepositoryRef,
+            _index: u64,
+            _credential: &domain::ForgeCredential,
+        ) -> Result<Vec<ChangeRequestCommentDetail>, ForgeError> {
+            Err(forge::ForgeError::Unsupported(
+                "unimplemented in test fake".into(),
+            ))
+        }
+
+        async fn get_change_request_discussion_comments(
             &self,
             _repository: &RepositoryRef,
             _index: u64,
@@ -4305,6 +4549,28 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             ))
         }
 
+        async fn get_change_request_reviews(
+            &self,
+            _repository: &RepositoryRef,
+            _index: u64,
+            _credential: &domain::ForgeCredential,
+        ) -> Result<Vec<ChangeRequestCommentDetail>, ForgeError> {
+            Err(forge::ForgeError::Unsupported(
+                "unimplemented in test fake".into(),
+            ))
+        }
+
+        async fn get_change_request_discussion_comments(
+            &self,
+            _repository: &RepositoryRef,
+            _index: u64,
+            _credential: &domain::ForgeCredential,
+        ) -> Result<Vec<ChangeRequestCommentDetail>, ForgeError> {
+            Err(forge::ForgeError::Unsupported(
+                "unimplemented in test fake".into(),
+            ))
+        }
+
         async fn get_change_request(
             &self,
             _repository: &RepositoryRef,
@@ -4940,6 +5206,28 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             ))
         }
 
+        async fn get_change_request_reviews(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &domain::ForgeCredential,
+        ) -> Result<Vec<ChangeRequestCommentDetail>, ForgeError> {
+            Err(forge::ForgeError::Unsupported(
+                "unimplemented in test fake".into(),
+            ))
+        }
+
+        async fn get_change_request_discussion_comments(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &domain::ForgeCredential,
+        ) -> Result<Vec<ChangeRequestCommentDetail>, ForgeError> {
+            Err(forge::ForgeError::Unsupported(
+                "unimplemented in test fake".into(),
+            ))
+        }
+
         async fn get_change_request(
             &self,
             _: &RepositoryRef,
@@ -5402,6 +5690,28 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
         }
 
         async fn get_change_request_comments(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &domain::ForgeCredential,
+        ) -> Result<Vec<ChangeRequestCommentDetail>, ForgeError> {
+            Err(forge::ForgeError::Unsupported(
+                "unimplemented in test fake".into(),
+            ))
+        }
+
+        async fn get_change_request_reviews(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &domain::ForgeCredential,
+        ) -> Result<Vec<ChangeRequestCommentDetail>, ForgeError> {
+            Err(forge::ForgeError::Unsupported(
+                "unimplemented in test fake".into(),
+            ))
+        }
+
+        async fn get_change_request_discussion_comments(
             &self,
             _: &RepositoryRef,
             _: u64,
@@ -7095,6 +7405,24 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
         ) -> Result<Vec<ChangeRequestCommentDetail>, ForgeError> {
             Err(ForgeError::Unsupported("test fake".into()))
         }
+
+        async fn get_change_request_reviews(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<Vec<ChangeRequestCommentDetail>, ForgeError> {
+            Err(ForgeError::Unsupported("test fake".into()))
+        }
+
+        async fn get_change_request_discussion_comments(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<Vec<ChangeRequestCommentDetail>, ForgeError> {
+            Err(ForgeError::Unsupported("test fake".into()))
+        }
         async fn get_change_request(
             &self,
             _: &RepositoryRef,
@@ -7639,6 +7967,24 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             Err(forge::ForgeError::Unsupported("test fake".into()))
         }
         async fn get_change_request_comments(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<Vec<ChangeRequestCommentDetail>, ForgeError> {
+            Err(forge::ForgeError::Unsupported("test fake".into()))
+        }
+
+        async fn get_change_request_reviews(
+            &self,
+            _: &RepositoryRef,
+            _: u64,
+            _: &ForgeCredential,
+        ) -> Result<Vec<ChangeRequestCommentDetail>, ForgeError> {
+            Err(forge::ForgeError::Unsupported("test fake".into()))
+        }
+
+        async fn get_change_request_discussion_comments(
             &self,
             _: &RepositoryRef,
             _: u64,

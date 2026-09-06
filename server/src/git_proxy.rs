@@ -627,6 +627,24 @@ mod tests {
         ) -> Result<Vec<domain::ChangeRequestCommentDetail>, forge::ForgeError> {
             unimplemented!()
         }
+
+        async fn get_change_request_reviews(
+            &self,
+            _: &domain::RepositoryRef,
+            _: u64,
+            _: &domain::ForgeCredential,
+        ) -> Result<Vec<domain::ChangeRequestCommentDetail>, forge::ForgeError> {
+            unimplemented!()
+        }
+
+        async fn get_change_request_discussion_comments(
+            &self,
+            _: &domain::RepositoryRef,
+            _: u64,
+            _: &domain::ForgeCredential,
+        ) -> Result<Vec<domain::ChangeRequestCommentDetail>, forge::ForgeError> {
+            unimplemented!()
+        }
         async fn get_combined_commit_status(
             &self,
             _: &domain::RepositoryRef,
@@ -817,6 +835,22 @@ mod tests {
         async fn get_change_request_comments(
             &self,
             _request: GetChangeRequestCommentsRequest,
+            _: &domain::ForgeCredential,
+        ) -> Result<Vec<ChangeRequestCommentDetail>, ServiceError> {
+            unimplemented!()
+        }
+
+        async fn get_change_request_reviews(
+            &self,
+            _request: domain::GetChangeRequestReviewsRequest,
+            _: &domain::ForgeCredential,
+        ) -> Result<Vec<ChangeRequestCommentDetail>, ServiceError> {
+            unimplemented!()
+        }
+
+        async fn get_change_request_discussion_comments(
+            &self,
+            _request: domain::GetChangeRequestDiscussionCommentsRequest,
             _: &domain::ForgeCredential,
         ) -> Result<Vec<ChangeRequestCommentDetail>, ServiceError> {
             unimplemented!()

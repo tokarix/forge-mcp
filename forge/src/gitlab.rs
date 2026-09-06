@@ -995,6 +995,23 @@ impl crate::ForgeAdapter for GitLabAdapter {
         index: u64,
         credential: &ForgeCredential,
     ) -> Result<Vec<ChangeRequestCommentDetail>, ForgeError> {
+        let mut result = self
+            .get_change_request_discussion_comments(repository, index, credential)
+            .await?;
+        result.extend(
+            self.get_change_request_reviews(repository, index, credential)
+                .await?,
+        );
+        result.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        Ok(result)
+    }
+
+    async fn get_change_request_discussion_comments(
+        &self,
+        repository: &RepositoryRef,
+        index: u64,
+        credential: &ForgeCredential,
+    ) -> Result<Vec<ChangeRequestCommentDetail>, ForgeError> {
         let token = self.effective_token(credential);
 
         // Fetch merge request notes (comments).
@@ -1008,18 +1025,7 @@ impl crate::ForgeAdapter for GitLabAdapter {
         let notes_response = Self::check_response(notes_request.send().await?).await?;
         let notes: Vec<GitLabNote> = notes_response.json().await?;
 
-        // Fetch approvals to map as reviews.
-        let approvals_url = format!(
-            "{}/projects/{}/merge_requests/{}/approvals",
-            self.api_base(),
-            Self::project_path(repository),
-            index,
-        );
-        let approvals_request = Self::authenticate(self.client.get(&approvals_url), token);
-        let approvals_response = Self::check_response(approvals_request.send().await?).await?;
-        let approvals: GitLabApprovalResponse = approvals_response.json().await?;
-
-        let mut result: Vec<ChangeRequestCommentDetail> = Vec::new();
+        let mut result = Vec::new();
 
         // Add non-system notes as comments.
         for note in notes {
@@ -1036,6 +1042,31 @@ impl crate::ForgeAdapter for GitLabAdapter {
                 review_state: None,
             });
         }
+
+        result.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        Ok(result)
+    }
+
+    async fn get_change_request_reviews(
+        &self,
+        repository: &RepositoryRef,
+        index: u64,
+        credential: &ForgeCredential,
+    ) -> Result<Vec<ChangeRequestCommentDetail>, ForgeError> {
+        let token = self.effective_token(credential);
+
+        // Fetch approvals to map as reviews.
+        let approvals_url = format!(
+            "{}/projects/{}/merge_requests/{}/approvals",
+            self.api_base(),
+            Self::project_path(repository),
+            index,
+        );
+        let approvals_request = Self::authenticate(self.client.get(&approvals_url), token);
+        let approvals_response = Self::check_response(approvals_request.send().await?).await?;
+        let approvals: GitLabApprovalResponse = approvals_response.json().await?;
+
+        let mut result = Vec::new();
 
         // Add approvals as review entries.
         for approver in approvals.approved_by.unwrap_or_default() {
