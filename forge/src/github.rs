@@ -11,7 +11,7 @@ use hmac::{Hmac, Mac};
 use reqwest::{RequestBuilder, StatusCode, Url};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -3108,6 +3108,54 @@ struct GitHubWebhookReview {
     state: String,
 }
 
+// Review refresh hints require identity, not the live PR head or display fields.
+#[derive(Debug, Deserialize)]
+struct GitHubReviewLifecyclePayload {
+    action: String,
+    pull_request: GitHubReviewIdentity,
+    repository: GitHubReviewRepository,
+    review: GitHubReviewLifecycle,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubReviewRepository {
+    name: String,
+    owner: GitHubReviewOwner,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubReviewOwner {
+    login: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubReviewIdentity {
+    number: u64,
+    #[serde(default)]
+    title: serde_json::Value,
+    #[serde(default)]
+    html_url: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubReviewLifecycle {
+    id: u64,
+    commit_id: Option<String>,
+    #[serde(default)]
+    body: serde_json::Value,
+    #[serde(default)]
+    state: serde_json::Value,
+}
+
+fn github_review_state(state: &str) -> Option<domain::ReviewState> {
+    match state {
+        "approved" => Some(domain::ReviewState::Approved),
+        "changes_requested" => Some(domain::ReviewState::RequestChanges),
+        "commented" => Some(domain::ReviewState::Comment),
+        _ => None,
+    }
+}
+
 impl ForgeWebhookAdapter for GitHubAdapter {
     fn verify_and_parse_webhook_event(
         &self,
@@ -3312,29 +3360,108 @@ fn parse_review_webhook(
     forge_kind: domain::ForgeKind,
     host: &str,
 ) -> Result<Option<domain::WebhookEvent>, ForgeWebhookError> {
+    let raw: serde_json::Value = serde_json::from_slice(body)
+        .map_err(|e| ForgeWebhookError::InvalidPayload(e.to_string()))?;
+    // Ignore unsupported actions before schema validation: valid JSON need not
+    // match a supported review payload. Signature verification already ran.
+    match raw.get("action").and_then(serde_json::Value::as_str) {
+        Some("edited" | "dismissed") => {
+            return parse_review_lifecycle(body, &raw, delivery_id, forge_alias, forge_kind, host);
+        }
+        Some("submitted") => {}
+        _ => return Ok(None),
+    }
+    // Keep historical submitted head/display/commit validation.
     let payload: GitHubWebhookReviewPayload = serde_json::from_slice(body)
         .map_err(|e| ForgeWebhookError::InvalidPayload(e.to_string()))?;
-    if payload.action != "submitted" {
+    let Some(state) = github_review_state(&payload.review.state) else {
         return Ok(None);
-    }
-    let state = match payload.review.state.as_str() {
-        "approved" => domain::ReviewState::Approved,
-        "changes_requested" => domain::ReviewState::RequestChanges,
-        "commented" => domain::ReviewState::Comment,
-        _ => return Ok(None),
     };
     Ok(Some(domain::WebhookEvent::PullRequestReview(
         domain::PullRequestReviewEvent {
             action: domain::PullRequestReviewEventAction::Submitted,
+            provider_action: Some(payload.action),
+            reviewed_commit_id: (!payload.review.commit_id.is_empty())
+                .then(|| payload.review.commit_id.clone()),
+            payload_fingerprint: String::new(),
             delivery_id,
             head_sha: payload.review.commit_id,
             index: payload.pull_request.number,
             repository: webhook_repository(payload.repository, forge_alias, forge_kind, host),
             review_body: payload.review.body.unwrap_or_default(),
             review_id: payload.review.id,
-            review_state: state,
+            review_state: Some(state),
             title: payload.pull_request.title,
             url: payload.pull_request.html_url,
+        },
+    )))
+}
+
+fn parse_review_lifecycle(
+    body: &[u8],
+    raw: &serde_json::Value,
+    delivery_id: String,
+    forge_alias: &str,
+    forge_kind: domain::ForgeKind,
+    host: &str,
+) -> Result<Option<domain::WebhookEvent>, ForgeWebhookError> {
+    let payload: GitHubReviewLifecyclePayload = serde_json::from_slice(body)
+        .map_err(|e| ForgeWebhookError::InvalidPayload(e.to_string()))?;
+    if payload.pull_request.number == 0
+        || payload.review.id == 0
+        || payload.repository.owner.login.trim().is_empty()
+        || payload.repository.name.trim().is_empty()
+        || raw
+            .get("number")
+            .is_some_and(|number| number.as_u64() != Some(payload.pull_request.number))
+    {
+        return Err(ForgeWebhookError::InvalidPayload(
+            "review lifecycle identity missing or contradictory".to_string(),
+        ));
+    }
+    let dismissed = payload.action == "dismissed";
+    let action = if dismissed {
+        domain::PullRequestReviewEventAction::Dismissed
+    } else {
+        domain::PullRequestReviewEventAction::Edited
+    };
+    let review_state = if dismissed {
+        None
+    } else {
+        payload.review.state.as_str().and_then(github_review_state)
+    };
+    let reviewed_commit_id = payload.review.commit_id.filter(|commit| !commit.is_empty());
+    Ok(Some(domain::WebhookEvent::PullRequestReview(
+        domain::PullRequestReviewEvent {
+            provider_action: Some(payload.action),
+            action,
+            payload_fingerprint: format!("{:x}", Sha256::digest(body)),
+            delivery_id,
+            head_sha: reviewed_commit_id.clone().unwrap_or_default(),
+            reviewed_commit_id,
+            index: payload.pull_request.number,
+            repository: RepositoryRef {
+                alias: forge_alias.to_string(),
+                forge: forge_kind,
+                host: host.to_string(),
+                name: payload.repository.name,
+                owner: payload.repository.owner.login,
+            },
+            review_body: payload.review.body.as_str().unwrap_or_default().to_string(),
+            review_id: payload.review.id,
+            review_state,
+            title: payload
+                .pull_request
+                .title
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+            url: payload
+                .pull_request
+                .html_url
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
         },
     )))
 }

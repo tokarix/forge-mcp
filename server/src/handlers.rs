@@ -348,20 +348,38 @@ pub async fn post_webhook(
             "webhook accepted",
         );
 
-        if let domain::WebhookEvent::PullRequestReview(ref review) = event
-            && webhook.auto_merge
-            && matches!(status, crate::events::PublishStatus::Enqueued { .. })
-            && review.review_state == domain::ReviewState::Approved
-        {
-            let service = state.auto_merge_service.clone();
-            let review = review.clone();
-            tokio::spawn(async move {
-                service.handle_review(review).await;
-            });
+        if let domain::WebhookEvent::PullRequestReview(review) = event {
+            spawn_review_auto_merge(
+                review,
+                &status,
+                webhook.auto_merge,
+                &state.auto_merge_service,
+            );
         }
     }
 
     Ok::<_, (StatusCode, Json<ErrorBody>)>(StatusCode::ACCEPTED)
+}
+
+/// Return the task so callers can observe completion; HTTP delivery detaches it.
+fn spawn_review_auto_merge(
+    review: domain::PullRequestReviewEvent,
+    status: &crate::events::PublishStatus,
+    enabled: bool,
+    service: &Arc<crate::auto_merge::AutoMergeService>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    if enabled
+        && matches!(status, crate::events::PublishStatus::Enqueued { .. })
+        && review.action == domain::PullRequestReviewEventAction::Submitted
+        && review.review_state == Some(domain::ReviewState::Approved)
+    {
+        let service = Arc::clone(service);
+        Some(tokio::spawn(
+            async move { service.handle_review(review).await },
+        ))
+    } else {
+        None
+    }
 }
 
 #[utoipa::path(
@@ -2468,6 +2486,92 @@ mod tests {
 
     use super::*;
 
+    #[tokio::test]
+    async fn review_lifecycle_handler_and_service_guard_automation() {
+        use crate::events::PublishStatus;
+        use domain::{PullRequestReviewEventAction as Action, ReviewState};
+        let write_svc = Arc::new(FakeWriteService::new());
+        let (state, _events) = webhook_test_state(true, Arc::clone(&write_svc));
+        let approved = forge::ForgeWebhookAdapter::verify_and_parse_webhook_event(
+            &ApprovedReviewWebhookAdapter,
+            &[],
+            b"{}",
+            "test-forge",
+            domain::ForgeKind::Forgejo,
+            "https://forge.example",
+            "",
+        )
+        .expect("fixture")
+        .and_then(|event| match event {
+            domain::WebhookEvent::PullRequestReview(review) => Some(review),
+            _ => None,
+        })
+        .expect("fixture is an approval");
+        for action in [Action::Submitted, Action::Edited, Action::Dismissed] {
+            for verdict in [
+                None,
+                Some(ReviewState::Comment),
+                Some(ReviewState::RequestChanges),
+                Some(ReviewState::Approved),
+            ] {
+                let mut event = approved.clone();
+                event.action = action.clone();
+                event.review_state = verdict;
+                let accepted = action == Action::Submitted
+                    && event.review_state == Some(ReviewState::Approved);
+                let before = write_svc.calls.load(std::sync::atomic::Ordering::SeqCst);
+                let task = spawn_review_auto_merge(
+                    event.clone(),
+                    &PublishStatus::Enqueued { delivered: 1 },
+                    true,
+                    &state.auto_merge_service,
+                );
+                assert_eq!(task.is_some(), accepted);
+                if let Some(task) = task {
+                    task.await.expect("schedule task");
+                }
+                assert_eq!(
+                    write_svc.calls.load(std::sync::atomic::Ordering::SeqCst) - before,
+                    usize::from(accepted)
+                );
+                // Independently await the service boundary, including malformed
+                // dismissal-with-approval input a caller might construct.
+                state.auto_merge_service.handle_review(event).await;
+                assert_eq!(
+                    write_svc.calls.load(std::sync::atomic::Ordering::SeqCst) - before,
+                    2 * usize::from(accepted)
+                );
+            }
+        }
+        let before = write_svc.calls.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            spawn_review_auto_merge(
+                approved.clone(),
+                &PublishStatus::Duplicate,
+                true,
+                &state.auto_merge_service
+            )
+            .is_none()
+        );
+        assert!(
+            spawn_review_auto_merge(
+                approved,
+                &PublishStatus::Enqueued { delivered: 1 },
+                false,
+                &state.auto_merge_service
+            )
+            .is_none()
+        );
+        assert_eq!(
+            write_svc.calls.load(std::sync::atomic::Ordering::SeqCst),
+            before
+        );
+        assert_eq!(
+            write_svc.captured_auto_merge.lock().expect("capture").len(),
+            2
+        );
+    }
+
     struct FakeForgeAdapter;
 
     struct ApprovedReviewWebhookAdapter;
@@ -2485,6 +2589,9 @@ mod tests {
             Ok(Some(domain::WebhookEvent::PullRequestReview(
                 domain::PullRequestReviewEvent {
                     action: domain::PullRequestReviewEventAction::Submitted,
+                    provider_action: None,
+                    reviewed_commit_id: None,
+                    payload_fingerprint: String::new(),
                     delivery_id: "approved-review-delivery".to_string(),
                     head_sha: "abc123".to_string(),
                     index: 42,
@@ -2497,7 +2604,7 @@ mod tests {
                     },
                     review_body: "approved".to_string(),
                     review_id: 7,
-                    review_state: domain::ReviewState::Approved,
+                    review_state: Some(domain::ReviewState::Approved),
                     title: "Fix".to_string(),
                     url: "https://forge.example/org/repo/pulls/42".to_string(),
                 },
@@ -3242,6 +3349,7 @@ mod tests {
         captured_close_msg: Arc<Mutex<Option<String>>>,
         captured_add_dep: Arc<Mutex<Option<domain::AddIssueDependencyRequest>>>,
         captured_auto_merge: Arc<Mutex<CapturedAutoMerge>>,
+        auto_merge_called: tokio::sync::Notify,
         captured_remove_dep: Arc<Mutex<Option<domain::RemoveIssueDependencyRequest>>>,
     }
 
@@ -3252,6 +3360,7 @@ mod tests {
                 captured_close_msg: Arc::new(Mutex::new(None)),
                 captured_add_dep: Arc::new(Mutex::new(None)),
                 captured_auto_merge: Arc::new(Mutex::new(Vec::new())),
+                auto_merge_called: tokio::sync::Notify::new(),
                 captured_remove_dep: Arc::new(Mutex::new(None)),
             }
         }
@@ -3488,6 +3597,7 @@ mod tests {
                 .lock()
                 .expect("poisoned")
                 .push((request, credential.token.clone()));
+            self.auto_merge_called.notify_one();
             Ok(())
         }
 
@@ -4676,17 +4786,12 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::ACCEPTED);
         assert!(events.recv().await.is_some());
-        for _ in 0..10 {
-            if !write_svc
-                .captured_auto_merge
-                .lock()
-                .expect("poisoned")
-                .is_empty()
-            {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            write_svc.auto_merge_called.notified(),
+        )
+        .await
+        .expect("schedule completed");
         let records = write_svc.captured_auto_merge.lock().expect("poisoned");
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].0.merge_style, None);

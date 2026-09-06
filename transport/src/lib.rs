@@ -671,6 +671,12 @@ pub struct SubmitChangeRequestReviewTool {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct ChannelEventMetaEnvelope {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provider_action: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    review_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reviewed_commit_id: Option<String>,
     action: String,
     change_request: Option<u64>,
     delivery_id: String,
@@ -1030,6 +1036,18 @@ impl McpShim {
         Ok(body)
     }
 
+    fn channel_notification_payload(event: &AgentEventEnvelope) -> serde_json::Value {
+        // Serialize the envelope metadata once so optional identity omission is
+        // identical in poll_events and channel notifications.
+        let mut meta = serde_json::json!(event.meta);
+        if let Some(fields) = meta.as_object_mut()
+            && let Some(alias) = fields.remove("forge_alias")
+        {
+            fields.insert("forge".to_string(), alias);
+        }
+        serde_json::json!({"content": event.content, "meta": meta})
+    }
+
     async fn send_channel_notification(
         peer: &rmcp::service::Peer<RoleServer>,
         event: &AgentEventEnvelope,
@@ -1037,22 +1055,7 @@ impl McpShim {
         peer.send_notification(ServerNotification::CustomNotification(
             CustomNotification::new(
                 "notifications/claude/channel",
-                Some(serde_json::json!({
-                    "content": event.content,
-                    "meta": {
-                        "action": event.meta.action,
-                        "change_request": event.meta.change_request,
-                        "delivery_id": event.meta.delivery_id,
-                        "event_kind": event.meta.event_kind,
-                        "forge": event.meta.forge_alias,
-                        "head_sha": event.meta.head_sha,
-                        "issue": event.meta.issue,
-                        "issue_comment": event.meta.issue_comment,
-                        "owner": event.meta.owner,
-                        "repo": event.meta.repo,
-                        "review_state": event.meta.review_state,
-                    }
-                })),
+                Some(Self::channel_notification_payload(event)),
             ),
         ))
         .await
@@ -1142,6 +1145,9 @@ impl McpShim {
                 content: "change_request opened on test/org/repo#1 at deadbeef".to_string(),
                 kind: "change_request".to_string(),
                 meta: ChannelEventMetaEnvelope {
+                    provider_action: None,
+                    review_id: None,
+                    reviewed_commit_id: None,
                     action: "opened".to_string(),
                     change_request: Some(1),
                     delivery_id: "startup-spike".to_string(),
@@ -5088,6 +5094,116 @@ mod tests {
 
         drop(client);
         server_handle.await??;
+        Ok(())
+    }
+
+    #[test]
+    fn review_lifecycle_old_envelopes_default_and_omit_new_identity() {
+        let event: AgentEventEnvelope = serde_json::from_value(serde_json::json!({
+            "kind": "pull_request_review", "content": "old review",
+            "meta": {
+                "action": "submitted", "event_kind": "pull_request_review",
+                "change_request": 42, "delivery_id": "old", "forge_alias": "internal",
+                "owner": "org", "repo": "repo", "head_sha": "head", "review_state": "approved"
+            }
+        }))
+        .expect("old envelope");
+        assert!(event.meta.provider_action.is_none());
+        assert!(event.meta.review_id.is_none());
+        assert!(event.meta.reviewed_commit_id.is_none());
+        let polled = serde_json::to_value(&event).expect("serialize");
+        let channel = McpShim::channel_notification_payload(&event);
+        for value in [polled, channel] {
+            for key in ["provider_action", "review_id", "reviewed_commit_id"] {
+                assert!(value["meta"].get(key).is_none());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn review_lifecycle_sse_metadata_reaches_channels_and_polling()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for channels in [false, true] {
+            for action in ["edited", "dismissed"] {
+                let mock_server = wiremock::MockServer::start().await;
+                let mut event = serde_json::json!({
+                    "kind": "pull_request_review", "content": "review refresh hint",
+                    "meta": {
+                        "action": action, "provider_action": action,
+                        "review_id": 71, "event_kind": "pull_request_review",
+                        "change_request": 42, "delivery_id": "review-delivery",
+                        "forge_alias": "internal", "owner": "org", "repo": "repo",
+                        "head_sha": null, "review_state": null, "issue": null, "issue_comment": null
+                    }
+                });
+                if action == "edited" {
+                    event["meta"]["reviewed_commit_id"] = serde_json::json!("older-commit");
+                    event["meta"]["head_sha"] = serde_json::json!("older-commit");
+                    event["meta"]["review_state"] = serde_json::json!("approved");
+                }
+                let sse = format!(
+                    "event: pull_request_review\nid: internal:review-delivery\ndata: {event}\n\n"
+                );
+                wiremock::Mock::given(wiremock::matchers::method("GET"))
+                    .and(wiremock::matchers::path("/api/v1/agent/events"))
+                    .respond_with(
+                        wiremock::ResponseTemplate::new(200)
+                            .insert_header("content-type", "text/event-stream")
+                            .set_body_string(sse),
+                    )
+                    .up_to_n_times(1)
+                    .mount(&mock_server)
+                    .await;
+                let mut config = test_config(&mock_server.uri());
+                config.enable_channels = channels;
+                let (client, captured, received, task) =
+                    spawn_shim_and_channel_client(config).await?;
+                if channels {
+                    tokio::time::timeout(Duration::from_secs(5), received.notified()).await?;
+                    let (method, params) = captured.lock().await.take().expect("channel");
+                    assert_eq!(method, "notifications/claude/channel");
+                    let mut expected = event.clone();
+                    let meta = expected["meta"].as_object_mut().expect("metadata");
+                    meta.remove("forge_alias");
+                    meta.insert("forge".into(), serde_json::json!("internal"));
+                    expected.as_object_mut().expect("envelope").remove("kind");
+                    assert_eq!(params, Some(expected));
+                }
+                let events = tokio::time::timeout(Duration::from_secs(5), async {
+                    loop {
+                        let result = client
+                            .call_tool(CallToolRequestParams::new("poll_events"))
+                            .await?;
+                        let text = result
+                            .content
+                            .first()
+                            .and_then(|c| c.raw.as_text())
+                            .expect("text");
+                        let events: Vec<serde_json::Value> = serde_json::from_str(&text.text)?;
+                        if !events.is_empty() {
+                            return Ok::<_, Box<dyn std::error::Error>>(events);
+                        }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await??;
+                assert_eq!(events, vec![event]);
+                let result = client
+                    .call_tool(CallToolRequestParams::new("poll_events"))
+                    .await?;
+                assert_eq!(
+                    result
+                        .content
+                        .first()
+                        .and_then(|c| c.raw.as_text())
+                        .expect("text")
+                        .text,
+                    "[]"
+                );
+                drop(client);
+                task.await??;
+            }
+        }
         Ok(())
     }
 

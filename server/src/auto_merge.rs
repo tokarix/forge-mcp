@@ -26,7 +26,9 @@ impl AutoMergeService {
     }
 
     pub async fn handle_review(&self, event: PullRequestReviewEvent) {
-        if event.review_state != domain::ReviewState::Approved {
+        if event.action != domain::PullRequestReviewEventAction::Submitted
+            || event.review_state != Some(domain::ReviewState::Approved)
+        {
             return;
         }
 

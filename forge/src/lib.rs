@@ -3338,6 +3338,17 @@ fn parse_pull_request_review_event(
     forge_kind: domain::ForgeKind,
     host: &str,
 ) -> Result<Option<domain::WebhookEvent>, ForgeWebhookError> {
+    let raw: serde_json::Value = serde_json::from_slice(body)
+        .map_err(|e| ForgeWebhookError::InvalidPayload(e.to_string()))?;
+    if !matches!(
+        raw.get("action").and_then(serde_json::Value::as_str),
+        Some("reviewed" | "submitted")
+    ) {
+        // v15 has no formal review edit/dismiss payload with stable identity.
+        // Ignore unsupported actions even with unusable fields; verification
+        // already ran, and schema validation belongs to supported actions only.
+        return Ok(None);
+    }
     let payload: ForgejoWebhookPullRequestReviewEventPayload = serde_json::from_slice(body)
         .map_err(|e| ForgeWebhookError::InvalidPayload(e.to_string()))?;
 
@@ -3362,6 +3373,9 @@ fn parse_pull_request_review_event(
     Ok(Some(domain::WebhookEvent::PullRequestReview(
         domain::PullRequestReviewEvent {
             action,
+            provider_action: Some(payload.action),
+            reviewed_commit_id: None,
+            payload_fingerprint: String::new(),
             delivery_id,
             head_sha: payload.pull_request.head.sha,
             index,
@@ -3374,7 +3388,7 @@ fn parse_pull_request_review_event(
             },
             review_body: payload.review.body.unwrap_or_default(),
             review_id: payload.review.id.unwrap_or(0),
-            review_state,
+            review_state: Some(review_state),
             title: payload.pull_request.title,
             url: payload.pull_request.html_url,
         },
@@ -4575,7 +4589,7 @@ mod tests {
         assert_eq!(event.repository.name, "repo");
         assert_eq!(event.review_body, "Looks good!");
         assert_eq!(event.review_id, 42);
-        assert_eq!(event.review_state, domain::ReviewState::Approved);
+        assert_eq!(event.review_state, Some(domain::ReviewState::Approved));
         assert_eq!(event.title, "Fix typo");
     }
 
@@ -4632,7 +4646,10 @@ mod tests {
             domain::WebhookEvent::PullRequestReview(e) => e,
             other => panic!("expected PullRequestReview, got {other:?}"),
         };
-        assert_eq!(event.review_state, domain::ReviewState::RequestChanges);
+        assert_eq!(
+            event.review_state,
+            Some(domain::ReviewState::RequestChanges)
+        );
     }
 
     #[test]
@@ -4688,7 +4705,7 @@ mod tests {
             domain::WebhookEvent::PullRequestReview(e) => e,
             other => panic!("expected PullRequestReview, got {other:?}"),
         };
-        assert_eq!(event.review_state, domain::ReviewState::Approved);
+        assert_eq!(event.review_state, Some(domain::ReviewState::Approved));
         assert_eq!(event.review_body, "");
         assert_eq!(event.review_id, 0);
         assert_eq!(event.index, 8);
@@ -4796,7 +4813,7 @@ mod tests {
             domain::WebhookEvent::PullRequestReview(e) => e,
             other => panic!("expected PullRequestReview, got {other:?}"),
         };
-        assert_eq!(event.review_state, domain::ReviewState::Approved);
+        assert_eq!(event.review_state, Some(domain::ReviewState::Approved));
     }
 
     #[test]

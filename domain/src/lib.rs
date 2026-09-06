@@ -145,6 +145,12 @@ pub struct ChannelEventMeta {
     pub issue_comment: Option<u64>,
     pub owner: String,
     pub repo: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_action: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewed_commit_id: Option<String>,
     pub review_state: Option<String>,
 }
 
@@ -301,6 +307,9 @@ impl PublishableEvent for ChangeRequestEvent {
                 self.head_sha,
             ),
             meta: ChannelEventMeta {
+                provider_action: None,
+                review_id: None,
+                reviewed_commit_id: None,
                 action: self.action.as_str().to_string(),
                 change_request: Some(self.index),
                 delivery_id: self.delivery_id.clone(),
@@ -459,6 +468,9 @@ impl PublishableEvent for IssueCommentEvent {
                 self.issue_index,
             ),
             meta: ChannelEventMeta {
+                provider_action: None,
+                review_id: None,
+                reviewed_commit_id: None,
                 action: self.action.as_str().to_string(),
                 change_request: None,
                 delivery_id: self.delivery_id.clone(),
@@ -519,6 +531,9 @@ impl PublishableEvent for IssueEvent {
                 self.index,
             ),
             meta: ChannelEventMeta {
+                provider_action: None,
+                review_id: None,
+                reviewed_commit_id: None,
                 action: self.action.as_str().to_string(),
                 change_request: None,
                 delivery_id: self.delivery_id.clone(),
@@ -557,13 +572,23 @@ impl IssueEventAction {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct PullRequestReviewEvent {
     pub action: PullRequestReviewEventAction,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_action: Option<String>,
+    /// The provider's review commit, never inferred from the live PR head.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewed_commit_id: Option<String>,
+    /// SHA-256 of the verified provider body, used only for fallback deduplication.
+    #[serde(skip)]
+    pub payload_fingerprint: String,
     pub delivery_id: String,
+    /// Historical submitted compatibility field with provider-dependent semantics.
+    /// Lifecycle hints use only the reviewed commit here, or an empty string.
     pub head_sha: String,
     pub index: u64,
     pub repository: RepositoryRef,
     pub review_body: String,
     pub review_id: u64,
-    pub review_state: ReviewState,
+    pub review_state: Option<ReviewState>,
     pub title: String,
     pub url: String,
 }
@@ -572,6 +597,20 @@ impl PublishableEvent for PullRequestReviewEvent {
     fn dedupe_key(&self) -> String {
         if !self.delivery_id.is_empty() {
             return format!("{}:{}", self.repository.alias, self.delivery_id);
+        }
+        if self.action != PullRequestReviewEventAction::Submitted {
+            // Best effort: identical no-ID actions within the TTL look like retries;
+            // differently encoded retries may survive (see README review webhooks).
+            return format!(
+                "{}:{}/{}/{}:pull_request_review:{}:{}:{}",
+                self.repository.alias,
+                self.repository.owner,
+                self.repository.name,
+                self.index,
+                self.review_id,
+                self.action.as_str(),
+                self.payload_fingerprint,
+            );
         }
         format!(
             "{}:{}/{}/{}:pull_request_review:{}",
@@ -592,29 +631,48 @@ impl PublishableEvent for PullRequestReviewEvent {
     }
 
     fn to_channel_event(&self) -> ChannelEvent {
+        let verdict = self
+            .review_state
+            .as_ref()
+            .map(|state| format!(" ({})", state.as_str()))
+            .unwrap_or_default();
+        let commit =
+            if self.head_sha.is_empty() && self.action != PullRequestReviewEventAction::Submitted {
+                String::new()
+            } else {
+                format!(" at {}", self.head_sha)
+            };
         ChannelEvent {
             content: format!(
-                "pull_request_review {} ({}) on {}/{}/{}#{} at {}",
+                "pull_request_review {}{verdict} on {}/{}/{}#{}{commit}",
                 self.action.as_str(),
-                self.review_state.as_str(),
                 self.repository.alias,
                 self.repository.owner,
                 self.repository.name,
                 self.index,
-                self.head_sha,
             ),
             meta: ChannelEventMeta {
+                provider_action: self.provider_action.clone(),
+                // GitLab's legacy MR note path is not a formal review resource.
+                review_id: (self.repository.forge != ForgeKind::GitLab && self.review_id > 0)
+                    .then_some(self.review_id),
+                reviewed_commit_id: self.reviewed_commit_id.clone(),
                 action: self.action.as_str().to_string(),
                 change_request: Some(self.index),
                 delivery_id: self.delivery_id.clone(),
                 event_kind: "pull_request_review".to_string(),
                 forge_alias: self.repository.alias.clone(),
-                head_sha: Some(self.head_sha.clone()),
+                head_sha: (self.action == PullRequestReviewEventAction::Submitted
+                    || !self.head_sha.is_empty())
+                .then(|| self.head_sha.clone()),
                 issue: None,
                 issue_comment: None,
                 owner: self.repository.owner.clone(),
                 repo: self.repository.name.clone(),
-                review_state: Some(self.review_state.as_str().to_string()),
+                review_state: self
+                    .review_state
+                    .as_ref()
+                    .map(|state| state.as_str().to_string()),
             },
         }
     }
@@ -624,6 +682,8 @@ impl PublishableEvent for PullRequestReviewEvent {
 #[serde(rename_all = "snake_case")]
 pub enum PullRequestReviewEventAction {
     Submitted,
+    Edited,
+    Dismissed,
 }
 
 impl PullRequestReviewEventAction {
@@ -631,6 +691,8 @@ impl PullRequestReviewEventAction {
     pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Submitted => "submitted",
+            Self::Edited => "edited",
+            Self::Dismissed => "dismissed",
         }
     }
 }
@@ -694,6 +756,9 @@ impl PublishableEvent for AutoMergeFailedEvent {
                 self.error,
             ),
             meta: ChannelEventMeta {
+                provider_action: None,
+                review_id: None,
+                reviewed_commit_id: None,
                 action: "failed".to_string(),
                 change_request: Some(self.index),
                 delivery_id: String::new(),
@@ -1895,6 +1960,9 @@ mod tests {
         };
         let event = PullRequestReviewEvent {
             action: PullRequestReviewEventAction::Submitted,
+            provider_action: None,
+            reviewed_commit_id: None,
+            payload_fingerprint: String::new(),
             delivery_id: "delivery-3".to_string(),
             head_sha: "abc123".to_string(),
             index: 7,
@@ -1907,7 +1975,7 @@ mod tests {
             },
             review_body: "Approved!".to_string(),
             review_id: 55,
-            review_state: ReviewState::Approved,
+            review_state: Some(ReviewState::Approved),
             title: "Fix typo".to_string(),
             url: "https://forge.example/org/repo/pulls/7".to_string(),
         };
@@ -1920,6 +1988,38 @@ mod tests {
         assert_eq!(channel.meta.issue_comment, None);
         assert_eq!(event.event_name(), "pull_request_review");
         assert_eq!(event.dedupe_key(), "test:delivery-3");
+    }
+
+    #[test]
+    fn review_lifecycle_metadata_is_backward_compatible() {
+        let old = serde_json::json!({
+            "action": "submitted", "change_request": 7,
+            "delivery_id": "old", "event_kind": "pull_request_review",
+            "forge_alias": "test", "owner": "org", "repo": "repo",
+            "head_sha": "head", "review_state": "approved"
+        });
+        let meta: super::ChannelEventMeta = serde_json::from_value(old).expect("old metadata");
+        assert_eq!(meta.provider_action, None);
+        assert_eq!(meta.review_id, None);
+        assert_eq!(meta.reviewed_commit_id, None);
+        let value = serde_json::to_value(meta).expect("metadata");
+        for key in ["provider_action", "review_id", "reviewed_commit_id"] {
+            assert!(value.get(key).is_none());
+        }
+        for (action, name) in [
+            (super::PullRequestReviewEventAction::Edited, "edited"),
+            (super::PullRequestReviewEventAction::Dismissed, "dismissed"),
+        ] {
+            assert_eq!(action.as_str(), name);
+            assert_eq!(serde_json::to_value(&action).expect("action"), name);
+            assert_eq!(
+                serde_json::from_value::<super::PullRequestReviewEventAction>(serde_json::json!(
+                    name
+                ))
+                .expect("action"),
+                action
+            );
+        }
     }
 
     #[test]

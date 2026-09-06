@@ -213,9 +213,114 @@ copies `pr.HasMerged`, and the
 [API PR type](https://codeberg.org/forgejo/forgejo/src/tag/v15.0.0/modules/structs/pull.go)
 serializes that boolean as `merged`.
 
+## Review webhook hints
+
+Review submissions, edits and dismissals share `kind`, SSE event name and
+`meta.event_kind = "pull_request_review"`. The normalized `meta.action` is
+`submitted`, `edited` or `dismissed`; `meta.provider_action` retains the
+provider's original action independently. No second event stream is required.
+Subscribe to `GET /api/v1/agent/events` with an authorized agent token, or use
+the shim's `poll_events` (also available with channels disabled). Channel
+notifications carry the same optional identity fields and use `forge` instead
+of `forge_alias`.
+
+| Provider and provenance | Webhook subscription / header | Supported review actions | Identity and commit availability |
+| --- | --- | --- | --- |
+| GitHub, documented webhook contract | **Pull request reviews**, `X-GitHub-Event: pull_request_review`; Apps need Pull requests read permission | `submitted`, `edited`, `dismissed` | Formal `review.id`; `review.commit_id` when supplied. Edits/dismissals require positive integer review ID and PR number, and nonempty repository owner/name. |
+| Forgejo **v15.0.0**, source inventory below | **Pull request reviewed** verdict subscriptions; `X-Forgejo-Event: pull_request_approved`, `pull_request_rejected`, `pull_request_comment` | `reviewed` → `submitted`; existing `submitted` and `pull_request_review` header compatibility retained | v15 `ReviewPayload` has only type/content, no review ID or reviewed commit. Existing submitted payloads with a positive formal review ID expose it; ID-less/zero-ID payloads omit `meta.review_id`. No formal lifecycle mapping. |
+| GitLab, documented MR/note contract | **Comments**, `X-Gitlab-Event: Note Hook` for legacy MR notes | Existing `submitted`/`comment` notification retained, including note updates; never normalized as formal `edited` or `dismissed` | Note IDs and MR `last_commit` are not formal review identity. New `review_id` and `reviewed_commit_id` stay absent. MR approval/unapproval and reviewer-state updates do not establish formal review edit/dismiss equivalence. |
+
+GitHub's [review webhook contract](https://docs.github.com/en/webhooks/webhook-events-and-payloads#pull_request_review)
+distinguishes formal reviews from inline review comments and ordinary issue
+comments. GitLab's [MR and note contracts](https://docs.gitlab.com/user/project/integrations/webhook_events/)
+do not demonstrate a stable formal-review mapping for this feature.
+
+The Forgejo inventory is source-verified at **v15.0.0**, not a claim about
+unobserved deployments or live-delivery testing:
+
+- [Review services](https://codeberg.org/forgejo/forgejo/src/tag/v15.0.0/services/pull/review.go)
+  call `PullReviewDismiss` for explicit and stale-approval dismissal. The
+  [webhook notifier](https://codeberg.org/forgejo/forgejo/src/tag/v15.0.0/services/webhook/notifier.go)
+  inherits the [no-op implementation](https://codeberg.org/forgejo/forgejo/src/tag/v15.0.0/services/notify/null.go)
+  and does not override it: no dismissal webhook is emitted by that notifier.
+- [Comment updates](https://codeberg.org/forgejo/forgejo/src/tag/v15.0.0/services/issue/comments.go)
+  notify `UpdateComment` for published review text. The webhook notifier emits
+  `IssueCommentPayload` with `action: edited`; the
+  [header mapping](https://codeberg.org/forgejo/forgejo/src/tag/v15.0.0/modules/webhook/type.go)
+  maps this to `issue_comment`. Its
+  [Comment type](https://codeberg.org/forgejo/forgejo/src/tag/v15.0.0/modules/structs/issue_comment.go)
+  and [conversion](https://codeberg.org/forgejo/forgejo/src/tag/v15.0.0/services/convert/issue_comment.go)
+  expose a comment ID, not a formal review ID or reviewed commit. The separate
+  timeline comment type is not the webhook payload.
+- Submitted verdict payloads use `action: reviewed` and the
+  [ReviewPayload type](https://codeberg.org/forgejo/forgejo/src/tag/v15.0.0/modules/structs/hook.go).
+  Guessing GitHub edit/dismiss actions or using comment IDs would invent
+  identity; these unsupported payload families remain unnormalized.
+
+`reviewed_commit_id` is the authoritative review commit field. It is never
+filled from a PR head, MR last commit, merge commit or target commit. For new
+lifecycle actions, missing/null/empty review commits leave both this field and
+`head_sha` absent/null even when the live PR head is available. Present malformed
+commit types are rejected. Historical submitted `head_sha` retains its
+provider-dependent meaning: GitHub review commit, Forgejo PR head, GitLab MR
+last commit. Do not use that historical field as proof of formal review binding.
+
+Lifecycle and verdict are independent. Edited reviews keep an explicitly
+recognized verdict (`approved`, `request_changes` or `comment`) or null;
+dismissed reviews always carry null. Missing display text, verdict or commit
+does not prevent an identity-valid lifecycle hint. Unknown/pending submissions
+remain ignored. After signature verification, GitHub and Forgejo review
+payloads with an unsupported action are ignored (HTTP 202) even if other
+fields do not match a supported review schema. Invalid JSON or malformed
+supported-action payloads return HTTP 400; invalid signatures still return
+HTTP 401. An example identity-only dismissal envelope:
+
+```json
+{
+  "kind": "pull_request_review",
+  "content": "pull_request_review dismissed on github/org/repo#42",
+  "meta": {
+    "action": "dismissed",
+    "provider_action": "dismissed",
+    "review_id": 71,
+    "event_kind": "pull_request_review",
+    "forge_alias": "github",
+    "owner": "org",
+    "repo": "repo",
+    "change_request": 42,
+    "delivery_id": "review-dismissal-delivery",
+    "head_sha": null,
+    "review_state": null,
+    "issue": null,
+    "issue_comment": null
+  }
+}
+```
+
+New optional fields are omitted when unknown and old envelopes still
+deserialize. Delivery-ID deduplication remains scoped to forge alias. Without
+a delivery ID, submissions retain their existing fallback; edits/dismissals
+use repository/PR/review identity, action and SHA-256 of the verified body.
+The fingerprint stays internal. This fallback is best effort: differently
+encoded retries can produce extra hints, and byte-identical no-ID actions
+within the five-minute TTL cannot be distinguished from retries.
+
+Events can be missed, duplicated or delivered out of order. Consumers must
+refetch current formal reviews before invalidating approval/blocker evidence
+or mutating workflow state; periodic polling remains the fallback. Edit and
+dismiss hints neither schedule nor cancel auto-merge, add workflow-trigger
+labels, nor initiate rework/re-review. Cockpit's submitted-only decoder needs
+a separate consumer adjustment. Formal review/discussion read separation
+(#137) and trade PR #31's marker-comment selection are outside this feature.
+
+Signed/token-verified deterministic fixtures cover normalization, HTTP
+publication, authorization/replay, deduplication and transport metadata.
+Provider processes and any live-delivery proof remain owned by dedicated CI.
+
 ## Auto-merge scheduling
 
-Approval webhooks schedule auto-merge by default for compatibility. Operators
+Enqueued submitted approval webhooks schedule auto-merge by default for
+compatibility. Operators
 can disable only that scheduling side effect while continuing to verify,
 normalize, and deliver webhook events:
 

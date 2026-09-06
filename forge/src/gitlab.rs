@@ -1898,6 +1898,7 @@ struct GitLabWebhookNoteEvent {
 
 #[derive(Debug, Deserialize)]
 struct GitLabWebhookNoteAttrs {
+    action: Option<String>,
     id: u64,
     note: String,
     noteable_type: String,
@@ -2092,6 +2093,9 @@ fn parse_gitlab_note_event(
             Ok(Some(domain::WebhookEvent::PullRequestReview(
                 domain::PullRequestReviewEvent {
                     action: domain::PullRequestReviewEventAction::Submitted,
+                    provider_action: payload.object_attributes.action,
+                    reviewed_commit_id: None,
+                    payload_fingerprint: String::new(),
                     delivery_id,
                     head_sha,
                     index: mr.iid,
@@ -2104,7 +2108,7 @@ fn parse_gitlab_note_event(
                     },
                     review_body: payload.object_attributes.note,
                     review_id: payload.object_attributes.id,
-                    review_state: domain::ReviewState::Comment,
+                    review_state: Some(domain::ReviewState::Comment),
                     title: mr.title,
                     url: mr.url,
                 },
