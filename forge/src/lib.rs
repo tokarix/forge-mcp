@@ -1782,10 +1782,26 @@ struct ForgejoWebhookPullRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct ForgejoLifecyclePullRequest {
+    head: Option<LifecycleHead>,
+    merged: Option<bool>,
+    html_url: String,
+    number: Option<u64>,
+    title: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct LifecycleHead {
+    #[serde(rename = "ref")]
+    ref_name: Option<String>,
+    sha: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct ForgejoWebhookPullRequestEventPayload {
     action: String,
     number: Option<u64>,
-    pull_request: ForgejoWebhookPullRequest,
+    pull_request: ForgejoLifecyclePullRequest,
     repository: ForgejoWebhookRepository,
 }
 
@@ -3154,6 +3170,19 @@ impl ForgeWebhookAdapter for ForgejoAdapter {
     }
 }
 
+fn validate_terminal_identity(
+    index: u64,
+    owner: &str,
+    name: &str,
+) -> Result<(), ForgeWebhookError> {
+    if index == 0 || owner.trim().is_empty() || name.trim().is_empty() {
+        return Err(ForgeWebhookError::InvalidPayload(
+            "terminal change request has unusable repository or index".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn parse_pull_request_event(
     body: &[u8],
     delivery_id: String,
@@ -3168,6 +3197,15 @@ fn parse_pull_request_event(
         "opened" => ChangeRequestEventAction::Opened,
         "reopened" => ChangeRequestEventAction::Reopened,
         "synchronize" | "synchronized" => ChangeRequestEventAction::Synchronized,
+        "closed" => match payload.pull_request.merged {
+            Some(true) => ChangeRequestEventAction::Merged,
+            Some(false) => ChangeRequestEventAction::Closed,
+            None => {
+                return Err(ForgeWebhookError::InvalidPayload(
+                    "closed pull request missing merged boolean".to_string(),
+                ));
+            }
+        },
         _ => return Ok(None),
     };
 
@@ -3179,11 +3217,28 @@ fn parse_pull_request_event(
             ForgeWebhookError::InvalidPayload("pull request number missing".to_string())
         })?;
 
+    if action.is_terminal() {
+        validate_terminal_identity(index, &owner, &payload.repository.name)?;
+    }
+    let head_sha = match payload.pull_request.head {
+        Some(head) if action.is_terminal() => head.sha.unwrap_or_default(),
+        Some(LifecycleHead {
+            ref_name: Some(_),
+            sha: Some(sha),
+        }) => sha,
+        None if action.is_terminal() => String::new(),
+        _ => {
+            return Err(ForgeWebhookError::InvalidPayload(
+                "pull request head metadata missing".to_string(),
+            ));
+        }
+    };
+
     Ok(Some(domain::WebhookEvent::ChangeRequest(
         ChangeRequestEvent {
             action,
             delivery_id,
-            head_sha: payload.pull_request.head.sha,
+            head_sha,
             index,
             repository: RepositoryRef {
                 alias: forge_alias.to_string(),
@@ -3388,6 +3443,34 @@ fn verify_forgejo_signature(
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::panic)]
 mod tests {
+
+    #[test]
+    fn forgejo_lifecycle_optional_head_does_not_relax_review_payloads() {
+        for head in [
+            serde_json::Value::Null,
+            serde_json::json!({}),
+            serde_json::json!({"sha": "source"}),
+        ] {
+            let pr = serde_json::json!({
+                "number": 42, "merged": true, "head": head,
+                "html_url": "https://forge.example/pr/42", "title": "Change"
+            });
+            let payload = serde_json::json!({
+                "action": "closed", "number": 42, "pull_request": pr,
+                "repository": {"owner": {"login": "org"}, "name": "repo"}
+            });
+            assert!(
+                serde_json::from_value::<super::ForgejoWebhookPullRequestEventPayload>(payload)
+                    .is_ok()
+            );
+            assert!(serde_json::from_value::<super::ForgejoWebhookPullRequest>(pr).is_err());
+        }
+        let pr = serde_json::json!({
+            "number": 42, "head": {"ref": "feature", "sha": "source"},
+            "html_url": "https://forge.example/pr/42", "title": "Change"
+        });
+        assert!(serde_json::from_value::<super::ForgejoWebhookPullRequest>(pr).is_ok());
+    }
     use std::fmt::Write as _;
 
     use hmac::{Hmac, Mac};

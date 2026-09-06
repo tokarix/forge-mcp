@@ -3237,7 +3237,8 @@ mod tests {
     type CapturedAutoMerge = Vec<(domain::ScheduleAutoMergeRequest, Option<String>)>;
 
     #[allow(clippy::struct_field_names)]
-    struct FakeWriteService {
+    pub(super) struct FakeWriteService {
+        pub(super) calls: std::sync::atomic::AtomicUsize,
         captured_close_msg: Arc<Mutex<Option<String>>>,
         captured_add_dep: Arc<Mutex<Option<domain::AddIssueDependencyRequest>>>,
         captured_auto_merge: Arc<Mutex<CapturedAutoMerge>>,
@@ -3245,8 +3246,9 @@ mod tests {
     }
 
     impl FakeWriteService {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             Self {
+                calls: std::sync::atomic::AtomicUsize::new(0),
                 captured_close_msg: Arc::new(Mutex::new(None)),
                 captured_add_dep: Arc::new(Mutex::new(None)),
                 captured_auto_merge: Arc::new(Mutex::new(Vec::new())),
@@ -3263,6 +3265,7 @@ mod tests {
             _: domain::policy::AuthorizedWrite,
             _: &domain::ForgeCredential,
         ) -> Result<domain::Issue, ServiceError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             *self.captured_add_dep.lock().expect("poisoned") = Some(request);
             Ok(domain::Issue {
                 assignees: vec![],
@@ -3280,6 +3283,7 @@ mod tests {
             _: domain::policy::AuthorizedWrite,
             _: &domain::ForgeCredential,
         ) -> Result<domain::Issue, ServiceError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(domain::Issue {
                 assignees: vec![],
                 body: String::new(),
@@ -3296,6 +3300,7 @@ mod tests {
             _: domain::policy::AuthorizedWrite,
             _: &domain::ForgeCredential,
         ) -> Result<domain::Issue, ServiceError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             todo!()
         }
         async fn close_issue(
@@ -3304,6 +3309,7 @@ mod tests {
             _: domain::policy::AuthorizedWrite,
             _: &domain::ForgeCredential,
         ) -> Result<domain::Issue, ServiceError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             *self.captured_close_msg.lock().expect("poisoned lock") = Some(request.message.clone());
             Ok(domain::Issue {
                 assignees: vec![],
@@ -3321,6 +3327,7 @@ mod tests {
             _: domain::policy::AuthorizedWrite,
             _: &domain::ForgeCredential,
         ) -> Result<domain::IssueComment, ServiceError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             todo!()
         }
 
@@ -3330,6 +3337,7 @@ mod tests {
             _authorized: domain::policy::AuthorizedWrite,
             _credential: &domain::ForgeCredential,
         ) -> Result<ChangeRequest, ServiceError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(ChangeRequest {
                 base_branch: "main".to_string(),
                 body: String::new(),
@@ -3354,6 +3362,7 @@ mod tests {
             _authorized: domain::policy::AuthorizedWrite,
             _credential: &domain::ForgeCredential,
         ) -> Result<domain::ChangeRequestComment, ServiceError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(domain::ChangeRequestComment {
                 body: request.body,
                 id: 1,
@@ -3367,6 +3376,7 @@ mod tests {
             _authorized: domain::policy::AuthorizedWrite,
             _credential: &domain::ForgeCredential,
         ) -> Result<CommitPatchResponse, ServiceError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(CommitPatchResponse {
                 branch: request.new_branch.clone(),
                 commit_sha: "abc123".to_string(),
@@ -3380,6 +3390,7 @@ mod tests {
             _: domain::policy::AuthorizedWrite,
             _: &domain::ForgeCredential,
         ) -> Result<domain::Issue, ServiceError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(domain::Issue {
                 assignees: vec![],
                 body: request.body,
@@ -3397,6 +3408,7 @@ mod tests {
             _authorized: domain::policy::AuthorizedWrite,
             _credential: &domain::ForgeCredential,
         ) -> Result<OpenChangeRequestResponse, ServiceError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(OpenChangeRequestResponse {
                 change_request: ChangeRequest {
                     base_branch: "main".to_string(),
@@ -3424,6 +3436,7 @@ mod tests {
             _authorized: domain::policy::AuthorizedWrite,
             _credential: &domain::ForgeCredential,
         ) -> Result<domain::RebaseBranchResponse, ServiceError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Err(ServiceError::Upstream("unimplemented in test fake".into()))
         }
 
@@ -3433,6 +3446,7 @@ mod tests {
             _: domain::policy::AuthorizedWrite,
             _: &domain::ForgeCredential,
         ) -> Result<domain::Issue, ServiceError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let idx = request.index;
             *self.captured_remove_dep.lock().expect("poisoned") = Some(request);
             Ok(domain::Issue {
@@ -3451,6 +3465,7 @@ mod tests {
             _: domain::policy::AuthorizedWrite,
             _: &domain::ForgeCredential,
         ) -> Result<domain::Issue, ServiceError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(domain::Issue {
                 assignees: vec![],
                 body: String::new(),
@@ -3468,6 +3483,7 @@ mod tests {
             _authorized: domain::policy::AuthorizedWrite,
             credential: &domain::ForgeCredential,
         ) -> Result<(), ServiceError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             self.captured_auto_merge
                 .lock()
                 .expect("poisoned")
@@ -3481,6 +3497,7 @@ mod tests {
             _authorized: domain::policy::AuthorizedWrite,
             _credential: &domain::ForgeCredential,
         ) -> Result<domain::ChangeRequestReview, ServiceError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(domain::ChangeRequestReview {
                 body: request.body,
                 event: request.event,
@@ -3495,6 +3512,7 @@ mod tests {
             _authorized: domain::policy::AuthorizedWrite,
             _credential: &domain::ForgeCredential,
         ) -> Result<ChangeRequest, ServiceError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(ChangeRequest {
                 base_branch: "main".to_string(),
                 body: request.body.unwrap_or_default(),
@@ -3519,6 +3537,7 @@ mod tests {
             _authorized: domain::policy::AuthorizedWrite,
             _credential: &domain::ForgeCredential,
         ) -> Result<domain::Issue, ServiceError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(domain::Issue {
                 assignees: vec![],
                 body: request.body.unwrap_or_default(),
@@ -3551,7 +3570,7 @@ mod tests {
             .clone()
     }
 
-    fn test_forge_instance(
+    pub(super) fn test_forge_instance(
         alias: &str,
         base_url: &str,
         write_service: Arc<FakeWriteService>,
@@ -5398,3 +5417,7 @@ mod tests {
         assert_eq!(dep_repo.name, "other-repo");
     }
 }
+
+#[cfg(test)]
+#[path = "change_request_terminal_webhooks.rs"]
+mod change_request_terminal_webhooks;

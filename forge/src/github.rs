@@ -3030,16 +3030,35 @@ struct GitHubWebhookRepository {
 }
 
 #[derive(Debug, Deserialize)]
+struct GitHubLifecyclePullRequest {
+    #[serde(rename = "number")]
+    _number: u64,
+    head: Option<LifecycleHead>,
+    merged: Option<bool>,
+    html_url: String,
+    title: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct LifecycleHead {
+    #[serde(rename = "ref")]
+    ref_name: Option<String>,
+    sha: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct GitHubWebhookPullRequestPayload {
     action: String,
     number: u64,
-    pull_request: GitHubWebhookPullRequest,
+    pull_request: GitHubLifecyclePullRequest,
     repository: GitHubWebhookRepository,
 }
 
 #[derive(Debug, Deserialize)]
 struct GitHubWebhookPullRequest {
-    head: GitHubRef,
+    // Retain review payload head validation, even though commit_id is used.
+    #[serde(rename = "head")]
+    _head: GitHubRef,
     html_url: String,
     number: u64,
     title: String,
@@ -3193,13 +3212,43 @@ fn parse_pull_request_webhook(
         "opened" => domain::ChangeRequestEventAction::Opened,
         "reopened" => domain::ChangeRequestEventAction::Reopened,
         "synchronize" => domain::ChangeRequestEventAction::Synchronized,
+        "closed" => match payload.pull_request.merged {
+            Some(true) => domain::ChangeRequestEventAction::Merged,
+            Some(false) => domain::ChangeRequestEventAction::Closed,
+            None => {
+                return Err(ForgeWebhookError::InvalidPayload(
+                    "closed pull request missing merged boolean".to_string(),
+                ));
+            }
+        },
         _ => return Ok(None),
     };
+    if action.is_terminal() {
+        crate::validate_terminal_identity(
+            payload.number,
+            &payload.repository.owner.login,
+            &payload.repository.name,
+        )?;
+    }
+    let head_sha = match payload.pull_request.head {
+        Some(head) if action.is_terminal() => head.sha.unwrap_or_default(),
+        Some(LifecycleHead {
+            ref_name: Some(_),
+            sha: Some(sha),
+        }) => sha,
+        None if action.is_terminal() => String::new(),
+        _ => {
+            return Err(ForgeWebhookError::InvalidPayload(
+                "pull request head metadata missing".to_string(),
+            ));
+        }
+    };
+
     Ok(Some(domain::WebhookEvent::ChangeRequest(
         domain::ChangeRequestEvent {
             action,
             delivery_id,
-            head_sha: payload.pull_request.head.sha,
+            head_sha,
             index: payload.number,
             repository: webhook_repository(payload.repository, forge_alias, forge_kind, host),
             title: payload.pull_request.title,
@@ -3293,6 +3342,33 @@ fn parse_review_webhook(
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::panic)]
 mod tests {
+
+    #[test]
+    fn github_lifecycle_optional_head_does_not_relax_review_payloads() {
+        for head in [
+            serde_json::Value::Null,
+            serde_json::json!({}),
+            serde_json::json!({"sha": "source"}),
+        ] {
+            let pr = serde_json::json!({
+                "number": 42, "merged": true, "head": head,
+                "html_url": "https://forge.example/pr/42", "title": "Change"
+            });
+            let payload = serde_json::json!({
+                "action": "closed", "number": 42, "pull_request": pr,
+                "repository": {"owner": {"login": "org"}, "name": "repo"}
+            });
+            assert!(
+                serde_json::from_value::<super::GitHubWebhookPullRequestPayload>(payload).is_ok()
+            );
+            assert!(serde_json::from_value::<super::GitHubWebhookPullRequest>(pr).is_err());
+        }
+        let pr = serde_json::json!({
+            "number": 42, "head": {"ref": "feature", "sha": "source"},
+            "html_url": "https://forge.example/pr/42", "title": "Change"
+        });
+        assert!(serde_json::from_value::<super::GitHubWebhookPullRequest>(pr).is_ok());
+    }
     use std::fmt::Write as _;
     use std::io::{self, Read as _, Write as IoWrite};
     use std::net::TcpListener;

@@ -168,6 +168,51 @@ secret on the Apps and in forge-mcp. Webhook-driven auto-merge additionally
 requires a forge-level token or `[forges.github_app]`; auto-merge must also be
 enabled in the target repository.
 
+## Change request webhook hints
+
+Subscribe Forgejo to pull request events (including closure), GitHub Apps to
+**Pull requests**, and GitLab to **Merge request events**. Configure the shared
+secret/token in the provider and forge-mcp; registration is not changed
+automatically.
+
+| Provider delivery | Published action |
+| --- | --- |
+| Forgejo/GitHub `closed`, `pull_request.merged: false` | `closed` |
+| Forgejo/GitHub `closed`, `pull_request.merged: true` | `merged` |
+| GitLab `close` with state `closed` | `closed` |
+| GitLab `merge` with state `merged` | `merged` |
+
+These use the existing `change_request` envelope: both `kind` and
+`meta.event_kind` remain `change_request`. Repository identity and PR number/MR
+`iid` identify the target. Available source-head SHA is retained; terminal
+`meta.head_sha` is omitted when unavailable, never replaced by a merge or target
+commit. Terminal deliveries only publish hints, even with webhook auto-merge
+enabled; they do not schedule, cancel, or mutate consumer workflows.
+
+Closure requires explicit boolean merge evidence on Forgejo/GitHub, and
+GitLab terminal actions require matching state. Ambiguous or malformed payloads
+are rejected. Guessed standalone `merge`/`merged` actions on Forgejo/GitHub,
+state-only updates, and branch deletion do not create terminal hints.
+Existing opening, reopening and head-change actions remain unchanged.
+
+Delivery deduplication is in memory with a five-minute TTL, scoped by forge
+alias and delivery ID. Without a delivery ID, the existing repository, index,
+head and action fallback key is used. Replay retains the latest 32 events and
+uses the same repository authorization as live delivery. These are best-effort
+hints: consumers must refetch authoritative state. Polling remains the fallback
+for missed, duplicate, out-of-order, or unsupported deliveries and restarts.
+
+The deterministic provider fixtures follow
+[GitHub's closure discriminator](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#running-your-pull_request-workflow-when-a-pull-request-merges)
+and [GitLab's MR event contract](https://docs.gitlab.com/user/project/integrations/webhook_events/#merge-request-events).
+Forgejo provenance is versioned source, not a live delivery observation:
+[v15.0.0 notifier](https://codeberg.org/forgejo/forgejo/src/tag/v15.0.0/services/webhook/notifier.go)
+emits `HookIssueClosed` on merge;
+[PR conversion](https://codeberg.org/forgejo/forgejo/src/tag/v15.0.0/services/convert/pull.go)
+copies `pr.HasMerged`, and the
+[API PR type](https://codeberg.org/forgejo/forgejo/src/tag/v15.0.0/modules/structs/pull.go)
+serializes that boolean as `merged`.
+
 ## Auto-merge scheduling
 
 Approval webhooks schedule auto-merge by default for compatibility. Operators

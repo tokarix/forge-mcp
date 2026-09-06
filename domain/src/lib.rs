@@ -306,7 +306,11 @@ impl PublishableEvent for ChangeRequestEvent {
                 delivery_id: self.delivery_id.clone(),
                 event_kind: "change_request".to_string(),
                 forge_alias: self.repository.alias.clone(),
-                head_sha: Some(self.head_sha.clone()),
+                head_sha: if self.action.is_terminal() && self.head_sha.is_empty() {
+                    None
+                } else {
+                    Some(self.head_sha.clone())
+                },
                 issue: None,
                 issue_comment: None,
                 owner: self.repository.owner.clone(),
@@ -320,6 +324,8 @@ impl PublishableEvent for ChangeRequestEvent {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChangeRequestEventAction {
+    Closed,
+    Merged,
     Opened,
     Reopened,
     #[serde(rename = "synchronize")]
@@ -328,8 +334,15 @@ pub enum ChangeRequestEventAction {
 
 impl ChangeRequestEventAction {
     #[must_use]
+    pub const fn is_terminal(&self) -> bool {
+        matches!(self, Self::Closed | Self::Merged)
+    }
+
+    #[must_use]
     pub const fn as_str(&self) -> &'static str {
         match self {
+            Self::Closed => "closed",
+            Self::Merged => "merged",
             Self::Opened => "opened",
             Self::Reopened => "reopened",
             Self::Synchronized => "synchronize",
@@ -1508,6 +1521,65 @@ mod tests {
         ChangeRequest, ChangeRequestEventAction, ChangeRequestState, DependsOnReadContract,
         ForgeCredential, Issue, IssueDependencies, Mergeability,
     };
+
+    #[test]
+    fn terminal_change_request_contract() {
+        use super::{ChangeRequestEvent, ForgeKind, PublishableEvent, RepositoryRef};
+        let mut keys = Vec::new();
+        for (action, wire) in [
+            (ChangeRequestEventAction::Closed, "closed"),
+            (ChangeRequestEventAction::Merged, "merged"),
+            (ChangeRequestEventAction::Synchronized, "synchronize"),
+        ] {
+            let encoded = serde_json::to_string(&action).expect("serialize action");
+            assert_eq!(encoded, format!("\"{wire}\""));
+            assert_eq!(
+                serde_json::from_str::<ChangeRequestEventAction>(&encoded).expect("action"),
+                action
+            );
+            let mut event = ChangeRequestEvent {
+                action,
+                delivery_id: String::new(),
+                head_sha: String::new(),
+                index: 42,
+                repository: RepositoryRef {
+                    alias: "forge".into(),
+                    forge: ForgeKind::Forgejo,
+                    host: "https://forge.example".into(),
+                    owner: "org".into(),
+                    name: "repo".into(),
+                },
+                title: "Change".into(),
+                url: "https://forge.example/pr/42".into(),
+            };
+            keys.push(event.dedupe_key());
+            assert_eq!(event.dedupe_key(), format!("forge:org/repo/42::{wire}"));
+            assert_eq!(event.event_name(), "change_request");
+            let meta = event.to_channel_event().meta;
+            assert_eq!(meta.event_kind, "change_request");
+            assert_eq!(meta.action, wire);
+            assert_eq!(meta.change_request, Some(42));
+            assert_eq!(
+                meta.head_sha,
+                if event.action.is_terminal() {
+                    None
+                } else {
+                    Some(String::new())
+                }
+            );
+            assert!(
+                meta.issue.is_none() && meta.issue_comment.is_none() && meta.review_state.is_none()
+            );
+            event.head_sha = "source-sha".into();
+            assert_eq!(
+                event.to_channel_event().meta.head_sha.as_deref(),
+                Some("source-sha")
+            );
+            event.delivery_id = "delivery".into();
+            assert_eq!(event.dedupe_key(), "forge:delivery");
+        }
+        assert_ne!(keys[0], keys[1]);
+    }
 
     fn dependency_issue(index: u64) -> Issue {
         Issue {

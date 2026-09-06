@@ -1861,6 +1861,7 @@ struct GitLabWebhookMergeRequestEvent {
 
 #[derive(Debug, Deserialize)]
 struct GitLabWebhookMergeRequestAttrs {
+    state: Option<String>,
     action: Option<String>,
     iid: u64,
     last_commit: Option<GitLabWebhookCommit>,
@@ -1968,10 +1969,25 @@ fn parse_gitlab_merge_request_event(
         Some("open") => ChangeRequestEventAction::Opened,
         Some("reopen") => ChangeRequestEventAction::Reopened,
         Some("update") => ChangeRequestEventAction::Synchronized,
+        Some("close" | "merge") => match (
+            payload.object_attributes.action.as_deref(),
+            payload.object_attributes.state.as_deref(),
+        ) {
+            (Some("close"), Some("closed")) => ChangeRequestEventAction::Closed,
+            (Some("merge"), Some("merged")) => ChangeRequestEventAction::Merged,
+            _ => {
+                return Err(ForgeWebhookError::InvalidPayload(
+                    "terminal merge request action/state mismatch".to_string(),
+                ));
+            }
+        },
         _ => return Ok(None),
     };
 
     let (owner, name) = payload.project.owner_and_name();
+    if action.is_terminal() {
+        crate::validate_terminal_identity(payload.object_attributes.iid, &owner, &name)?;
+    }
     let head_sha = payload
         .object_attributes
         .last_commit
@@ -2161,6 +2177,37 @@ fn aggregate_status_states(statuses: &[domain::CommitStatus]) -> domain::CommitS
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::panic)]
 mod tests {
+
+    #[test]
+    fn gitlab_terminal_and_update_preserve_missing_head_conventions() {
+        use domain::PublishableEvent;
+        for (action, state, expected_head) in [
+            ("close", "closed", None),
+            ("merge", "merged", None),
+            ("update", "merged", Some(String::new())),
+        ] {
+            let payload = serde_json::json!({
+                "project": {"namespace": "org/sub", "name": "repo", "path_with_namespace": "org/sub/repo"},
+                "object_attributes": {"action": action, "state": state, "iid": 42, "id": 999,
+                    "last_commit": null, "title": "Change", "url": "https://forge.example/mr/42"}
+            });
+            let event = super::parse_gitlab_merge_request_event(
+                &serde_json::to_vec(&payload).expect("JSON"),
+                "delivery".into(),
+                "gitlab",
+                domain::ForgeKind::GitLab,
+                "https://forge.example",
+            )
+            .expect("parse")
+            .expect("event");
+            let domain::WebhookEvent::ChangeRequest(event) = event else {
+                unreachable!()
+            };
+            assert_eq!(event.index, 42);
+            assert_eq!(event.repository.owner, "org/sub");
+            assert_eq!(event.to_channel_event().meta.head_sha, expected_head);
+        }
+    }
     use super::*;
 
     use crate::ForgeAdapter;
