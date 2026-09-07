@@ -487,6 +487,110 @@ async fn forgejo_issue_label_changes_reach_poll_events() -> Result<(), String> {
         if !poll_once(client).await?.is_empty() {
             return Err("label-remove delivery did not drain exactly once".to_string());
         }
+        let replacement: LabelResponse = context
+            .request_json(
+                Method::POST,
+                &format!("/api/v1/repos/{}/{repo}/labels", context.username),
+                Some(json!({"color":"0055ff","name":unique_name("replacement-label")?})),
+            )
+            .await?;
+        // Forgejo 16.0.3 CI is the wire-provenance authority for these hints.
+        let issue_path = format!(
+            "/api/v1/repos/{}/{repo}/issues/{}",
+            context.username, issue.number
+        );
+        let mut deliveries = std::collections::HashSet::from([added_delivery, removed_delivery]);
+        for (phase, method, path, body, action) in [
+            (
+                "issue-close",
+                Method::PATCH,
+                issue_path.clone(),
+                Some(json!({"state":"closed"})),
+                "closed",
+            ),
+            (
+                "issue-reopen",
+                Method::PATCH,
+                issue_path.clone(),
+                Some(json!({"state":"open"})),
+                "reopened",
+            ),
+            (
+                "issue-title",
+                Method::PATCH,
+                issue_path.clone(),
+                Some(json!({"title":"Edited issue title"})),
+                "edited",
+            ),
+            (
+                "issue-body",
+                Method::PATCH,
+                issue_path.clone(),
+                Some(json!({"body":"Edited issue body"})),
+                "edited",
+            ),
+            (
+                "issue-label-add",
+                Method::POST,
+                format!("{issue_path}/labels"),
+                Some(json!({"labels":[label.id]})),
+                "labels_changed",
+            ),
+            (
+                "issue-label-replace",
+                Method::PUT,
+                format!("{issue_path}/labels"),
+                Some(json!({"labels":[replacement.id]})),
+                "labels_changed",
+            ),
+            (
+                "issue-label-restore",
+                Method::POST,
+                format!("{issue_path}/labels"),
+                Some(json!({"labels":[label.id]})),
+                "labels_changed",
+            ),
+            (
+                "issue-label-clear",
+                Method::DELETE,
+                format!("{issue_path}/labels"),
+                None,
+                "labels_changed",
+            ),
+        ] {
+            context.request_success(method, &path, body).await?;
+            let event = poll_one_event(client, phase).await?;
+            let meta = &event["meta"];
+            if meta["event_kind"] != "issue"
+                || meta["action"] != action
+                || meta["issue"] != issue.number
+            {
+                return Err(format!("phase={phase} unexpected issue identity/action"));
+            }
+            let id = meta["delivery_id"]
+                .as_str()
+                .filter(|id| !id.is_empty())
+                .ok_or("missing issue delivery ID")?;
+            if !deliveries.insert(id.to_string()) {
+                return Err(format!("phase={phase} reused delivery ID"));
+            }
+            let wire = wire_headers
+                .lock()
+                .map_err(|_| "wire headers poisoned")?
+                .get(id)
+                .cloned()
+                .ok_or("missing wire headers")?;
+            eprintln!(
+                "Forgejo {} phase={phase} Event={} Event-Type={}",
+                context.version, wire.0, wire.1
+            );
+            if wire.0 != "issues" {
+                return Err(format!("phase={phase} unexpected issue event header"));
+            }
+            if !poll_once(client).await?.is_empty() {
+                return Err(format!("phase={phase} did not drain once"));
+            }
+        }
         verify_pr_labels(&context, client, &repo, label.id, &wire_headers).await?;
         Ok(())
     }

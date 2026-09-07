@@ -168,6 +168,62 @@ secret on the Apps and in forge-mcp. Webhook-driven auto-merge additionally
 requires a forge-level token or `[forges.github_app]`; auto-merge must also be
 enabled in the target repository.
 
+## Issue refresh webhook hints
+
+Authenticated issue deliveries publish one repository-scoped `issue` event.
+Subscribe Forgejo to **Issues** (`issues`), GitHub Apps to **Issues** with
+Issues read permission, and GitLab to **Issue events** (`Issue Hook`). Subscribe
+to the normalized issue channel (or use `poll_events` with channels disabled) and call
+`get_issue` for authoritative state, content, and labels before acting.
+
+| Normalized action | Forgejo 16.0.3 | GitHub issues | GitLab Issue Hook |
+| --- | --- | --- | --- |
+| `opened` | `opened` | `opened` | `open` |
+| `closed` | `closed` | `closed` | `close` |
+| `reopened` | `reopened` | `reopened` | `reopen` |
+| `edited` | `edited` (title/body) | `edited` | `update` with title/description delta |
+| `labels_changed` | `label_updated`, `label_cleared` | `labeled`, `unlabeled` | `update` with label membership delta |
+
+The existing Forgejo provider CI lane records actual Event and Event-Type headers
+for reopen, separate title/body edits, and label operations. That lane supplies
+versioned service evidence; deterministic fixtures alone do not establish wire
+compatibility.
+
+Dedicated label changes carry metadata such as:
+
+```json
+{"event_kind":"issue","action":"labels_changed","labels_changed":true,"forge_alias":"internal","owner":"org","repo":"repo","issue":42,"delivery_id":"delivery-1"}
+```
+
+A GitLab content edit plus label change produces a single envelope with:
+
+```json
+{"event_kind":"issue","action":"edited","labels_changed":true,"forge_alias":"internal","owner":"org","repo":"repo","issue":42,"delivery_id":"delivery-2"}
+```
+
+These examples show the relevant metadata within the normal channel envelope.
+Open/close/reopen remains the primary action when a valid label delta accompanies
+it. The marker defaults to false in old events and is omitted when false. New
+metadata is limited to finite action strings and a boolean; no body snapshots,
+before/after values, label arrays, raw changes, or fingerprints enter the envelope.
+
+GitLab requires `object_kind=issue` for reopen/update. Equal or malformed deltas,
+label reordering, snapshot-only and unrelated updates produce no update hint.
+Explicit PR/MR-shaped payloads are excluded. Repository label-definition events
+and invented replace/clear actions are unsupported on GitHub; bulk membership
+operations arrive as individual labeled/unlabeled deliveries.
+
+Nonempty provider delivery IDs retain their existing dedupe and SSE identities.
+Without an ID, reopen/edit/label-bearing hints use an internal SHA-256 payload
+fingerprint: identical bytes coalesce within the existing dedupe TTL, while
+distinct no-ID label bodies now survive. Different serialization can escape this
+best-effort dedupe. Ordinary opened/closed fallback keys remain unchanged.
+Authorized live/replay delivery and periodic polling remain necessary.
+
+Reopened/edited hints do not recover tasks, invalidate plans automatically, or
+authorize workflow mutations. No workflow trigger labels are introduced.
+
+
 ## Change request webhook hints
 
 Subscribe Forgejo to pull request events (including closure), GitHub Apps to

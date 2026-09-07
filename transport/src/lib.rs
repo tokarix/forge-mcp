@@ -2243,7 +2243,7 @@ impl McpShim {
     /// events that arrived since the last poll, then clears the buffer.
     #[tool(
         name = "poll_events",
-        description = "Poll for pending normalized change request and issue webhook events. Returns buffered events since last poll. Call periodically to receive forge notifications. An issue action of `labels_changed` is only a wake hint; refetch authoritative issue state with `get_issue` before acting."
+        description = "Poll for pending normalized change request and issue webhook events. Returns buffered events since last poll. Call periodically to receive forge notifications. Issue actions `opened`, `closed`, `reopened`, `edited`, and `labels_changed` are refresh hints; refetch authoritative issue state with `get_issue` before acting."
     )]
     async fn poll_events(&self) -> Result<String, McpError> {
         let events: Vec<AgentEventEnvelope> = {
@@ -4940,147 +4940,176 @@ mod tests {
 
     #[tokio::test]
     async fn issue_event_is_buffered_for_polling() -> Result<(), Box<dyn std::error::Error>> {
-        let mock_server = wiremock::MockServer::start().await;
-        let event_body = serde_json::json!({
-            "kind": "issue",
-            "content": "issue opened on internal/org/repo#42",
-            "meta": {
-                "forge_alias": "internal",
-                "owner": "org",
-                "repo": "repo",
-                "event_kind": "issue",
-                "action": "opened",
-                "change_request": null,
-                "head_sha": null,
-                "issue": 42,
-                "issue_comment": null,
-                "delivery_id": "delivery-issue-1"
-            }
-        });
-        let sse = format!("event: issue\nid: internal:delivery-issue-1\ndata: {event_body}\n\n",);
+        for (action, marker) in [
+            ("opened", false),
+            ("reopened", false),
+            ("edited", false),
+            ("labels_changed", true),
+            ("edited", true),
+        ] {
+            let mock_server = wiremock::MockServer::start().await;
+            let event_body = serde_json::json!({
+                "kind": "issue",
+                "content": "issue opened on internal/org/repo#42",
+                "meta": {
+                    "forge_alias": "internal",
+                    "owner": "org",
+                    "repo": "repo",
+                    "event_kind": "issue",
+                    "action": action,
+                    "labels_changed": marker,
+                    "change_request": null,
+                    "head_sha": null,
+                    "issue": 42,
+                    "issue_comment": null,
+                    "delivery_id": "delivery-issue-1"
+                }
+            });
+            let sse =
+                format!("event: issue\nid: internal:delivery-issue-1\ndata: {event_body}\n\n",);
 
-        wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path("/api/v1/agent/events"))
-            .respond_with(
-                wiremock::ResponseTemplate::new(200)
-                    .insert_header("content-type", "text/event-stream")
-                    .set_body_string(sse),
-            )
-            .mount(&mock_server)
-            .await;
+            wiremock::Mock::given(wiremock::matchers::method("GET"))
+                .and(wiremock::matchers::path("/api/v1/agent/events"))
+                .respond_with(
+                    wiremock::ResponseTemplate::new(200)
+                        .insert_header("content-type", "text/event-stream")
+                        .set_body_string(sse),
+                )
+                .mount(&mock_server)
+                .await;
 
-        let (client, _payload, _receive_signal, server_handle) =
-            spawn_shim_and_channel_client(test_channel_config(&mock_server.uri())).await?;
+            let (client, payload, receive_signal, server_handle) =
+                spawn_shim_and_channel_client(test_channel_config(&mock_server.uri())).await?;
 
-        tokio::time::sleep(Duration::from_millis(500)).await;
+            tokio::time::timeout(Duration::from_secs(5), receive_signal.notified()).await?;
+            let (method, params) = payload.lock().await.take().expect("notification");
+            assert_eq!(method, "notifications/claude/channel");
+            let params = params.expect("parameters");
+            assert_eq!(params["meta"]["action"], action);
+            assert_eq!(
+                params["meta"]["labels_changed"].as_bool().unwrap_or(false),
+                marker
+            );
 
-        let result = client
-            .call_tool(CallToolRequestParams::new("poll_events"))
-            .await?;
-        let text = result
-            .content
-            .first()
-            .and_then(|c| c.raw.as_text())
-            .map(|t| t.text.clone())
-            .expect("text content");
-        let events: Vec<serde_json::Value> = serde_json::from_str(&text)?;
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0]["meta"]["event_kind"], "issue");
-        assert_eq!(events[0]["meta"]["issue"], 42);
-        assert!(events[0]["meta"]["change_request"].is_null());
-
-        drop(client);
-        server_handle.await??;
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn labels_changed_issue_event_is_buffered_without_channels()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let mock_server = wiremock::MockServer::start().await;
-        let event_body = serde_json::json!({
-            "kind": "issue",
-            "content": "issue labels_changed on internal/org/repo#42",
-            "meta": {
-                "forge_alias": "internal",
-                "owner": "org",
-                "repo": "repo",
-                "event_kind": "issue",
-                "action": "labels_changed",
-                "change_request": null,
-                "head_sha": null,
-                "issue": 42,
-                "issue_comment": null,
-                "delivery_id": "delivery-labels-changed",
-                "review_state": null
-            }
-        });
-        let sse =
-            format!("event: issue\nid: internal:delivery-labels-changed\ndata: {event_body}\n\n",);
-
-        wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path("/api/v1/agent/events"))
-            .respond_with(
-                wiremock::ResponseTemplate::new(200)
-                    .insert_header("content-type", "text/event-stream")
-                    .set_body_string(sse),
-            )
-            .mount(&mock_server)
-            .await;
-
-        let (client, server_handle) =
-            spawn_shim_and_client(test_config(&mock_server.uri())).await?;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        let events = loop {
             let result = client
                 .call_tool(CallToolRequestParams::new("poll_events"))
                 .await?;
             let text = result
                 .content
                 .first()
+                .and_then(|c| c.raw.as_text())
+                .map(|t| t.text.clone())
+                .expect("text content");
+            let events: Vec<serde_json::Value> = serde_json::from_str(&text)?;
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0]["meta"]["event_kind"], "issue");
+            assert_eq!(events[0]["meta"]["issue"], 42);
+            assert!(events[0]["meta"]["change_request"].is_null());
+
+            drop(client);
+            server_handle.await??;
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn labels_changed_issue_event_is_buffered_without_channels()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for (action, marker) in [
+            ("reopened", false),
+            ("edited", false),
+            ("labels_changed", true),
+            ("edited", true),
+        ] {
+            let mock_server = wiremock::MockServer::start().await;
+            let event_body = serde_json::json!({
+                "kind": "issue",
+                "content": "issue labels_changed on internal/org/repo#42",
+                "meta": {
+                    "forge_alias": "internal",
+                    "owner": "org",
+                    "repo": "repo",
+                    "event_kind": "issue",
+                    "action": action,
+                    "labels_changed": marker,
+                    "change_request": null,
+                    "head_sha": null,
+                    "issue": 42,
+                    "issue_comment": null,
+                    "delivery_id": "delivery-labels-changed",
+                    "review_state": null
+                }
+            });
+            let sse = format!(
+                "event: issue\nid: internal:delivery-labels-changed\ndata: {event_body}\n\n",
+            );
+
+            wiremock::Mock::given(wiremock::matchers::method("GET"))
+                .and(wiremock::matchers::path("/api/v1/agent/events"))
+                .respond_with(
+                    wiremock::ResponseTemplate::new(200)
+                        .insert_header("content-type", "text/event-stream")
+                        .set_body_string(sse),
+                )
+                .mount(&mock_server)
+                .await;
+
+            let (client, server_handle) =
+                spawn_shim_and_client(test_config(&mock_server.uri())).await?;
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            let events = loop {
+                let result = client
+                    .call_tool(CallToolRequestParams::new("poll_events"))
+                    .await?;
+                let text = result
+                    .content
+                    .first()
+                    .and_then(|content| content.raw.as_text())
+                    .map(|text| text.text.clone())
+                    .expect("text content");
+                let events: Vec<serde_json::Value> = serde_json::from_str(&text)?;
+                if !events.is_empty() {
+                    break events;
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(std::io::Error::other(
+                        "timed out waiting for labels_changed event",
+                    )
+                    .into());
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            };
+
+            assert_eq!(events.len(), 1);
+            let meta = &events[0]["meta"];
+            assert_eq!(events[0]["kind"], "issue");
+            assert_eq!(meta["event_kind"], "issue");
+            assert_eq!(meta["action"], action);
+            assert_eq!(meta["labels_changed"].as_bool().unwrap_or(false), marker);
+            assert_eq!(meta["forge_alias"], "internal");
+            assert_eq!(meta["owner"], "org");
+            assert_eq!(meta["repo"], "repo");
+            assert_eq!(meta["issue"], 42);
+            assert_eq!(meta["delivery_id"], "delivery-labels-changed");
+            assert!(meta["change_request"].is_null());
+            assert!(meta["head_sha"].is_null());
+            assert!(meta["issue_comment"].is_null());
+            assert!(meta["review_state"].is_null());
+
+            let drained = client
+                .call_tool(CallToolRequestParams::new("poll_events"))
+                .await?;
+            let text = drained
+                .content
+                .first()
                 .and_then(|content| content.raw.as_text())
                 .map(|text| text.text.clone())
                 .expect("text content");
-            let events: Vec<serde_json::Value> = serde_json::from_str(&text)?;
-            if !events.is_empty() {
-                break events;
-            }
-            if tokio::time::Instant::now() >= deadline {
-                return Err(
-                    std::io::Error::other("timed out waiting for labels_changed event").into(),
-                );
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        };
+            assert_eq!(text, "[]");
 
-        assert_eq!(events.len(), 1);
-        let meta = &events[0]["meta"];
-        assert_eq!(events[0]["kind"], "issue");
-        assert_eq!(meta["event_kind"], "issue");
-        assert_eq!(meta["action"], "labels_changed");
-        assert_eq!(meta["forge_alias"], "internal");
-        assert_eq!(meta["owner"], "org");
-        assert_eq!(meta["repo"], "repo");
-        assert_eq!(meta["issue"], 42);
-        assert_eq!(meta["delivery_id"], "delivery-labels-changed");
-        assert!(meta["change_request"].is_null());
-        assert!(meta["head_sha"].is_null());
-        assert!(meta["issue_comment"].is_null());
-        assert!(meta["review_state"].is_null());
-
-        let drained = client
-            .call_tool(CallToolRequestParams::new("poll_events"))
-            .await?;
-        let text = drained
-            .content
-            .first()
-            .and_then(|content| content.raw.as_text())
-            .map(|text| text.text.clone())
-            .expect("text content");
-        assert_eq!(text, "[]");
-
-        drop(client);
-        server_handle.await??;
+            drop(client);
+            server_handle.await??;
+        }
         Ok(())
     }
 

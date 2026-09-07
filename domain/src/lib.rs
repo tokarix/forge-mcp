@@ -520,6 +520,10 @@ impl PublishableEvent for IssueCommentEvent {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct IssueEvent {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub labels_changed: bool,
+    #[serde(skip)]
+    pub payload_fingerprint: String,
     pub action: IssueEventAction,
     pub delivery_id: String,
     pub index: u64,
@@ -532,6 +536,24 @@ impl PublishableEvent for IssueEvent {
     fn dedupe_key(&self) -> String {
         if !self.delivery_id.is_empty() {
             return format!("{}:{}", self.repository.alias, self.delivery_id);
+        }
+        if self.labels_changed
+            || matches!(
+                self.action,
+                IssueEventAction::Reopened
+                    | IssueEventAction::Edited
+                    | IssueEventAction::LabelsChanged
+            )
+        {
+            return format!(
+                "{}:{}/{}:issue:{}:{}:payload:{}",
+                self.repository.alias,
+                self.repository.owner,
+                self.repository.name,
+                self.index,
+                self.action.as_str(),
+                self.payload_fingerprint
+            );
         }
         format!(
             "{}:{}/{}/{}:issue:{}",
@@ -562,7 +584,8 @@ impl PublishableEvent for IssueEvent {
                 self.index,
             ),
             meta: ChannelEventMeta {
-                labels_changed: false,
+                labels_changed: self.labels_changed
+                    || self.action == IssueEventAction::LabelsChanged,
                 ci: None,
                 provider_action: None,
                 review_id: None,
@@ -587,6 +610,8 @@ impl PublishableEvent for IssueEvent {
 #[serde(rename_all = "snake_case")]
 pub enum IssueEventAction {
     Closed,
+    Reopened,
+    Edited,
     LabelsChanged,
     Opened,
 }
@@ -596,6 +621,8 @@ impl IssueEventAction {
     pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Closed => "closed",
+            Self::Reopened => "reopened",
+            Self::Edited => "edited",
             Self::LabelsChanged => "labels_changed",
             Self::Opened => "opened",
         }
@@ -2003,9 +2030,61 @@ mod tests {
     }
 
     #[test]
+    fn issue_refresh_contract_is_additive_and_bounded() {
+        use super::{IssueEvent, IssueEventAction, PublishableEvent};
+        let old = serde_json::json!({"action":"opened","delivery_id":"","index":42,
+            "repository":{"alias":"test","forge":"Forgejo","host":"host","name":"repo","owner":"org"},"title":"title","url":"url"});
+        let mut event: IssueEvent = serde_json::from_value(old).expect("legacy event");
+        assert!(!event.labels_changed);
+        assert!(
+            serde_json::to_value(&event)
+                .expect("JSON")
+                .get("labels_changed")
+                .is_none()
+        );
+        let old_key = event.dedupe_key();
+        for action in [
+            IssueEventAction::Opened,
+            IssueEventAction::Closed,
+            IssueEventAction::Reopened,
+            IssueEventAction::Edited,
+            IssueEventAction::LabelsChanged,
+        ] {
+            event.action = action;
+            assert_eq!(
+                serde_json::to_value(&event.action).expect("JSON"),
+                event.action.as_str()
+            );
+            for marker in [false, true] {
+                event.labels_changed = marker;
+                event.payload_fingerprint = "private-fingerprint".into();
+                event.title = "large".repeat(100_000);
+                let channel = event.to_channel_event();
+                assert_eq!(
+                    channel.meta.labels_changed,
+                    marker || event.action == IssueEventAction::LabelsChanged
+                );
+                let json = serde_json::to_string(&channel).expect("JSON");
+                assert!(json.len() < 1024);
+                assert!(!json.contains("private-fingerprint"));
+            }
+        }
+        event.action = IssueEventAction::Edited;
+        event.payload_fingerprint = "one".into();
+        let key = event.dedupe_key();
+        assert_ne!(key, old_key);
+        event.payload_fingerprint = "two".into();
+        assert_ne!(key, event.dedupe_key());
+        event.delivery_id = "unchanged".into();
+        assert_eq!(event.dedupe_key(), "test:unchanged");
+    }
+
+    #[test]
     fn issue_event_to_channel_event_sets_meta_fields() {
         use super::{ForgeKind, IssueEvent, IssueEventAction, PublishableEvent, RepositoryRef};
         let event = IssueEvent {
+            labels_changed: false,
+            payload_fingerprint: String::new(),
             action: IssueEventAction::LabelsChanged,
             delivery_id: "delivery-1".to_string(),
             index: 42,

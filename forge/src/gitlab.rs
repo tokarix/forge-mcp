@@ -2047,10 +2047,34 @@ fn parse_gitlab_issue_event(
     forge_kind: domain::ForgeKind,
     host: &str,
 ) -> Result<Option<domain::WebhookEvent>, ForgeWebhookError> {
+    let value: serde_json::Value = serde_json::from_slice(body)
+        .map_err(|e| ForgeWebhookError::InvalidPayload(e.to_string()))?;
+    let provider_action = value["object_attributes"]["action"].as_str();
+    if !matches!(
+        provider_action,
+        Some("open" | "close" | "reopen" | "update")
+    ) {
+        return Ok(None);
+    }
+    if value
+        .get("object_kind")
+        .is_some_and(|kind| kind.as_str() != Some("issue"))
+        || (matches!(provider_action, Some("reopen" | "update")) && value["object_kind"] != "issue")
+    {
+        return Ok(None);
+    }
+    let labels_changed = gitlab_labels_changed(&value["changes"]);
+    let edited = gitlab_issue_content_changed(&value["changes"]);
+    if provider_action == Some("update") && !edited && !labels_changed {
+        return Ok(None);
+    }
     let payload: GitLabWebhookIssueEvent = serde_json::from_slice(body)
         .map_err(|e| ForgeWebhookError::InvalidPayload(e.to_string()))?;
 
     let action = match payload.object_attributes.action.as_deref() {
+        Some("reopen") => domain::IssueEventAction::Reopened,
+        Some("update") if edited => domain::IssueEventAction::Edited,
+        Some("update") => domain::IssueEventAction::LabelsChanged,
         Some("open") => domain::IssueEventAction::Opened,
         Some("close") => domain::IssueEventAction::Closed,
         _ => return Ok(None),
@@ -2058,7 +2082,26 @@ fn parse_gitlab_issue_event(
 
     let (owner, name) = payload.project.owner_and_name();
 
+    if payload.object_attributes.iid == 0
+        || owner.trim().is_empty()
+        || name.trim().is_empty()
+        || !payload.project.path_with_namespace.contains('/')
+    {
+        return Err(ForgeWebhookError::InvalidPayload(
+            "invalid issue identity".into(),
+        ));
+    }
+
     Ok(Some(domain::WebhookEvent::Issue(domain::IssueEvent {
+        labels_changed,
+        payload_fingerprint: super::label_payload_fingerprint(
+            body,
+            labels_changed
+                || !matches!(
+                    action,
+                    domain::IssueEventAction::Opened | domain::IssueEventAction::Closed
+                ),
+        ),
         action,
         delivery_id,
         index: payload.object_attributes.iid,
@@ -2201,6 +2244,21 @@ fn aggregate_status_states(statuses: &[domain::CommitStatus]) -> domain::CommitS
 }
 
 // Optional changes must never prevent publication of a valid lifecycle event.
+fn gitlab_issue_content_changed(changes: &serde_json::Value) -> bool {
+    ["title", "description"].into_iter().any(|field| {
+        let Some(delta) = changes.get(field) else {
+            return false;
+        };
+        let (Some(previous), Some(current)) = (delta.get("previous"), delta.get("current")) else {
+            return false;
+        };
+        let valid = |value: &serde_json::Value| {
+            value.is_string() || (field == "description" && value.is_null())
+        };
+        valid(previous) && valid(current) && previous != current
+    })
+}
+
 fn gitlab_labels_changed(changes: &serde_json::Value) -> bool {
     use std::collections::BTreeSet;
     #[derive(Deserialize)]
@@ -2217,7 +2275,7 @@ fn gitlab_labels_changed(changes: &serde_json::Value) -> bool {
         return false;
     };
     let Ok(delta) = serde_json::from_value::<Delta>(delta.clone()) else {
-        tracing::debug!("ignoring malformed merge request labels delta");
+        tracing::debug!("ignoring malformed labels delta");
         return false;
     };
     let identities = |labels: Vec<LabelIdentity>| {
@@ -2236,6 +2294,121 @@ fn gitlab_labels_changed(changes: &serde_json::Value) -> bool {
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::panic)]
 mod tests {
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn issue_update_delta_matrix() {
+        use serde_json::json;
+        let label = json!({"id":1,"title":"one"});
+        let other = json!({"id":2,"title":"two"});
+        let cases = vec![
+            (
+                json!({"title":{"previous":"old","current":"new"}}),
+                Some("edited"),
+                false,
+            ),
+            (
+                json!({"description":{"previous":"old","current":null}}),
+                Some("edited"),
+                false,
+            ),
+            (
+                json!({"labels":{"previous":[],"current":[label.clone()]}}),
+                Some("labels_changed"),
+                true,
+            ),
+            (
+                json!({"labels":{"previous":[label.clone()],"current":[]}}),
+                Some("labels_changed"),
+                true,
+            ),
+            (
+                json!({"labels":{"previous":[label.clone()],"current":[other.clone()]}}),
+                Some("labels_changed"),
+                true,
+            ),
+            (
+                json!({"title":{"previous":"a","current":"b"},"labels":{"previous":[],"current":[label.clone()]}}),
+                Some("edited"),
+                true,
+            ),
+            (
+                json!({"labels":{"previous":[label.clone(),other.clone()],"current":[other,label]}}),
+                None,
+                false,
+            ),
+            (
+                json!({"title":{"previous":"same","current":"same"}}),
+                None,
+                false,
+            ),
+            (json!({"description":{"current":null}}), None, false),
+            (json!({"title":{"previous":1,"current":"new"}}), None, false),
+            (
+                json!({"labels":{"previous":null,"current":[]}}),
+                None,
+                false,
+            ),
+            (
+                json!({"labels":{"previous":[],"current":[{}]}}),
+                None,
+                false,
+            ),
+            (json!({"labels":null}), None, false),
+            (
+                json!({"updated_at":{"previous":"a","current":"b"}}),
+                None,
+                false,
+            ),
+            (json!(null), None, false),
+        ];
+        for (changes, expected, marker) in cases {
+            for action in ["update", "reopen", "open", "close"] {
+                let value = json!({"object_kind":"issue","changes":changes,
+                    "project":{"name":"repo","namespace":"org/sub","path_with_namespace":"org/sub/repo"},
+                    "object_attributes":{"action":action,"iid":42,"title":"snapshot","description":"snapshot","url":"url"}});
+                let event = super::parse_gitlab_issue_event(
+                    &serde_json::to_vec(&value).expect("JSON"),
+                    String::new(),
+                    "gitlab",
+                    domain::ForgeKind::GitLab,
+                    "host",
+                )
+                .expect("parse");
+                let expected = match action {
+                    "reopen" => Some("reopened"),
+                    "open" => Some("opened"),
+                    "close" => Some("closed"),
+                    _ => expected,
+                };
+                if let Some(expected) = expected {
+                    let Some(domain::WebhookEvent::Issue(event)) = event else {
+                        panic!("issue");
+                    };
+                    assert_eq!(event.action.as_str(), expected);
+                    assert_eq!(event.labels_changed, marker);
+                    assert_eq!(event.repository.owner, "org/sub");
+                } else {
+                    assert!(event.is_none());
+                }
+                for kind in [json!("merge_request"), json!("work_item"), json!(null)] {
+                    let mut invalid = value.clone();
+                    invalid["object_kind"] = kind;
+                    assert!(
+                        super::parse_gitlab_issue_event(
+                            &serde_json::to_vec(&invalid).expect("JSON"),
+                            String::new(),
+                            "gitlab",
+                            domain::ForgeKind::GitLab,
+                            "host"
+                        )
+                        .expect("parse")
+                        .is_none()
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn gitlab_terminal_and_update_preserve_missing_head_conventions() {

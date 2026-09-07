@@ -3072,6 +3072,7 @@ struct GitHubWebhookIssuePayload {
 
 #[derive(Debug, Deserialize)]
 struct GitHubWebhookIssue {
+    pull_request: Option<serde_json::Value>,
     html_url: String,
     number: u64,
     title: String,
@@ -3326,14 +3327,44 @@ fn parse_issue_webhook(
     forge_kind: domain::ForgeKind,
     host: &str,
 ) -> Result<Option<domain::WebhookEvent>, ForgeWebhookError> {
+    let value: serde_json::Value = serde_json::from_slice(body)
+        .map_err(|e| ForgeWebhookError::InvalidPayload(e.to_string()))?;
+    if !matches!(
+        value["action"].as_str(),
+        Some("opened" | "closed" | "reopened" | "edited" | "labeled" | "unlabeled")
+    ) {
+        return Ok(None);
+    }
     let payload: GitHubWebhookIssuePayload = serde_json::from_slice(body)
         .map_err(|e| ForgeWebhookError::InvalidPayload(e.to_string()))?;
+    if payload.issue.pull_request.is_some() {
+        return Ok(None);
+    }
+    if payload.issue.number == 0
+        || payload.repository.name.trim().is_empty()
+        || payload.repository.owner.login.trim().is_empty()
+    {
+        return Err(ForgeWebhookError::InvalidPayload(
+            "invalid issue identity".into(),
+        ));
+    }
     let action = match payload.action.as_str() {
+        "reopened" => domain::IssueEventAction::Reopened,
+        "edited" => domain::IssueEventAction::Edited,
+        "labeled" | "unlabeled" => domain::IssueEventAction::LabelsChanged,
         "opened" => domain::IssueEventAction::Opened,
         "closed" => domain::IssueEventAction::Closed,
         _ => return Ok(None),
     };
     Ok(Some(domain::WebhookEvent::Issue(domain::IssueEvent {
+        labels_changed: false,
+        payload_fingerprint: super::label_payload_fingerprint(
+            body,
+            !matches!(
+                action,
+                domain::IssueEventAction::Opened | domain::IssueEventAction::Closed
+            ),
+        ),
         action,
         delivery_id,
         index: payload.issue.number,

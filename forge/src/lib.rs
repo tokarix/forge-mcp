@@ -1735,7 +1735,6 @@ struct ForgejoWebhookComment {
 
 #[derive(Debug, Deserialize)]
 struct ForgejoWebhookIssue {
-    pull_request: Option<serde_json::Value>,
     html_url: String,
     number: Option<u64>,
     title: String,
@@ -3289,26 +3288,61 @@ fn parse_issue_event(
     forge_kind: domain::ForgeKind,
     host: &str,
 ) -> Result<Option<domain::WebhookEvent>, ForgeWebhookError> {
+    let value: serde_json::Value = serde_json::from_slice(body)
+        .map_err(|e| ForgeWebhookError::InvalidPayload(e.to_string()))?;
+    if !matches!(
+        value["action"].as_str(),
+        Some("opened" | "closed" | "reopened" | "edited" | "label_updated" | "label_cleared")
+    ) {
+        return Ok(None);
+    }
+    if value
+        .get("issue")
+        .and_then(|issue| issue.get("pull_request"))
+        .is_some_and(|pr| !pr.is_null())
+    {
+        return Ok(None);
+    }
     let payload: ForgejoWebhookIssueEventPayload = serde_json::from_slice(body)
         .map_err(|e| ForgeWebhookError::InvalidPayload(e.to_string()))?;
 
     let action = match payload.action.as_str() {
+        "reopened" => domain::IssueEventAction::Reopened,
+        "edited" => domain::IssueEventAction::Edited,
         "closed" => domain::IssueEventAction::Closed,
         "label_cleared" | "label_updated" => domain::IssueEventAction::LabelsChanged,
         "opened" => domain::IssueEventAction::Opened,
         _ => return Ok(None),
     };
 
-    if action == domain::IssueEventAction::LabelsChanged && payload.issue.pull_request.is_some() {
-        return Ok(None);
+    if payload.number == Some(0)
+        || payload.issue.number == Some(0)
+        || matches!((payload.number, payload.issue.number), (Some(a), Some(b)) if a != b)
+    {
+        return Err(ForgeWebhookError::InvalidPayload(
+            "invalid issue number".into(),
+        ));
     }
     let owner = payload.repository.owner.into_owner()?;
+    if owner.trim().is_empty() || payload.repository.name.trim().is_empty() {
+        return Err(ForgeWebhookError::InvalidPayload(
+            "invalid issue repository".into(),
+        ));
+    }
     let index = payload
         .number
         .or(payload.issue.number)
         .ok_or_else(|| ForgeWebhookError::InvalidPayload("issue number missing".to_string()))?;
 
     Ok(Some(domain::WebhookEvent::Issue(domain::IssueEvent {
+        labels_changed: false,
+        payload_fingerprint: label_payload_fingerprint(
+            body,
+            !matches!(
+                action,
+                domain::IssueEventAction::Opened | domain::IssueEventAction::Closed
+            ),
+        ),
         action,
         delivery_id,
         index,
@@ -4435,6 +4469,53 @@ mod tests {
     }
 
     #[test]
+    fn forgejo_issue_refresh_identity_matrix() {
+        for (action, expected) in [
+            ("reopened", domain::IssueEventAction::Reopened),
+            ("edited", domain::IssueEventAction::Edited),
+        ] {
+            for (top, nested) in [(Some(42), None), (None, Some(42)), (Some(42), Some(42))] {
+                assert_issue_webhook(
+                    signed_issue_webhook(action, "id", top, nested).expect("issue"),
+                    &expected,
+                    "id",
+                );
+            }
+        }
+        for action in [
+            "opened",
+            "closed",
+            "reopened",
+            "edited",
+            "label_updated",
+            "label_cleared",
+        ] {
+            let value = serde_json::json!({"action":action,"number":42,"issue":{"number":42,"title":"title","html_url":"url"},"repository":{"name":"repo","owner":{"username":"org"}}});
+            let parse = |value: &serde_json::Value| {
+                super::parse_issue_event(
+                    &serde_json::to_vec(value).expect("JSON"),
+                    String::new(),
+                    "forgejo",
+                    domain::ForgeKind::Forgejo,
+                    "host",
+                )
+            };
+            assert!(parse(&value).expect("username owner").is_some());
+            for bad in [serde_json::json!(0), serde_json::json!(43)] {
+                let mut invalid = value.clone();
+                invalid["number"] = bad;
+                assert!(parse(&invalid).is_err());
+            }
+            let mut pr = value.clone();
+            pr["issue"]["pull_request"] = serde_json::json!({});
+            assert!(parse(&pr).expect("PR ignored").is_none());
+            let mut invalid = value.clone();
+            invalid["repository"]["name"] = serde_json::json!(" ");
+            assert!(parse(&invalid).is_err());
+        }
+    }
+
+    #[test]
     fn forgejo_webhook_normalizes_issue_label_actions() {
         let updated = signed_issue_webhook("label_updated", "delivery-label-1", Some(42), None)
             .expect("label_updated should be supported");
@@ -4475,7 +4556,7 @@ mod tests {
 
     #[test]
     fn forgejo_webhook_ignores_unrelated_issue_action() {
-        assert!(signed_issue_webhook("edited", "delivery-edited", Some(42), None).is_none());
+        assert!(signed_issue_webhook("assigned", "delivery-assigned", Some(42), None).is_none());
     }
 
     #[test]

@@ -448,6 +448,8 @@ mod tests {
         );
 
         let event = domain::IssueEvent {
+            labels_changed: false,
+            payload_fingerprint: String::new(),
             action: domain::IssueEventAction::LabelsChanged,
             delivery_id: "delivery-issue-1".to_string(),
             index: 42,

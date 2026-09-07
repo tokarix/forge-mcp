@@ -487,7 +487,7 @@ fn forgejo_label_headers_actions_aliases_and_issue_separation() {
             panic!("issue hint")
         };
         assert_eq!(issue.to_channel_event().meta.issue, Some(42));
-        assert!(!issue.to_channel_event().meta.labels_changed);
+        assert!(issue.to_channel_event().meta.labels_changed);
         assert_ne!(
             issue.dedupe_key(),
             change("pull_request", &payload("pull_request", action), "").dedupe_key()
