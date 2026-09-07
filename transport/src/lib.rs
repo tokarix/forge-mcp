@@ -711,6 +711,10 @@ pub struct CiEventDetails {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct ChannelEventMetaEnvelope {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    branch_push: Option<domain::BranchPushDetails>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    change_request_changes: Option<domain::ChangeRequestChanges>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     labels_changed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1191,6 +1195,8 @@ impl McpShim {
                 content: "change_request opened on test/org/repo#1 at deadbeef".to_string(),
                 kind: "change_request".to_string(),
                 meta: ChannelEventMetaEnvelope {
+                    branch_push: None,
+                    change_request_changes: None,
                     inline_review: None,
                     labels_changed: false,
                     ci: None,
@@ -1305,6 +1311,7 @@ async fn send_event_stream_request(
 }
 
 const KNOWN_EVENT_KINDS: &[&str] = &[
+    "branch_push",
     "pull_request_review_comment",
     "pull_request_review_thread",
     "ci",
@@ -5195,7 +5202,13 @@ mod tests {
         let polled = serde_json::to_value(&event).expect("serialize");
         let channel = McpShim::channel_notification_payload(&event);
         for value in [polled, channel] {
-            for key in ["provider_action", "review_id", "reviewed_commit_id"] {
+            for key in [
+                "provider_action",
+                "review_id",
+                "reviewed_commit_id",
+                "branch_push",
+                "change_request_changes",
+            ] {
                 assert!(value["meta"].get(key).is_none());
             }
         }
@@ -5225,6 +5238,98 @@ mod tests {
                 let sse = format!(
                     "event: pull_request_review\nid: internal:review-delivery\ndata: {event}\n\n"
                 );
+                wiremock::Mock::given(wiremock::matchers::method("GET"))
+                    .and(wiremock::matchers::path("/api/v1/agent/events"))
+                    .respond_with(
+                        wiremock::ResponseTemplate::new(200)
+                            .insert_header("content-type", "text/event-stream")
+                            .set_body_string(sse),
+                    )
+                    .up_to_n_times(1)
+                    .mount(&mock_server)
+                    .await;
+                let mut config = test_config(&mock_server.uri());
+                config.enable_channels = channels;
+                let (client, captured, received, task) =
+                    spawn_shim_and_channel_client(config).await?;
+                if channels {
+                    tokio::time::timeout(Duration::from_secs(5), received.notified()).await?;
+                    let (method, params) = captured.lock().await.take().expect("channel");
+                    assert_eq!(method, "notifications/claude/channel");
+                    let mut expected = event.clone();
+                    let meta = expected["meta"].as_object_mut().expect("metadata");
+                    meta.remove("forge_alias");
+                    meta.insert("forge".into(), serde_json::json!("internal"));
+                    expected.as_object_mut().expect("envelope").remove("kind");
+                    assert_eq!(params, Some(expected));
+                }
+                let events = tokio::time::timeout(Duration::from_secs(5), async {
+                    loop {
+                        let result = client
+                            .call_tool(CallToolRequestParams::new("poll_events"))
+                            .await?;
+                        let text = result
+                            .content
+                            .first()
+                            .and_then(|c| c.raw.as_text())
+                            .expect("text");
+                        let events: Vec<serde_json::Value> = serde_json::from_str(&text.text)?;
+                        if !events.is_empty() {
+                            return Ok::<_, Box<dyn std::error::Error>>(events);
+                        }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await??;
+                assert_eq!(events, vec![event]);
+                let result = client
+                    .call_tool(CallToolRequestParams::new("poll_events"))
+                    .await?;
+                assert_eq!(
+                    result
+                        .content
+                        .first()
+                        .and_then(|c| c.raw.as_text())
+                        .expect("text")
+                        .text,
+                    "[]"
+                );
+                drop(client);
+                task.await??;
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn branch_state_sse_metadata_reaches_channels_and_polling()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for channels in [false, true] {
+            for (kind, action) in [("branch_push", "pushed"), ("change_request", "updated")] {
+                let mock_server = wiremock::MockServer::start().await;
+                let mut event = serde_json::json!({
+                    "kind": kind, "content": "branch/state refresh hint",
+                    "meta": {
+                        "action": action, "event_kind": kind,
+                        "change_request": null, "delivery_id": "review-delivery",
+                        "forge_alias": "internal", "owner": "org", "repo": "repo",
+                        "head_sha": null, "review_state": null, "issue": null, "issue_comment": null
+                    }
+                });
+                if kind == "branch_push" {
+                    event["meta"]["branch_push"] = serde_json::json!({
+                        "ref": "refs/heads/release/next", "before_sha": "a".repeat(40),
+                        "after_sha": "b".repeat(40), "deleted": false, "provider_event": "push"
+                    });
+                } else {
+                    event["meta"]["change_request"] = serde_json::json!(7);
+                    event["meta"]["provider_action"] = serde_json::json!("update");
+                    event["meta"]["change_request_changes"] = serde_json::json!({
+                        "base": {"previous": "main", "current": "release/next"},
+                        "draft": {"previous": true, "current": false}
+                    });
+                }
+                let sse = format!("event: {kind}\nid: internal:review-delivery\ndata: {event}\n\n");
                 wiremock::Mock::given(wiremock::matchers::method("GET"))
                     .and(wiremock::matchers::path("/api/v1/agent/events"))
                     .respond_with(

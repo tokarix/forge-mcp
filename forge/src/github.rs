@@ -3173,6 +3173,9 @@ impl ForgeWebhookAdapter for GitHubAdapter {
             .unwrap_or_default()
             .to_string();
         match event {
+            "push" => {
+                crate::branch_webhooks::push(body, delivery_id, forge_alias, forge_kind, host)
+            }
             "status" | "check_run" | "check_suite" => {
                 crate::ci_webhooks::github(body, headers, event, forge_alias, forge_kind, host)
             }
@@ -3267,6 +3270,15 @@ fn parse_pull_request_webhook(
     forge_kind: domain::ForgeKind,
     host: &str,
 ) -> Result<Option<domain::WebhookEvent>, ForgeWebhookError> {
+    if let Some(event) = crate::branch_webhooks::pull_request(
+        body,
+        &delivery_id,
+        forge_alias,
+        forge_kind.clone(),
+        host,
+    )? {
+        return Ok(Some(event));
+    }
     let payload: GitHubWebhookPullRequestPayload = serde_json::from_slice(body)
         .map_err(|e| ForgeWebhookError::InvalidPayload(e.to_string()))?;
     let action = match payload.action.as_str() {
@@ -3317,6 +3329,8 @@ fn parse_pull_request_webhook(
 
     Ok(Some(domain::WebhookEvent::ChangeRequest(
         domain::ChangeRequestEvent {
+            change_request_changes: None,
+            provider_action: None,
             labels_changed,
             payload_fingerprint: crate::label_payload_fingerprint(body, labels_changed),
             action,

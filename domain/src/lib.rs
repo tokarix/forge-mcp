@@ -7,6 +7,11 @@ use thiserror::Error;
 mod inline_review;
 pub use inline_review::*;
 
+mod branch_push;
+pub use branch_push::{BranchPushDetails, BranchPushEvent};
+mod change_request_changes;
+pub use change_request_changes::{BaseBranchChange, ChangeRequestChanges, DraftChange};
+
 mod ci;
 pub use ci::{CiChangeEvent, CiEventDetails, CiEventSource};
 
@@ -141,6 +146,10 @@ pub struct ChannelEvent {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ChannelEventMeta {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_push: Option<BranchPushDetails>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change_request_changes: Option<ChangeRequestChanges>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub labels_changed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -274,6 +283,10 @@ pub trait PublishableEvent {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ChangeRequestEvent {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change_request_changes: Option<ChangeRequestChanges>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_action: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub labels_changed: bool,
     /// SHA-256 of authenticated bytes; internal retry identity only.
@@ -292,6 +305,19 @@ impl PublishableEvent for ChangeRequestEvent {
     fn dedupe_key(&self) -> String {
         if !self.delivery_id.is_empty() {
             return format!("{}:{}", self.repository.alias, self.delivery_id);
+        }
+        if self.change_request_changes.is_some() {
+            return change_request_changes::fingerprint_key(
+                "change_request:state",
+                &[
+                    &self.repository.alias,
+                    &self.repository.owner,
+                    &self.repository.name,
+                    &self.index.to_string(),
+                    self.action.as_str(),
+                    &self.payload_fingerprint,
+                ],
+            );
         }
         if self.labels_changed {
             return format!(
@@ -335,10 +361,12 @@ impl PublishableEvent for ChangeRequestEvent {
                 self.head_sha,
             ),
             meta: ChannelEventMeta {
+                branch_push: None,
+                change_request_changes: self.change_request_changes.clone(),
                 inline_review: None,
                 labels_changed: self.labels_changed,
                 ci: None,
-                provider_action: None,
+                provider_action: self.provider_action.clone(),
                 review_id: None,
                 reviewed_commit_id: None,
                 action: self.action.as_str().to_string(),
@@ -346,7 +374,9 @@ impl PublishableEvent for ChangeRequestEvent {
                 delivery_id: self.delivery_id.clone(),
                 event_kind: "change_request".to_string(),
                 forge_alias: self.repository.alias.clone(),
-                head_sha: if (self.action.is_terminal() || self.labels_changed)
+                head_sha: if (self.action.is_terminal()
+                    || self.labels_changed
+                    || self.change_request_changes.is_some())
                     && self.head_sha.is_empty()
                 {
                     None
@@ -366,6 +396,7 @@ impl PublishableEvent for ChangeRequestEvent {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChangeRequestEventAction {
+    Updated,
     LabelsChanged,
     Closed,
     Merged,
@@ -384,6 +415,7 @@ impl ChangeRequestEventAction {
     #[must_use]
     pub const fn as_str(&self) -> &'static str {
         match self {
+            Self::Updated => "updated",
             Self::LabelsChanged => "labels_changed",
             Self::Closed => "closed",
             Self::Merged => "merged",
@@ -503,6 +535,8 @@ impl PublishableEvent for IssueCommentEvent {
                 self.issue_index,
             ),
             meta: ChannelEventMeta {
+                branch_push: None,
+                change_request_changes: None,
                 inline_review: None,
                 labels_changed: false,
                 ci: None,
@@ -591,6 +625,8 @@ impl PublishableEvent for IssueEvent {
                 self.index,
             ),
             meta: ChannelEventMeta {
+                branch_push: None,
+                change_request_changes: None,
                 inline_review: None,
                 labels_changed: self.labels_changed
                     || self.action == IssueEventAction::LabelsChanged,
@@ -720,6 +756,8 @@ impl PublishableEvent for PullRequestReviewEvent {
                 self.index,
             ),
             meta: ChannelEventMeta {
+                branch_push: None,
+                change_request_changes: None,
                 inline_review: None,
                 labels_changed: false,
                 ci: None,
@@ -827,6 +865,8 @@ impl PublishableEvent for AutoMergeFailedEvent {
                 self.error,
             ),
             meta: ChannelEventMeta {
+                branch_push: None,
+                change_request_changes: None,
                 inline_review: None,
                 labels_changed: false,
                 ci: None,
@@ -851,6 +891,7 @@ impl PublishableEvent for AutoMergeFailedEvent {
 
 #[derive(Clone, Debug)]
 pub enum WebhookEvent {
+    BranchPush(BranchPushEvent),
     PullRequestReviewComment(PullRequestReviewCommentEvent),
     PullRequestReviewThread(PullRequestReviewThreadEvent),
     CiChange(CiChangeEvent),
@@ -1680,6 +1721,8 @@ mod tests {
                 action
             );
             let mut event = ChangeRequestEvent {
+                change_request_changes: None,
+                provider_action: None,
                 labels_changed: false,
                 payload_fingerprint: String::new(),
                 action,

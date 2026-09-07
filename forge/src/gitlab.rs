@@ -1946,6 +1946,15 @@ impl ForgeWebhookAdapter for GitLabAdapter {
             .unwrap_or_default()
             .to_string();
 
+        if event_header == "Push Hook" {
+            return crate::branch_webhooks::push(
+                body,
+                crate::ci_webhooks::gitlab_delivery(headers)?.0,
+                forge_alias,
+                forge_kind,
+                host,
+            );
+        }
         match event_type {
             GitLabWebhookEventType::PipelineHook | GitLabWebhookEventType::JobHook => {
                 crate::ci_webhooks::gitlab(
@@ -1958,6 +1967,15 @@ impl ForgeWebhookAdapter for GitLabAdapter {
                 )
             }
             GitLabWebhookEventType::MergeRequestHook => {
+                if let Some(event) = crate::branch_webhooks::gitlab_merge_request(
+                    body,
+                    headers,
+                    forge_alias,
+                    forge_kind.clone(),
+                    host,
+                )? {
+                    return Ok(Some(event));
+                }
                 parse_gitlab_merge_request_event(body, delivery_id, forge_alias, forge_kind, host)
             }
             GitLabWebhookEventType::IssueHook => {
@@ -2021,6 +2039,8 @@ fn parse_gitlab_merge_request_event(
 
     Ok(Some(domain::WebhookEvent::ChangeRequest(
         ChangeRequestEvent {
+            change_request_changes: None,
+            provider_action: None,
             labels_changed,
             payload_fingerprint: crate::label_payload_fingerprint(body, labels_changed),
             action,
@@ -2270,7 +2290,7 @@ fn gitlab_issue_content_changed(changes: &serde_json::Value) -> bool {
     })
 }
 
-fn gitlab_labels_changed(changes: &serde_json::Value) -> bool {
+pub(crate) fn gitlab_labels_changed(changes: &serde_json::Value) -> bool {
     use std::collections::BTreeSet;
     #[derive(Deserialize)]
     struct LabelIdentity {

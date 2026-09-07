@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+mod branch_webhooks;
 mod ci_webhooks;
 pub mod github;
 mod github_app;
@@ -3162,6 +3163,9 @@ impl ForgeWebhookAdapter for ForgejoAdapter {
             .unwrap_or_default()
             .to_string();
 
+        if event_header == "push" {
+            return branch_webhooks::push(body, delivery_id, forge_alias, forge_kind, host);
+        }
         match event_type {
             WebhookEventType::PullRequest => {
                 parse_pull_request_event(body, delivery_id, forge_alias, forge_kind, host)
@@ -3212,6 +3216,11 @@ fn parse_pull_request_event(
     forge_kind: domain::ForgeKind,
     host: &str,
 ) -> Result<Option<domain::WebhookEvent>, ForgeWebhookError> {
+    if let Some(event) =
+        branch_webhooks::pull_request(body, &delivery_id, forge_alias, forge_kind.clone(), host)?
+    {
+        return Ok(Some(event));
+    }
     let payload: ForgejoWebhookPullRequestEventPayload = serde_json::from_slice(body)
         .map_err(|e| ForgeWebhookError::InvalidPayload(e.to_string()))?;
 
@@ -3263,6 +3272,8 @@ fn parse_pull_request_event(
 
     Ok(Some(domain::WebhookEvent::ChangeRequest(
         ChangeRequestEvent {
+            change_request_changes: None,
+            provider_action: None,
             labels_changed,
             payload_fingerprint: label_payload_fingerprint(body, labels_changed),
             action,

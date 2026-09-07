@@ -30,6 +30,23 @@ fn optional_header(
     }
     Ok(value.filter(|v| !v.trim().is_empty()).map(str::to_owned))
 }
+// Shared by CI and branch/base/draft hints. Validate every candidate, retaining
+// CI's case-insensitive, blank-as-absent and verbatim-value behavior.
+pub(crate) fn gitlab_delivery(
+    headers: &[(String, String)],
+) -> Result<(String, Option<String>), ForgeWebhookError> {
+    let mut delivery = None;
+    let mut source = None;
+    for name in ["webhook-id", "Idempotency-Key", "X-Gitlab-Webhook-UUID"] {
+        let value = optional_header(headers, name)?;
+        if delivery.is_none() && value.is_some() {
+            delivery = value;
+            source = Some(name.into());
+        }
+    }
+    Ok((delivery.unwrap_or_default(), source))
+}
+
 fn finish(event: CiChangeEvent) -> Result<Option<WebhookEvent>, ForgeWebhookError> {
     let channel = event.to_channel_event();
     let envelope =
@@ -298,14 +315,8 @@ pub(crate) fn gitlab(
     let (owner, name) = path.rsplit_once('/').ok_or_else(invalid)?;
     details.provider_event_id = optional_header(headers, "x-gitlab-event-uuid")?;
     details.provider_delivery_id = optional_header(headers, "x-gitlab-webhook-uuid")?;
-    let mut delivery = None;
-    for name in ["webhook-id", "Idempotency-Key", "X-Gitlab-Webhook-UUID"] {
-        let value = optional_header(headers, name)?;
-        if delivery.is_none() && value.is_some() {
-            delivery = value;
-            details.delivery_id_source = Some(name.into());
-        }
-    }
+    let (delivery, source) = gitlab_delivery(headers)?;
+    details.delivery_id_source = source;
     let repository = RepositoryRef {
         alias: alias.into(),
         forge: kind,
@@ -316,7 +327,7 @@ pub(crate) fn gitlab(
     let event = CiChangeEvent::new(
         repository,
         sha,
-        delivery.unwrap_or_default(),
+        delivery,
         None,
         details,
         format!("{:x}", Sha256::digest(body)),

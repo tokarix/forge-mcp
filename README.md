@@ -431,8 +431,10 @@ GitHub uses `X-GitHub-Delivery`. New GitLab CI hints select the first nonempty
 `webhook-id`, `Idempotency-Key`, then `X-Gitlab-Webhook-UUID`, recorded in
 `delivery_id_source`. GitLab event UUIDs can be shared by recursive events and
 are not delivery IDs; see [delivery headers](https://docs.gitlab.com/user/project/integrations/webhooks/#delivery-headers).
-Existing MR/issue/note handling is unchanged. Dedupe retains forge plus delivery
-ID, with best-effort legacy webhook-UUID retries. Without an ID, `delivery_id`
+MR hints carrying base/draft deltas also use this selection, including compound
+synchronize and lifecycle hints. MR events without these deltas and issue/note
+handling retain their legacy event-UUID identity. Dedupe retains forge plus
+selected delivery ID, with best-effort legacy webhook-UUID retries. Without an ID, `delivery_id`
 stays empty, SSE uses its synthetic transport ID, and a namespaced key includes
 repository, source, exact SHA, native event/action and verified-body SHA-256.
 Byte-identical retries collapse; changed bodies and other SHAs survive.
@@ -698,3 +700,91 @@ other state disappear with the workflow container. No production credential,
 persistent volume, privileged mode, or container socket is used.
 
 Issues & PRs disabled. Development happens on an internal Forgejo instance.
+
+
+### Branch push and PR base/draft refresh hints
+
+`branch_push` has action `pushed` and repository-scoped `meta.branch_push`:
+
+```json
+{
+  "ref": "refs/heads/release/next",
+  "before_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "after_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "deleted": false,
+  "provider_event": "push"
+}
+```
+
+`forced` and `deleted` are optional booleans; omission means unknown. Pushes
+have no PR, issue, comment or source-head identity (those metadata values are
+null). Full 40/64-digit hexadecimal IDs retain their original spelling; all-zero
+before/after IDs signal creation/deletion and must not be treated as commits.
+Tags and other ref namespaces produce no hint. Any valid branch, including an
+unrelated feature branch, emits only its own hint; ingress never enumerates PRs.
+
+PR envelopes optionally contain typed `meta.change_request_changes`, for example:
+
+```json
+{
+  "base": {"previous": "main", "current": "release/next"},
+  "draft": {"previous": true, "current": false}
+}
+```
+
+Either delta can occur alone. `previous` is optional for explicit action signals
+without an old snapshot. Branch values are provider branch names; consumers add
+`refs/heads/` when comparing them to a push ref. State-only events use `updated`;
+compound source changes retain `synchronize`, and supported lifecycle actions
+remain unchanged. These envelopes also retain `provider_action`, simultaneous
+`labels_changed`, and the actual source head when supplied. Missing source heads
+on state-only hints remain null; no base or merge SHA substitutes for them.
+Current snapshots alone never establish a transition.
+
+| Provider contract | Push subscription | Base retarget | Draft transition | Push status |
+| --- | --- | --- | --- | --- |
+| GitHub documented webhooks | `push` | `pull_request`: `edited`, `changes.base.ref.from` | `ready_for_review` / `converted_to_draft` | Explicit deleted/forced fields |
+| GitLab documented webhooks | Push events (`Push Hook`, object_kind `push`) | Merge request events: unequal `changes.target_branch` | Unequal `changes.draft` | Deleted from zero after ID; forced unknown |
+| Forgejo 16.0.3 | `push` | `pull_request`: `edited`, `changes.ref.from` | Unsupported: draft is derived from configured title prefixes | Deleted from zero after ID; forced unknown |
+
+Forgejo's Gitea header aliases accept the same source-verified payload contract;
+arbitrary Gitea versions are not asserted equivalent. Title/body-only edits,
+base SHA-only changes, equal deltas and unknown actions add no state metadata.
+GitLab `update` with state deltas and absent/null `oldrev` is `updated`; valid
+nonzero code-change `oldrev` retains `synchronize`. Unrelated legacy updates
+retain their previous mapping. See [fixture provenance and exact provider
+sources](server/tests/fixtures/branch-state/README.md).
+
+For every GitLab push and base/draft-bearing MR hint, the first nonblank of
+`webhook-id`, `Idempotency-Key`, `X-Gitlab-Webhook-UUID` is the delivery identity.
+Header names are case insensitive; chosen values retain their bytes, bounded
+at 256 bytes. `X-Gitlab-Event-UUID` is correlation only for these hints. With no
+actual ID, `delivery_id` is empty even when a correlation UUID is present.
+Retry-stable modern IDs win over a changing legacy webhook UUID; that last
+fallback remains best effort. CI selection is unchanged. MR events without
+base/draft metadata, issues and notes retain legacy identity behavior.
+
+Nonempty delivery IDs dedupe by forge alias plus selected ID. Otherwise these
+new hints use an internal authenticated-body SHA-256 with namespaced forge,
+repository and resource coordinates (full ref for pushes; index and action for
+PRs). Compound label/state changes take this path before label/head fallbacks.
+Identical bytes collapse; distinct bodies at one head/ref survive. Equivalent
+encodings and genuinely repeated identical no-ID actions remain ambiguous.
+Fingerprints never appear in envelopes or log bodies. Existing five-minute
+dedupe, bounded subscriber channels and 32-event replay remain in memory;
+replay and live delivery apply the same repository authorization.
+
+The new projections validate identities, branch syntax, typed deltas and
+snapshot consistency, retaining at most a 16 KiB normalized envelope. Repository
+paths and branch names are bounded at 1024 bytes; titles/URLs at 4096. Errors
+are bounded diagnostics without payload contents. Authentication precedes
+all dispatch, including ignored refs, and the existing ingress body limit stays
+in force. Commit arrays and unrelated raw data never enter the hint.
+
+Consumers coalesce hints, match repository/target bindings and refetch
+authoritative PR/check/review state before acting. Keep periodic polling:
+provider push limits can suppress events, and this is neither ordered nor
+lossless delivery. Ingress makes no provider reads, git calls, rebase, merge,
+label or scheduling requests for these hints. Auto-merge remains restricted to
+newly enqueued submitted approvals. No webhook registration or CI branch-filter
+change is made by this feature.

@@ -175,6 +175,8 @@ impl PublishableEvent for CiChangeEvent {
         ChannelEvent {
             content: format!("ci changed at {}", self.head_sha),
             meta: ChannelEventMeta {
+                branch_push: None,
+                change_request_changes: None,
                 inline_review: None,
                 labels_changed: false,
                 ci: Some(self.details.clone()),

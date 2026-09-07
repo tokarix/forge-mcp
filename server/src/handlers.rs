@@ -322,6 +322,7 @@ pub async fn post_webhook(
 
     if let Some(event) = event {
         let channel_event = match &event {
+            domain::WebhookEvent::BranchPush(e) => e.to_channel_event(),
             domain::WebhookEvent::CiChange(e) => e.to_channel_event(),
             domain::WebhookEvent::PullRequestReviewComment(e) => e.to_channel_event(),
             domain::WebhookEvent::PullRequestReviewThread(e) => e.to_channel_event(),
@@ -333,6 +334,7 @@ pub async fn post_webhook(
         };
 
         let publish_result = match &event {
+            domain::WebhookEvent::BranchPush(e) => state.event_bus.publish(e),
             domain::WebhookEvent::CiChange(e) => state.event_bus.publish(e),
             domain::WebhookEvent::PullRequestReviewComment(e) => state.event_bus.publish(e),
             domain::WebhookEvent::PullRequestReviewThread(e) => state.event_bus.publish(e),
@@ -2694,6 +2696,121 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn branch_state_handler_never_calls_read_or_write_services() {
+        use domain::{ChangeRequestEvent, ChangeRequestEventAction, RepositoryRef};
+        #[derive(Clone)]
+        struct LabelAdapter(domain::WebhookEvent);
+        impl forge::ForgeWebhookAdapter for LabelAdapter {
+            fn verify_and_parse_webhook_event(
+                &self,
+                _: &[(String, String)],
+                _: &[u8],
+                _: &str,
+                _: domain::ForgeKind,
+                _: &str,
+                _: &str,
+            ) -> Result<Option<domain::WebhookEvent>, forge::ForgeWebhookError> {
+                Ok(Some(self.0.clone()))
+            }
+        }
+        // Authentication and real provider normalization are covered by the
+        // integration harness. This isolates the handler's sole side effect.
+        for auto_merge in [false, true] {
+            for action in [
+                ChangeRequestEventAction::Updated,
+                ChangeRequestEventAction::Synchronized,
+                ChangeRequestEventAction::Closed,
+                ChangeRequestEventAction::Merged,
+            ] {
+                let write = Arc::new(FakeWriteService::new());
+                let event = ChangeRequestEvent {
+                    change_request_changes: Some(domain::ChangeRequestChanges {
+                        base: Some(domain::BaseBranchChange {
+                            previous: Some("main".into()),
+                            current: "next".into(),
+                        }),
+                        draft: Some(domain::DraftChange {
+                            previous: Some(true),
+                            current: false,
+                        }),
+                    }),
+                    provider_action: Some("update".into()),
+                    action: action.clone(),
+                    labels_changed: true,
+                    payload_fingerprint: "internal".into(),
+                    delivery_id: "delivery".into(),
+                    head_sha: "source".into(),
+                    index: 42,
+                    repository: RepositoryRef {
+                        alias: "test-forge".into(),
+                        forge: domain::ForgeKind::GitHub,
+                        host: "https://forge.example".into(),
+                        owner: "org".into(),
+                        name: "repo".into(),
+                    },
+                    title: "PR".into(),
+                    url: "url".into(),
+                };
+                let mut instance =
+                    test_forge_instance("test-forge", "https://forge.example", write.clone());
+                let read = Arc::new(FakeReadService::new());
+                instance.read_service = read.clone();
+                let event = if action == ChangeRequestEventAction::Closed {
+                    domain::WebhookEvent::BranchPush(domain::BranchPushEvent {
+                        repository: event.repository,
+                        delivery_id: event.delivery_id,
+                        payload_fingerprint: "internal".into(),
+                        details: domain::BranchPushDetails {
+                            r#ref: "refs/heads/main".into(),
+                            before_sha: "a".repeat(40),
+                            after_sha: "b".repeat(40),
+                            deleted: None,
+                            forced: None,
+                            provider_event: "push".into(),
+                        },
+                    })
+                } else {
+                    domain::WebhookEvent::ChangeRequest(event)
+                };
+                instance.webhook_adapter = Arc::new(LabelAdapter(event));
+                instance.webhook = Some(crate::config::ForgeWebhookConfig {
+                    auto_merge,
+                    secret: "secret".into(),
+                });
+                let registry = Arc::new(crate::registry::ForgeRegistry::new(
+                    std::collections::HashMap::from([("test-forge".into(), instance)]),
+                ));
+                let bus = crate::events::EventBus::new();
+                let state = AppState {
+                    agent_registry: AgentRegistry::from_configs(&[]),
+                    audit_sink: Arc::new(audit::InMemoryAuditSink::new()),
+                    auto_merge_service: Arc::new(crate::auto_merge::AutoMergeService::new(
+                        bus.clone(),
+                        registry.clone(),
+                    )),
+                    event_bus: bus,
+                    forge_registry: registry,
+                };
+                let response = crate::build_router(state, false)
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri("/api/v1/forges/test-forge/webhook")
+                            .body(Body::from("{}"))
+                            .expect("request"),
+                    )
+                    .await
+                    .expect("response");
+                assert_eq!(response.status(), StatusCode::ACCEPTED);
+                tokio::task::yield_now().await;
+                assert_eq!(write.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+                assert_eq!(read.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn pr_label_handler_never_calls_write_service() {
         use domain::{ChangeRequestEvent, ChangeRequestEventAction, RepositoryRef};
         #[derive(Clone)]
@@ -2722,6 +2839,8 @@ mod tests {
             ] {
                 let write = Arc::new(FakeWriteService::new());
                 let event = ChangeRequestEvent {
+                    change_request_changes: None,
+                    provider_action: None,
                     action,
                     labels_changed: true,
                     payload_fingerprint: "internal".into(),
@@ -3329,6 +3448,7 @@ mod tests {
     }
 
     struct FakeReadService {
+        calls: std::sync::atomic::AtomicUsize,
         issue_dependencies: Arc<Mutex<Option<Result<domain::IssueDependencies, ServiceError>>>>,
         list_branches: Arc<Mutex<Option<ListBranchesResponse>>>,
         get_branch: Arc<Mutex<Option<BranchDetails>>>,
@@ -3339,6 +3459,7 @@ mod tests {
     impl FakeReadService {
         fn new() -> Self {
             Self {
+                calls: std::sync::atomic::AtomicUsize::new(0),
                 issue_dependencies: Arc::new(Mutex::new(None)),
                 list_branches: Arc::new(Mutex::new(None)),
                 get_branch: Arc::new(Mutex::new(None)),
@@ -3349,6 +3470,7 @@ mod tests {
 
         fn with_list_branches(resp: ListBranchesResponse) -> Arc<Self> {
             let svc = Self {
+                calls: std::sync::atomic::AtomicUsize::new(0),
                 issue_dependencies: Arc::new(Mutex::new(None)),
                 list_branches: Arc::new(Mutex::new(Some(resp))),
                 get_branch: Arc::new(Mutex::new(None)),
@@ -3360,6 +3482,7 @@ mod tests {
 
         fn with_get_branch(resp: BranchDetails) -> Arc<Self> {
             let svc = Self {
+                calls: std::sync::atomic::AtomicUsize::new(0),
                 issue_dependencies: Arc::new(Mutex::new(None)),
                 list_branches: Arc::new(Mutex::new(None)),
                 get_branch: Arc::new(Mutex::new(Some(resp))),
@@ -3371,6 +3494,7 @@ mod tests {
 
         fn with_get_change_request(resp: ChangeRequest) -> Arc<Self> {
             let svc = Self {
+                calls: std::sync::atomic::AtomicUsize::new(0),
                 issue_dependencies: Arc::new(Mutex::new(None)),
                 list_branches: Arc::new(Mutex::new(None)),
                 get_branch: Arc::new(Mutex::new(None)),
@@ -3382,6 +3506,7 @@ mod tests {
 
         fn with_list_change_requests(resp: Vec<ChangeRequest>) -> Arc<Self> {
             let svc = Self {
+                calls: std::sync::atomic::AtomicUsize::new(0),
                 issue_dependencies: Arc::new(Mutex::new(None)),
                 list_branches: Arc::new(Mutex::new(None)),
                 get_branch: Arc::new(Mutex::new(None)),
@@ -3395,6 +3520,7 @@ mod tests {
             result: Result<domain::IssueDependencies, ServiceError>,
         ) -> Arc<Self> {
             Arc::new(Self {
+                calls: std::sync::atomic::AtomicUsize::new(0),
                 issue_dependencies: Arc::new(Mutex::new(Some(result))),
                 list_branches: Arc::new(Mutex::new(None)),
                 get_branch: Arc::new(Mutex::new(None)),
@@ -3411,6 +3537,7 @@ mod tests {
             _: domain::GetIssueRequest,
             _: &domain::ForgeCredential,
         ) -> Result<domain::Issue, ServiceError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             todo!()
         }
         async fn get_issue_comments(
@@ -3418,6 +3545,7 @@ mod tests {
             _: domain::GetIssueCommentsRequest,
             _: &domain::ForgeCredential,
         ) -> Result<Vec<domain::IssueComment>, ServiceError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             todo!()
         }
         async fn get_issue_dependencies(
@@ -3425,6 +3553,7 @@ mod tests {
             _: domain::GetIssueDependenciesRequest,
             _: &domain::ForgeCredential,
         ) -> Result<domain::IssueDependencies, ServiceError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             self.issue_dependencies
                 .lock()
                 .expect("lock issue dependencies")
@@ -3436,6 +3565,7 @@ mod tests {
             _: domain::ListIssuesRequest,
             _: &domain::ForgeCredential,
         ) -> Result<Vec<domain::Issue>, ServiceError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             todo!()
         }
 
@@ -3444,6 +3574,7 @@ mod tests {
             request: ReadRepositoryFileRequest,
             _credential: &domain::ForgeCredential,
         ) -> Result<ReadRepositoryFileResponse, ServiceError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(ReadRepositoryFileResponse {
                 content: "file-content".to_string(),
                 git_ref: request.git_ref,
@@ -3457,6 +3588,7 @@ mod tests {
             _request: GetChangeRequestCommentsRequest,
             _: &domain::ForgeCredential,
         ) -> Result<Vec<ChangeRequestCommentDetail>, ServiceError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(vec![
                 ChangeRequestCommentDetail {
                     author: "reviewer".to_string(),
@@ -3484,6 +3616,7 @@ mod tests {
             request: domain::GetChangeRequestReviewsRequest,
             credential: &domain::ForgeCredential,
         ) -> Result<Vec<ChangeRequestCommentDetail>, ServiceError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             assert_eq!(request.agent.agent_id, "codex");
             assert_eq!(request.repository.alias, "test-forge");
             assert_eq!(request.repository.owner, "org");
@@ -3506,6 +3639,7 @@ mod tests {
             request: domain::GetChangeRequestDiscussionCommentsRequest,
             credential: &domain::ForgeCredential,
         ) -> Result<Vec<ChangeRequestCommentDetail>, ServiceError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             assert_eq!(request.agent.agent_id, "codex");
             assert_eq!(request.repository.alias, "test-forge");
             assert_eq!(request.repository.owner, "org");
@@ -3528,6 +3662,7 @@ mod tests {
             _request: domain::GetChangeRequestChecksRequest,
             _: &domain::ForgeCredential,
         ) -> Result<domain::CombinedCommitStatus, ServiceError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Err(ServiceError::Upstream("unimplemented in test fake".into()))
         }
 
@@ -3536,6 +3671,7 @@ mod tests {
             _req: domain::GetChangeRequestCiDetailsRequest,
             _cred: &domain::ForgeCredential,
         ) -> Result<domain::ChangeRequestCiDetails, domain::ServiceError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(domain::ChangeRequestCiDetails {
                 head_sha: "abc123".to_string(),
                 state: domain::CommitStatusState::Failure,
@@ -3564,6 +3700,7 @@ mod tests {
             _request: domain::GetChangeRequestDiffRequest,
             _credential: &domain::ForgeCredential,
         ) -> Result<domain::ChangeRequestDiff, ServiceError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Err(ServiceError::Upstream("unimplemented in test fake".into()))
         }
 
@@ -3572,6 +3709,7 @@ mod tests {
             _request: ListChangeRequestsRequest,
             _credential: &domain::ForgeCredential,
         ) -> Result<Vec<ChangeRequest>, ServiceError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if let Some(resp) = self.list_change_requests.lock().expect("lock").take() {
                 Ok(resp)
             } else {
@@ -3584,6 +3722,7 @@ mod tests {
             request: GetChangeRequestRequest,
             _: &domain::ForgeCredential,
         ) -> Result<ChangeRequest, ServiceError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if let Some(resp) = self.get_change_request.lock().expect("lock").take() {
                 Ok(resp)
             } else {
@@ -3611,6 +3750,7 @@ mod tests {
             _: domain::ListBranchesRequest,
             _: &domain::ForgeCredential,
         ) -> Result<domain::ListBranchesResponse, ServiceError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if let Some(resp) = self.list_branches.lock().expect("lock").take() {
                 Ok(resp)
             } else {
@@ -3623,6 +3763,7 @@ mod tests {
             _: domain::GetBranchRequest,
             _: &domain::ForgeCredential,
         ) -> Result<domain::BranchDetails, ServiceError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if let Some(resp) = self.get_branch.lock().expect("lock").take() {
                 Ok(resp)
             } else {
