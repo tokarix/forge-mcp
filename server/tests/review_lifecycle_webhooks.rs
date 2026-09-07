@@ -463,23 +463,43 @@ fn review_lifecycle_submitted_compatibility_and_optional_display() {
             .expect("ignored")
             .is_none()
     );
-    for header in ["pull_request_review_comment", "pull_request_review_thread"] {
-        let body = serde_json::to_vec(&payload("edited", json!("approved"))).expect("JSON");
+    for (header, action, resource) in [
+        (
+            "pull_request_review_comment",
+            "created",
+            json!({"comment": {"id": 9}}),
+        ),
+        (
+            "pull_request_review_thread",
+            "resolved",
+            json!({"thread": {"node_id": "opaque"}}),
+        ),
+    ] {
+        let mut value = payload(action, json!("approved"));
+        value
+            .as_object_mut()
+            .expect("object")
+            .extend(resource.as_object().expect("object").clone());
+        let body = serde_json::to_vec(&value).expect("JSON");
         let mut headers = headers(&body, "");
-        headers[0].1 = header.to_string();
-        assert!(
-            github()
-                .verify_and_parse_webhook_event(
-                    &headers,
-                    &body,
-                    "github",
-                    ForgeKind::GitHub,
-                    "https://provider.invalid",
-                    SECRET,
-                )
-                .expect("other payload family")
-                .is_none()
-        );
+        headers[0].1 = header.into();
+        let event = github()
+            .verify_and_parse_webhook_event(
+                &headers,
+                &body,
+                "github",
+                ForgeKind::GitHub,
+                "https://provider.invalid",
+                SECRET,
+            )
+            .expect("inline");
+        assert!(matches!(
+            event,
+            Some(
+                WebhookEvent::PullRequestReviewComment(_)
+                    | WebhookEvent::PullRequestReviewThread(_)
+            )
+        ));
     }
     let mut value = payload("edited", json!("approved"));
     value["number"] = json!(42);

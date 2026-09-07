@@ -8,6 +8,7 @@ workspace = true
 
 [dependencies]
 clap = { version = "4", features = ["derive", "env"] }
+domain = { path = "../domain" }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rmcp = { version = "1.2.0", features = ["transport-io"] }
 schemars = "1.2.1"

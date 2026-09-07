@@ -23,6 +23,7 @@ mod ci_webhooks;
 pub mod github;
 mod github_app;
 pub mod gitlab;
+mod inline_review_webhooks;
 
 static INSTALL_RING_PROVIDER: Once = Once::new();
 

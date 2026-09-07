@@ -163,7 +163,8 @@ Existing GitHub App installations must approve the added **Actions: read**
 permission before failed-job resolution works for private repositories.
 
 If webhooks are enabled, subscribe each App to **Issues**, **Issue comments**,
-**Pull requests**, and **Pull request reviews**, and configure the same webhook
+**Pull requests**, **Pull request reviews**, **Pull request review comments**,
+and **Pull request review threads**, and configure the same webhook
 secret on the Apps and in forge-mcp. Webhook-driven auto-merge additionally
 requires a forge-level token or `[forges.github_app]`; auto-merge must also be
 enabled in the target repository.
@@ -467,6 +468,63 @@ separate CI connector is follow-up scope; no direct Woodpecker ingress or new
 CI credentials are introduced. Dedicated Woodpecker provider lanes own live
 service-backed proof; deterministic fixtures do not claim live delivery.
 
+## Inline review comment and thread hints
+
+Inline feedback uses distinct `kind`, SSE event name and `meta.event_kind`:
+`pull_request_review_comment` (`created`, `edited`, `deleted`) and
+`pull_request_review_thread` (`resolved`, `unresolved`). Unresolved means a
+conversation was reopened, not the PR. The original action remains in
+`provider_action`. Both families carry repository/PR identity and delivery ID
+through authorized SSE, replay, MCP channels and `poll_events`.
+
+| Provider / evidence | Subscription | Enabled mapping | Gaps |
+| --- | --- | --- | --- |
+| GitHub documented contract and Octokit schemas, read 2026-09-07 | **Pull request review comments** and **Pull request review threads**; Apps need **Pull requests: read** | Comment created/edited/deleted; thread resolved/unresolved | Absent optional metadata stays absent; thread comments may be empty |
+| GitLab **v18.3.0-ee** source | **Comments**, `Note Hook` | MR notes with explicit `object_attributes.type: DiffNote`: create → created, update → edited | No delete or individual thread transition mapping; general/ambiguous and LegacyDiffNote notes keep the legacy path |
+| Forgejo **v16.0.3** source (CI-pinned) | Existing review/general-comment subscriptions | No distinct inline mapping established | Code-comment notifier is a no-op; edit/delete webhook payloads lack an inline discriminator; no resolution event in notifier interface |
+
+The [versioned inventory beside the deterministic fixtures](server/tests/fixtures/inline-review-provenance.md)
+records emission paths, payload conversion and links. This is source evidence,
+not live-provider delivery proof. Only GitLab's proven `DiffNote` create/update
+payloads migrate from the legacy `pull_request_review` stream; each delivery
+still emits one event. An MR aggregate `blocking_discussions_resolved` change,
+approval, arbitrary note update or Forgejo verdict-header lookalike never
+becomes an individual thread transition.
+
+`meta.inline_review` contains an optional opaque `thread_id`, optional changed
+`comment`, and supplied thread `comments`. Each comment independently retains
+its actual `comment_id`, `node_id`, `review_id`, `in_reply_to_id`, current and
+original commit/path/line metadata, multiline sides, and legacy diff positions
+when supplied. A reply ID is not a thread ID; a diff position is not a file line.
+GitLab retains native old/new paths, lines, commit coordinates and multiline
+endpoints under `gitlab_position` / `gitlab_original_position`; image pixel
+coordinates are omitted. Missing/null/empty strings are absent. There is no
+representative first comment or synthesized ID. PR `head_sha` is independent of
+comment commits and is null unless explicitly supplied by GitHub; GitLab MR
+last_commit is not used. Formal `review_state`, `review_id` and
+`reviewed_commit_id` remain unset at the common metadata level.
+
+Projections omit bodies, diff hunks and raw changes. Parser limits are UTF-8
+bytes: 256 for IDs/commits/deliveries/alias, 4096 per path, 1024 combined repository
+coordinates and 1024 thread comments; GitLab position types use 64 bytes.
+The existing HTTP body limit also applies. Recognized malformed identity or
+optional field types return HTTP 400 after verification; unknown actions are
+ignored. Existing HMAC/token verification and repository policy still apply.
+
+These are best-effort refresh hints. Refetch authoritative feedback and
+unresolved-thread state before mutations, retaining periodic polling for missed
+hints or unsupported providers. The inline read API is not expanded here.
+Resolving a thread does not approve a PR, dismiss a review or remove an
+independent REQUEST_CHANGES verdict. These events never schedule/cancel
+webhook auto-merge or write reviews or labels.
+
+Nonempty delivery IDs keep existing forge-alias retry deduplication. Without
+one, a length-prefixed repository/PR/kind/resource/action key includes SHA-256
+of the verified body, which is never serialized. Byte-identical repeated
+same-action bodies inside the five-minute TTL are indistinguishable from
+retries; changed bodies/timestamps survive, and differently encoded retries
+may also survive. Polling remains necessary.
+
 ## Review webhook hints
 
 Review submissions, edits and dismissals share `kind`, SSE event name and
@@ -482,7 +540,7 @@ of `forge_alias`.
 | --- | --- | --- | --- |
 | GitHub, documented webhook contract | **Pull request reviews**, `X-GitHub-Event: pull_request_review`; Apps need Pull requests read permission | `submitted`, `edited`, `dismissed` | Formal `review.id`; `review.commit_id` when supplied. Edits/dismissals require positive integer review ID and PR number, and nonempty repository owner/name. |
 | Forgejo **v15.0.0**, source inventory below | **Pull request reviewed** verdict subscriptions; `X-Forgejo-Event: pull_request_approved`, `pull_request_rejected`, `pull_request_comment` | `reviewed` → `submitted`; existing `submitted` and `pull_request_review` header compatibility retained | v15 `ReviewPayload` has only type/content, no review ID or reviewed commit. Existing submitted payloads with a positive formal review ID expose it; ID-less/zero-ID payloads omit `meta.review_id`. No formal lifecycle mapping. |
-| GitLab, documented MR/note contract | **Comments**, `X-Gitlab-Event: Note Hook` for legacy MR notes | Existing `submitted`/`comment` notification retained, including note updates; never normalized as formal `edited` or `dismissed` | Note IDs and MR `last_commit` are not formal review identity. New `review_id` and `reviewed_commit_id` stay absent. MR approval/unapproval and reviewer-state updates do not establish formal review edit/dismiss equivalence. |
+| GitLab, documented MR/note contract | **Comments**, `X-Gitlab-Event: Note Hook` for legacy MR notes | Ordinary/ambiguous notes retain `submitted`/`comment`, including updates; explicit MR `DiffNote` create/update now use the inline family below; never normalized as formal `edited` or `dismissed` | Note IDs and MR `last_commit` are not formal review identity. New `review_id` and `reviewed_commit_id` stay absent. MR approval/unapproval and reviewer-state updates do not establish formal review edit/dismiss equivalence. |
 
 GitHub's [review webhook contract](https://docs.github.com/en/webhooks/webhook-events-and-payloads#pull_request_review)
 distinguishes formal reviews from inline review comments and ordinary issue

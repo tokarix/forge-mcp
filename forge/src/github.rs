@@ -3183,6 +3183,16 @@ impl ForgeWebhookAdapter for GitHubAdapter {
             "issue_comment" => {
                 parse_issue_comment_webhook(body, delivery_id, forge_alias, forge_kind, host)
             }
+            "pull_request_review_comment" | "pull_request_review_thread" => {
+                crate::inline_review_webhooks::github(
+                    body,
+                    event,
+                    delivery_id,
+                    forge_alias,
+                    forge_kind,
+                    host,
+                )
+            }
             "pull_request_review" => {
                 parse_review_webhook(body, delivery_id, forge_alias, forge_kind, host)
             }

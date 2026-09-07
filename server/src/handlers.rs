@@ -323,6 +323,9 @@ pub async fn post_webhook(
     if let Some(event) = event {
         let channel_event = match &event {
             domain::WebhookEvent::CiChange(e) => e.to_channel_event(),
+            domain::WebhookEvent::PullRequestReviewComment(e) => e.to_channel_event(),
+            domain::WebhookEvent::PullRequestReviewThread(e) => e.to_channel_event(),
+
             domain::WebhookEvent::ChangeRequest(e) => e.to_channel_event(),
             domain::WebhookEvent::Issue(e) => e.to_channel_event(),
             domain::WebhookEvent::IssueComment(e) => e.to_channel_event(),
@@ -331,6 +334,9 @@ pub async fn post_webhook(
 
         let publish_result = match &event {
             domain::WebhookEvent::CiChange(e) => state.event_bus.publish(e),
+            domain::WebhookEvent::PullRequestReviewComment(e) => state.event_bus.publish(e),
+            domain::WebhookEvent::PullRequestReviewThread(e) => state.event_bus.publish(e),
+
             domain::WebhookEvent::ChangeRequest(e) => state.event_bus.publish(e),
             domain::WebhookEvent::Issue(e) => state.event_bus.publish(e),
             domain::WebhookEvent::IssueComment(e) => state.event_bus.publish(e),
@@ -2535,6 +2541,120 @@ mod tests {
                     "fingerprint".into(),
                 )
                 .expect("CI event");
+                let mut instance =
+                    test_forge_instance("test-forge", "https://forge.example", write.clone());
+                instance.webhook_adapter = Arc::new(CiAdapter(event));
+                instance.webhook = Some(crate::config::ForgeWebhookConfig {
+                    auto_merge,
+                    secret: "secret".into(),
+                });
+                let registry = Arc::new(crate::registry::ForgeRegistry::new(
+                    std::collections::HashMap::from([("test-forge".into(), instance)]),
+                ));
+                let bus = crate::events::EventBus::new();
+                let state = AppState {
+                    agent_registry: AgentRegistry::from_configs(&[]),
+                    audit_sink: Arc::new(audit::InMemoryAuditSink::new()),
+                    auto_merge_service: Arc::new(crate::auto_merge::AutoMergeService::new(
+                        bus.clone(),
+                        registry.clone(),
+                    )),
+                    event_bus: bus,
+                    forge_registry: registry,
+                };
+                let response = crate::build_router(state, false)
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri("/api/v1/forges/test-forge/webhook")
+                            .body(Body::from("{}"))
+                            .expect("request"),
+                    )
+                    .await
+                    .expect("response");
+                assert_eq!(response.status(), StatusCode::ACCEPTED);
+                tokio::task::yield_now().await;
+                assert_eq!(write.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn inline_handler_never_calls_write_service() {
+        use domain::{
+            InlineReviewComment, InlineReviewDetails, PullRequestReviewCommentAction,
+            PullRequestReviewCommentEvent, PullRequestReviewThreadAction,
+            PullRequestReviewThreadEvent, RepositoryRef, WebhookEvent,
+        };
+        #[derive(Clone)]
+        struct CiAdapter(WebhookEvent);
+        impl forge::ForgeWebhookAdapter for CiAdapter {
+            fn verify_and_parse_webhook_event(
+                &self,
+                _: &[(String, String)],
+                _: &[u8],
+                _: &str,
+                _: domain::ForgeKind,
+                _: &str,
+                _: &str,
+            ) -> Result<Option<domain::WebhookEvent>, forge::ForgeWebhookError> {
+                Ok(Some(self.0.clone()))
+            }
+        }
+        // Authentication and real provider normalization are covered by the
+        // integration harness. This isolates the handler's sole side effect.
+        for auto_merge in [false, true] {
+            for action in ["created", "edited", "deleted", "resolved", "unresolved"] {
+                let write = Arc::new(FakeWriteService::new());
+                let repository = RepositoryRef {
+                    alias: "test-forge".into(),
+                    forge: domain::ForgeKind::GitHub,
+                    host: "https://forge.example".into(),
+                    owner: "org".into(),
+                    name: "repo".into(),
+                };
+                let event = match action {
+                    "resolved" | "unresolved" => {
+                        WebhookEvent::PullRequestReviewThread(PullRequestReviewThreadEvent::new(
+                            repository,
+                            42,
+                            if action == "resolved" {
+                                PullRequestReviewThreadAction::Resolved
+                            } else {
+                                PullRequestReviewThreadAction::Unresolved
+                            },
+                            "delivery".into(),
+                            None,
+                            InlineReviewDetails {
+                                thread_id: Some("opaque".into()),
+                                ..Default::default()
+                            },
+                            "fingerprint".into(),
+                        ))
+                    }
+                    _ => {
+                        WebhookEvent::PullRequestReviewComment(PullRequestReviewCommentEvent::new(
+                            repository,
+                            42,
+                            match action {
+                                "created" => PullRequestReviewCommentAction::Created,
+                                "edited" => PullRequestReviewCommentAction::Edited,
+                                _ => PullRequestReviewCommentAction::Deleted,
+                            },
+                            "delivery".into(),
+                            None,
+                            InlineReviewDetails {
+                                comment: Some(InlineReviewComment {
+                                    comment_id: Some(7),
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            },
+                            "fingerprint".into(),
+                        ))
+                    }
+                };
                 let mut instance =
                     test_forge_instance("test-forge", "https://forge.example", write.clone());
                 instance.webhook_adapter = Arc::new(CiAdapter(event));

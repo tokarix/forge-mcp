@@ -716,6 +716,8 @@ struct ChannelEventMetaEnvelope {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     ci: Option<CiEventDetails>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    inline_review: Option<domain::InlineReviewDetails>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     provider_action: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     review_id: Option<u64>,
@@ -1189,6 +1191,7 @@ impl McpShim {
                 content: "change_request opened on test/org/repo#1 at deadbeef".to_string(),
                 kind: "change_request".to_string(),
                 meta: ChannelEventMetaEnvelope {
+                    inline_review: None,
                     labels_changed: false,
                     ci: None,
                     provider_action: None,
@@ -1302,6 +1305,8 @@ async fn send_event_stream_request(
 }
 
 const KNOWN_EVENT_KINDS: &[&str] = &[
+    "pull_request_review_comment",
+    "pull_request_review_thread",
     "ci",
     "change_request",
     "issue",
@@ -2243,7 +2248,7 @@ impl McpShim {
     /// events that arrived since the last poll, then clears the buffer.
     #[tool(
         name = "poll_events",
-        description = "Poll for pending normalized change request and issue webhook events. Returns buffered events since last poll. Call periodically to receive forge notifications. Issue actions `opened`, `closed`, `reopened`, `edited`, and `labels_changed` are refresh hints; refetch authoritative issue state with `get_issue` before acting."
+        description = "Poll for pending normalized change request and issue webhook events. Returns buffered events since last poll. Call periodically to receive forge notifications. Inline review comment/thread events are refresh hints: refetch authoritative feedback and unresolved-thread state before mutations; resolution never changes a formal verdict. Keep periodic polling as fallback. Issue actions `opened`, `closed`, `reopened`, `edited`, and `labels_changed` are refresh hints; refetch authoritative issue state with `get_issue` before acting."
     )]
     async fn poll_events(&self) -> Result<String, McpError> {
         let events: Vec<AgentEventEnvelope> = {
@@ -5220,6 +5225,89 @@ mod tests {
                 let sse = format!(
                     "event: pull_request_review\nid: internal:review-delivery\ndata: {event}\n\n"
                 );
+                wiremock::Mock::given(wiremock::matchers::method("GET"))
+                    .and(wiremock::matchers::path("/api/v1/agent/events"))
+                    .respond_with(
+                        wiremock::ResponseTemplate::new(200)
+                            .insert_header("content-type", "text/event-stream")
+                            .set_body_string(sse),
+                    )
+                    .up_to_n_times(1)
+                    .mount(&mock_server)
+                    .await;
+                let mut config = test_config(&mock_server.uri());
+                config.enable_channels = channels;
+                let (client, captured, received, task) =
+                    spawn_shim_and_channel_client(config).await?;
+                if channels {
+                    tokio::time::timeout(Duration::from_secs(5), received.notified()).await?;
+                    let (method, params) = captured.lock().await.take().expect("channel");
+                    assert_eq!(method, "notifications/claude/channel");
+                    let mut expected = event.clone();
+                    let meta = expected["meta"].as_object_mut().expect("metadata");
+                    meta.remove("forge_alias");
+                    meta.insert("forge".into(), serde_json::json!("internal"));
+                    expected.as_object_mut().expect("envelope").remove("kind");
+                    assert_eq!(params, Some(expected));
+                }
+                let events = tokio::time::timeout(Duration::from_secs(5), async {
+                    loop {
+                        let result = client
+                            .call_tool(CallToolRequestParams::new("poll_events"))
+                            .await?;
+                        let text = result
+                            .content
+                            .first()
+                            .and_then(|c| c.raw.as_text())
+                            .expect("text");
+                        let events: Vec<serde_json::Value> = serde_json::from_str(&text.text)?;
+                        if !events.is_empty() {
+                            return Ok::<_, Box<dyn std::error::Error>>(events);
+                        }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await??;
+                assert_eq!(events, vec![event]);
+                let result = client
+                    .call_tool(CallToolRequestParams::new("poll_events"))
+                    .await?;
+                assert_eq!(
+                    result
+                        .content
+                        .first()
+                        .and_then(|c| c.raw.as_text())
+                        .expect("text")
+                        .text,
+                    "[]"
+                );
+                drop(client);
+                task.await??;
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn inline_review_sse_metadata_reaches_channels_and_polling()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for channels in [false, true] {
+            for (kind, action) in [
+                ("pull_request_review_comment", "edited"),
+                ("pull_request_review_thread", "unresolved"),
+            ] {
+                let mock_server = wiremock::MockServer::start().await;
+                let event = serde_json::json!({
+                    "kind": kind, "content": "review refresh hint",
+                    "meta": {
+                        "action": action, "provider_action": action,
+                        "event_kind": kind, "inline_review": {"thread_id": "opaque", "comments": [{"comment_id": 8, "review_id": 99, "commit_id": "older", "line": 12, "side": "LEFT"}, {"comment_id": 9, "review_id": 100}]},
+                        "change_request": 42, "delivery_id": "review-delivery",
+                        "forge_alias": "internal", "owner": "org", "repo": "repo",
+                        "head_sha": null, "review_state": null, "issue": null, "issue_comment": null
+                    }
+                });
+                let sse = format!("event: {kind}\nid: internal:review-delivery\ndata: {event}\n\n");
                 wiremock::Mock::given(wiremock::matchers::method("GET"))
                     .and(wiremock::matchers::path("/api/v1/agent/events"))
                     .respond_with(

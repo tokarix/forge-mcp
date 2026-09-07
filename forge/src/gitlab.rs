@@ -2124,6 +2124,17 @@ fn parse_gitlab_note_event(
     forge_kind: domain::ForgeKind,
     host: &str,
 ) -> Result<Option<domain::WebhookEvent>, ForgeWebhookError> {
+    if let crate::inline_review_webhooks::GitLabInlineResult::Handled(event) =
+        crate::inline_review_webhooks::gitlab(
+            body,
+            &delivery_id,
+            forge_alias,
+            forge_kind.clone(),
+            host,
+        )?
+    {
+        return Ok(event.map(|event| *event));
+    }
     let payload: GitLabWebhookNoteEvent = serde_json::from_slice(body)
         .map_err(|e| ForgeWebhookError::InvalidPayload(e.to_string()))?;
 

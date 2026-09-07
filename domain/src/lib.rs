@@ -851,6 +851,8 @@ impl PublishableEvent for AutoMergeFailedEvent {
 
 #[derive(Clone, Debug)]
 pub enum WebhookEvent {
+    PullRequestReviewComment(PullRequestReviewCommentEvent),
+    PullRequestReviewThread(PullRequestReviewThreadEvent),
     CiChange(CiChangeEvent),
     ChangeRequest(ChangeRequestEvent),
     Issue(IssueEvent),
