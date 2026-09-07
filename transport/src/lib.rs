@@ -669,8 +669,50 @@ pub struct SubmitChangeRequestReviewTool {
     pub repo: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CiEventSource {
+    CommitStatus,
+    CheckRun,
+    CheckSuite,
+    Pipeline,
+    Job,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CiEventDetails {
+    pub source: CiEventSource,
+    pub provider_event: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_event_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_delivery_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_id_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conclusion: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct ChannelEventMetaEnvelope {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ci: Option<CiEventDetails>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     provider_action: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1145,6 +1187,7 @@ impl McpShim {
                 content: "change_request opened on test/org/repo#1 at deadbeef".to_string(),
                 kind: "change_request".to_string(),
                 meta: ChannelEventMetaEnvelope {
+                    ci: None,
                     provider_action: None,
                     review_id: None,
                     reviewed_commit_id: None,
@@ -1256,6 +1299,7 @@ async fn send_event_stream_request(
 }
 
 const KNOWN_EVENT_KINDS: &[&str] = &[
+    "ci",
     "change_request",
     "issue",
     "issue_comment",
@@ -5184,6 +5228,98 @@ mod tests {
                             return Ok::<_, Box<dyn std::error::Error>>(events);
                         }
                         tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await??;
+                assert_eq!(events, vec![event]);
+                let result = client
+                    .call_tool(CallToolRequestParams::new("poll_events"))
+                    .await?;
+                assert_eq!(
+                    result
+                        .content
+                        .first()
+                        .and_then(|c| c.raw.as_text())
+                        .expect("text")
+                        .text,
+                    "[]"
+                );
+                drop(client);
+                task.await??;
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ci_sse_metadata_reaches_channels_and_polling() -> Result<(), Box<dyn std::error::Error>>
+    {
+        for channels in [false, true] {
+            for source in [
+                "commit_status",
+                "check_run",
+                "check_suite",
+                "pipeline",
+                "job",
+            ] {
+                let mock_server = wiremock::MockServer::start().await;
+                let event = serde_json::json!({
+                    "kind": "ci", "content": "ci changed",
+                    "meta": {
+                        "action": "changed", "provider_action": "completed",
+                        "event_kind": "ci", "change_request": null, "delivery_id": "ci-delivery",
+                        "forge_alias": "internal", "owner": "org", "repo": "repo",
+                        "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                        "review_state": null, "issue": null, "issue_comment": null,
+                        "ci": {"source": source, "provider_event": "native", "id": 71,
+                            "parent_id": 9, "status": "completed", "conclusion": "neutral",
+                            "provider_event_id": "event", "provider_delivery_id": "delivery",
+                            "delivery_id_source": "webhook-id", "name": "unit", "context": "test",
+                            "started_at": "2026-09-07T00:00:00Z", "completed_at": "2026-09-07T00:01:00Z",
+                            "updated_at": "2026-09-07T00:01:00Z"}
+                    }
+                });
+                let sse = format!("event: ci\nid: internal:ci-delivery\ndata: {event}\n\n");
+                wiremock::Mock::given(wiremock::matchers::method("GET"))
+                    .and(wiremock::matchers::path("/api/v1/agent/events"))
+                    .respond_with(
+                        wiremock::ResponseTemplate::new(200)
+                            .insert_header("content-type", "text/event-stream")
+                            .set_body_string(sse),
+                    )
+                    .up_to_n_times(1)
+                    .mount(&mock_server)
+                    .await;
+                let mut config = test_config(&mock_server.uri());
+                config.enable_channels = channels;
+                let (client, captured, received, task) =
+                    spawn_shim_and_channel_client(config).await?;
+                if channels {
+                    tokio::time::timeout(Duration::from_secs(5), received.notified()).await?;
+                    let (method, params) = captured.lock().await.take().expect("channel");
+                    assert_eq!(method, "notifications/claude/channel");
+                    let mut expected = event.clone();
+                    let meta = expected["meta"].as_object_mut().expect("metadata");
+                    meta.remove("forge_alias");
+                    meta.insert("forge".into(), serde_json::json!("internal"));
+                    expected.as_object_mut().expect("envelope").remove("kind");
+                    assert_eq!(params, Some(expected));
+                }
+                let events = tokio::time::timeout(Duration::from_secs(5), async {
+                    loop {
+                        let result = client
+                            .call_tool(CallToolRequestParams::new("poll_events"))
+                            .await?;
+                        let text = result
+                            .content
+                            .first()
+                            .and_then(|c| c.raw.as_text())
+                            .expect("text");
+                        let events: Vec<serde_json::Value> = serde_json::from_str(&text.text)?;
+                        if !events.is_empty() {
+                            return Ok::<_, Box<dyn std::error::Error>>(events);
+                        }
+                        tokio::task::yield_now().await;
                     }
                 })
                 .await??;

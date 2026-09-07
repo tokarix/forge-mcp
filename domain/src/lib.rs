@@ -4,6 +4,9 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+mod ci;
+pub use ci::{CiChangeEvent, CiEventDetails, CiEventSource};
+
 pub mod diff;
 pub mod policy;
 
@@ -135,6 +138,8 @@ pub struct ChannelEvent {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ChannelEventMeta {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ci: Option<CiEventDetails>,
     pub action: String,
     pub change_request: Option<u64>,
     pub delivery_id: String,
@@ -307,6 +312,7 @@ impl PublishableEvent for ChangeRequestEvent {
                 self.head_sha,
             ),
             meta: ChannelEventMeta {
+                ci: None,
                 provider_action: None,
                 review_id: None,
                 reviewed_commit_id: None,
@@ -468,6 +474,7 @@ impl PublishableEvent for IssueCommentEvent {
                 self.issue_index,
             ),
             meta: ChannelEventMeta {
+                ci: None,
                 provider_action: None,
                 review_id: None,
                 reviewed_commit_id: None,
@@ -531,6 +538,7 @@ impl PublishableEvent for IssueEvent {
                 self.index,
             ),
             meta: ChannelEventMeta {
+                ci: None,
                 provider_action: None,
                 review_id: None,
                 reviewed_commit_id: None,
@@ -652,6 +660,7 @@ impl PublishableEvent for PullRequestReviewEvent {
                 self.index,
             ),
             meta: ChannelEventMeta {
+                ci: None,
                 provider_action: self.provider_action.clone(),
                 // GitLab's legacy MR note path is not a formal review resource.
                 review_id: (self.repository.forge != ForgeKind::GitLab && self.review_id > 0)
@@ -756,6 +765,7 @@ impl PublishableEvent for AutoMergeFailedEvent {
                 self.error,
             ),
             meta: ChannelEventMeta {
+                ci: None,
                 provider_action: None,
                 review_id: None,
                 reviewed_commit_id: None,
@@ -777,6 +787,7 @@ impl PublishableEvent for AutoMergeFailedEvent {
 
 #[derive(Clone, Debug)]
 pub enum WebhookEvent {
+    CiChange(CiChangeEvent),
     ChangeRequest(ChangeRequestEvent),
     Issue(IssueEvent),
     IssueComment(IssueCommentEvent),

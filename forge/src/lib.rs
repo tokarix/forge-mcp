@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use thiserror::Error;
 
+mod ci_webhooks;
 pub mod github;
 mod github_app;
 pub mod gitlab;

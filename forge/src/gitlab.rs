@@ -1819,6 +1819,8 @@ struct GitLabUserIdResponse {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum GitLabWebhookEventType {
+    PipelineHook,
+    JobHook,
     IssueHook,
     MergeRequestHook,
     NoteHook,
@@ -1828,6 +1830,8 @@ enum GitLabWebhookEventType {
 impl GitLabWebhookEventType {
     fn parse(value: &str) -> Self {
         match value {
+            "Pipeline Hook" => Self::PipelineHook,
+            "Job Hook" => Self::JobHook,
             "Issue Hook" => Self::IssueHook,
             "Merge Request Hook" => Self::MergeRequestHook,
             "Note Hook" => Self::NoteHook,
@@ -1939,6 +1943,16 @@ impl ForgeWebhookAdapter for GitLabAdapter {
             .to_string();
 
         match event_type {
+            GitLabWebhookEventType::PipelineHook | GitLabWebhookEventType::JobHook => {
+                crate::ci_webhooks::gitlab(
+                    body,
+                    headers,
+                    event_header,
+                    forge_alias,
+                    forge_kind,
+                    host,
+                )
+            }
             GitLabWebhookEventType::MergeRequestHook => {
                 parse_gitlab_merge_request_event(body, delivery_id, forge_alias, forge_kind, host)
             }

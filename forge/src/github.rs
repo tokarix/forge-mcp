@@ -3173,6 +3173,9 @@ impl ForgeWebhookAdapter for GitHubAdapter {
             .unwrap_or_default()
             .to_string();
         match event {
+            "status" | "check_run" | "check_suite" => {
+                crate::ci_webhooks::github(body, headers, event, forge_alias, forge_kind, host)
+            }
             "pull_request" => {
                 parse_pull_request_webhook(body, delivery_id, forge_alias, forge_kind, host)
             }

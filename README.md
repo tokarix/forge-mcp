@@ -213,6 +213,135 @@ copies `pr.HasMerged`, and the
 [API PR type](https://codeberg.org/forgejo/forgejo/src/tag/v15.0.0/modules/structs/pull.go)
 serializes that boolean as `merged`.
 
+## CI webhook hints
+
+Authenticated GitHub and GitLab CI notifications publish one repository and
+exact-commit wake hint through SSE (`event: ci`), channel notifications and
+`poll_events`. No PR/MR association is required or inferred. For example:
+
+```json
+{
+  "kind": "ci",
+  "content": "ci changed at aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "meta": {
+    "action": "changed",
+    "event_kind": "ci",
+    "forge_alias": "github",
+    "owner": "org",
+    "repo": "repo",
+    "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "delivery_id": "delivery-123",
+    "change_request": null,
+    "issue": null,
+    "issue_comment": null,
+    "review_state": null,
+    "provider_action": "completed",
+    "ci": {
+      "source": "check_run",
+      "provider_event": "check_run",
+      "provider_delivery_id": "delivery-123",
+      "delivery_id_source": "X-GitHub-Delivery",
+      "id": 123,
+      "parent_id": 100,
+      "name": "unit tests",
+      "status": "completed",
+      "conclusion": "success"
+    }
+  }
+}
+```
+
+`ci.source` is `commit_status`, `check_run`, `check_suite`, `pipeline`, or
+`job`. Native `id` and `parent_id` are optional positive integers; parent means
+check-suite ID for a run and pipeline ID for a job. Optional `name`, `context`,
+`status`, `conclusion`, `started_at`, `completed_at` and `updated_at` preserve
+source values. Absent/null lifecycle values stay absent; unknown values remain
+opaque. `provider_action` records a native check action separately from status.
+Status, pipeline and job notifications have no synthesized provider action.
+`provider_event` records the native event header. `provider_event_id` preserves
+GitLab's event UUID; `provider_delivery_id` preserves its webhook UUID (or
+GitHub's delivery header), even when a different message ID is selected.
+
+| Provider | Subscription and event header | Identity and supported lifecycle |
+| --- | --- | --- |
+| GitHub | **Statuses**, `X-GitHub-Event: status` | Top-level `sha`, `id`, `context`, `state` |
+| GitHub | **Check runs**, `X-GitHub-Event: check_run` | Run `head_sha`; actions `created`, `completed`, `rerequested`, `requested_action` |
+| GitHub | **Check suites**, `X-GitHub-Event: check_suite` | Suite `head_sha`; actions `completed`, `requested`, `rerequested` |
+| GitLab | **Pipeline events**, `X-Gitlab-Event: Pipeline Hook` | `object_kind=pipeline`; `object_attributes.sha/id/status` |
+| GitLab | **Job events**, `X-Gitlab-Event: Job Hook` | `object_kind=build`; top-level `sha/build_id/build_status`, optional `pipeline_id` |
+| Forgejo v16.0.3 | Generic status/check ingress unsupported | Keep polling external commit statuses; native Actions completion notifications are separate and unnormalized |
+
+See the [GitHub event contract](https://docs.github.com/en/webhooks/webhook-events-and-payloads#check_run)
+(and its `check_suite`/`status` sections). Apps need Commit statuses read access
+for statuses and Checks read access for the read-level check subset. Receiving
+`requested`/`rerequested`/`requested_action` notifications can require Checks
+write access. Repository and organization hooks receive only run `created`/
+`completed` and suite `completed` actions; Apps can receive the other actions
+with the required permissions. These subscriptions do not promise every intermediate transition. `in_progress`
+is a payload status, never an invented action. Existing App permissions,
+credentials and webhook registration are unchanged.
+
+GitLab requires authoritative `project.path_with_namespace`, split at the last
+slash to retain nested groups. Older jobs without that path are acknowledged as
+unsupported; display names and clone URLs cannot supply authorization identity.
+Present malformed paths, conflicting project IDs or conflicting commit SHAs
+are rejected. Job `commit.id` is a pipeline ID and never supplies the commit SHA.
+MR and `source_pipeline` coordinates do not replace the event project.
+See [GitLab pipeline and job payloads](https://docs.gitlab.com/user/project/integrations/webhook_events/#pipeline-events).
+Original-byte signature verification and GitLab secret-token authentication
+remain unchanged. Invalid authentication returns 401, malformed supported
+payloads 400, and supported or ignored authenticated deliveries 202.
+
+The new projection limits UTF-8 bytes: identifiers/headers 256, repository path
+1024, names/context 1024, lifecycle/action tokens 128, timestamps 64, and the
+serialized normalized envelope 16 KiB. Oversized retained fields are rejected,
+not truncated. Commit IDs must be nonzero full 40- or 64-digit hexadecimal
+object IDs, copied exactly from the CI source. Repository components must be
+nonempty, without dot, empty or control components. Typed subset parsing omits
+logs, arrays, annotations, variables, users, URLs and other raw payload data.
+The router body-size limit remains in force. Fingerprints never serialize.
+
+GitHub uses `X-GitHub-Delivery`. New GitLab CI hints select the first nonempty
+`webhook-id`, `Idempotency-Key`, then `X-Gitlab-Webhook-UUID`, recorded in
+`delivery_id_source`. GitLab event UUIDs can be shared by recursive events and
+are not delivery IDs; see [delivery headers](https://docs.gitlab.com/user/project/integrations/webhooks/#delivery-headers).
+Existing MR/issue/note handling is unchanged. Dedupe retains forge plus delivery
+ID, with best-effort legacy webhook-UUID retries. Without an ID, `delivery_id`
+stays empty, SSE uses its synthetic transport ID, and a namespaced key includes
+repository, source, exact SHA, native event/action and verified-body SHA-256.
+Byte-identical retries collapse; changed bodies and other SHAs survive.
+Different encodings and genuinely repeated identical no-ID actions are
+ambiguous. The five-minute in-memory dedupe, 32-event replay and bounded
+subscriber channels provide neither persistence, ordering nor lossless delivery.
+Live delivery and replay apply the same repository authorization.
+
+A successful job, suite or pipeline is only a source-scoped hint. Consumers
+must resolve their repository/exact-SHA bindings, refetch authoritative forge
+checks and revalidate the current binding/head before dispatch, failure handling
+or merge-readiness changes. Old-SHA and out-of-order hints remain historical.
+Periodic polling is mandatory. CI hints only publish; they never schedule,
+cancel or modify auto-merge, regardless of `webhook.auto_merge`.
+Upgrade the shim to recognize `ci`; older shims ignore the new kind. Polling
+works with channels disabled. Channel metadata has identical semantics, with
+`forge_alias` renamed to `forge` and no outer `kind`. Old envelopes omit `ci`.
+
+Forgejo capability evidence is source-verified at **v16.0.3**, matching the
+pinned integration image, not a claim about a running deployment:
+[webhook types](https://codeberg.org/forgejo/forgejo/src/tag/v16.0.3/modules/webhook/type.go)
+have no generic status/check family. The
+[status API](https://codeberg.org/forgejo/forgejo/src/tag/v16.0.3/routers/api/v1/repo/status.go)
+calls [CreateCommitStatus](https://codeberg.org/forgejo/forgejo/src/tag/v16.0.3/services/repository/commitstatus/commitstatus.go),
+which updates status/summary data, caches and native scheduled-merge checking
+without publishing a commit-status webhook. The
+[Actions notifier](https://codeberg.org/forgejo/forgejo/src/tag/v16.0.3/services/webhook/notifier.go)
+does expose `action_run_success`, `action_run_failure` and `action_run_recover`.
+Those terminal native Actions events do not cover external statuses or a full
+pending/running lifecycle and remain ignored by this adapter. Signed negative
+fixtures prove that adapter boundary only. Native Actions normalization or a
+separate CI connector is follow-up scope; no direct Woodpecker ingress or new
+CI credentials are introduced. Dedicated Woodpecker provider lanes own live
+service-backed proof; deterministic fixtures do not claim live delivery.
+
 ## Review webhook hints
 
 Review submissions, edits and dismissals share `kind`, SSE event name and
