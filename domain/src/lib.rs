@@ -4,6 +4,9 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+mod inline_review;
+pub use inline_review::*;
+
 mod ci;
 pub use ci::{CiChangeEvent, CiEventDetails, CiEventSource};
 
@@ -142,6 +145,8 @@ pub struct ChannelEventMeta {
     pub labels_changed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ci: Option<CiEventDetails>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inline_review: Option<InlineReviewDetails>,
     pub action: String,
     pub change_request: Option<u64>,
     pub delivery_id: String,
@@ -330,6 +335,7 @@ impl PublishableEvent for ChangeRequestEvent {
                 self.head_sha,
             ),
             meta: ChannelEventMeta {
+                inline_review: None,
                 labels_changed: self.labels_changed,
                 ci: None,
                 provider_action: None,
@@ -497,6 +503,7 @@ impl PublishableEvent for IssueCommentEvent {
                 self.issue_index,
             ),
             meta: ChannelEventMeta {
+                inline_review: None,
                 labels_changed: false,
                 ci: None,
                 provider_action: None,
@@ -584,6 +591,7 @@ impl PublishableEvent for IssueEvent {
                 self.index,
             ),
             meta: ChannelEventMeta {
+                inline_review: None,
                 labels_changed: self.labels_changed
                     || self.action == IssueEventAction::LabelsChanged,
                 ci: None,
@@ -712,6 +720,7 @@ impl PublishableEvent for PullRequestReviewEvent {
                 self.index,
             ),
             meta: ChannelEventMeta {
+                inline_review: None,
                 labels_changed: false,
                 ci: None,
                 provider_action: self.provider_action.clone(),
@@ -818,6 +827,7 @@ impl PublishableEvent for AutoMergeFailedEvent {
                 self.error,
             ),
             meta: ChannelEventMeta {
+                inline_review: None,
                 labels_changed: false,
                 ci: None,
                 provider_action: None,
