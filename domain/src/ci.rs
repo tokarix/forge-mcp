@@ -175,6 +175,7 @@ impl PublishableEvent for CiChangeEvent {
         ChannelEvent {
             content: format!("ci changed at {}", self.head_sha),
             meta: ChannelEventMeta {
+                labels_changed: false,
                 ci: Some(self.details.clone()),
                 action: "changed".into(),
                 change_request: None,

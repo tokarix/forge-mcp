@@ -213,6 +213,75 @@ copies `pr.HasMerged`, and the
 [API PR type](https://codeberg.org/forgejo/forgejo/src/tag/v15.0.0/modules/structs/pull.go)
 serializes that boolean as `merged`.
 
+### PR/MR label-change hints
+
+Consumers select `meta.event_kind == "change_request" && meta.labels_changed == true`.
+Do **not** require `meta.action == "labels_changed"`: GitLab retains its existing
+lifecycle action, including `update` → `synchronize`, when a delivery also changes
+labels or code. Open, reopen, close and merge deliveries can carry the marker too.
+
+The additive boolean defaults to false when reading old envelopes and is omitted
+when false. It survives SSE, replay, `poll_events` (including channels disabled)
+and channel notifications. Channels retain their existing `forge_alias` → `forge`
+name mapping. These example **metadata** objects show a dedicated delivery and a
+combined GitLab update:
+
+```json
+{"event_kind":"change_request","action":"labels_changed","labels_changed":true,"change_request":42,"issue":null,"issue_comment":null,"forge_alias":"forgejo","owner":"org","repo":"repo","delivery_id":"label-1","head_sha":null,"review_state":null}
+```
+
+```json
+{"event_kind":"change_request","action":"synchronize","labels_changed":true,"change_request":42,"issue":null,"issue_comment":null,"forge_alias":"gitlab","owner":"org/subgroup","repo":"repo","delivery_id":"label-2","head_sha":"source-head","review_state":null}
+```
+
+| Provider | Subscription and HTTP headers | Supported label signal |
+| --- | --- | --- |
+| Forgejo **16.0.3** | Select `pull_request_label`; `X-Forgejo-Event: pull_request`, `X-Forgejo-Event-Type: pull_request_label`. Existing `X-Gitea-*` aliases are accepted. | `label_updated` for add/remove/replace; `label_cleared` for clear. Both normalize to `labels_changed`. |
+| Forgejo/Gitea adapter compatibility | `pull_request` dispatch also accepts those two actions without Event-Type; a dedicated `pull_request_label` Event value is accepted only for those actions. | This compatibility input is not a claim that Forgejo 16.0.3 emits a dedicated Event value. Other provider versions/actions are unverified. |
+| GitHub | **Pull requests**, `X-GitHub-Event: pull_request`; Apps need Pull requests read permission. | `labeled` / `unlabeled` → `labels_changed`. Bulk operations are individual membership deliveries, not invented replace/clear actions. Repository `label` definition events are excluded. |
+| GitLab | **Merge request events**, `X-Gitlab-Event: Merge Request Hook`. | Different `changes.labels.previous/current` sets of label IDs/titles add the marker without replacing the lifecycle action. Current-label snapshots alone do not. Reordering and cosmetic fields are ignored. Absent/null/malformed deltas preserve the original lifecycle event; malformed projections produce a fixed diagnostic. |
+
+Forgejo evidence is pinned to [the v16.0.3 notifier](https://codeberg.org/forgejo/forgejo/src/tag/v16.0.3/services/webhook/notifier.go)
+(`IssueChangeLabels`, `IssueClearLabels`), [event grouping](https://codeberg.org/forgejo/forgejo/src/tag/v16.0.3/modules/webhook/type.go),
+[HTTP header construction](https://codeberg.org/forgejo/forgejo/src/tag/v16.0.3/services/webhook/shared/payloader.go)
+and [payload types](https://codeberg.org/forgejo/forgejo/src/tag/v16.0.3/modules/structs/hook.go).
+The ignored `forgejo_issue_label_webhooks` test in the existing Woodpecker
+`forgejo-integration` lane verifies real PR add/remove/multiple/replace/clear
+mutations through authenticated delivery and MCP polling, including actual Event
+and Event-Type headers, distinct delivery IDs and genuine issue-label identity.
+CI owns the provider process and credentials; no local service is required.
+The [GitHub contract](https://docs.github.com/en/webhooks/webhook-events-and-payloads#pull_request)
+and [GitLab changes contract](https://docs.gitlab.com/user/project/integrations/webhook_events/#merge-request-events)
+provide the other deterministic fixture provenance.
+
+Label hints require a positive PR number/MR iid and nonempty target repository
+owner/name. Conflicting supplied top-level and nested PR numbers are rejected.
+Forgejo accepts either PR number location; GitHub requires its top-level number.
+GitLab label deltas also require `object_kind: merge_request`.
+Issue-shaped bodies are never converted into PR hints. Explicit PR discriminators
+on issue label webhooks suppress source-issue hints. Source heads are retained
+when available; label hints need no head/ref or merge discriminator, and missing
+heads serialize as null. Target and merge commits never fill a missing source head.
+Existing lifecycle and terminal state validation remains in place.
+
+No label lists, names, deltas or provider bodies reach the output. The extra
+label-specific output stays constant-size for arbitrarily large label snapshots;
+existing webhook body limits remain unchanged. Any label can trigger the hint:
+the boolean says only **refetch this PR/MR**, not that labels remain present or
+that review is eligible. Cockpit must refetch authoritative PR state and labels
+before any workflow mutation. Removal does not authorize review cancellation.
+Workflow selection, tasks, claims, re-review and polling changes belong to Cockpit;
+these hints do not trigger approvals or auto-merge.
+
+Delivery-ID dedupe remains forge alias + delivery ID (including the existing
+GitLab event UUID selection). Without an ID, label-bearing events use a namespaced
+repository/PR/action key plus SHA-256 of the original authenticated bytes. Distinct
+mutations at an unchanged head survive; identical bodies inside the five-minute
+TTL coalesce as best-effort retries. Different serialization can escape dedupe,
+and identical separate operations can coalesce. Non-label fallback keys are
+unchanged. Delivery may be delayed, missing or out of order; retain periodic
+polling and refetch as the fallback.
+
 ## CI webhook hints
 
 Authenticated GitHub and GitLab CI notifications publish one repository and

@@ -3031,8 +3031,7 @@ struct GitHubWebhookRepository {
 
 #[derive(Debug, Deserialize)]
 struct GitHubLifecyclePullRequest {
-    #[serde(rename = "number")]
-    _number: u64,
+    number: Option<u64>,
     head: Option<LifecycleHead>,
     merged: Option<bool>,
     html_url: String,
@@ -3260,6 +3259,7 @@ fn parse_pull_request_webhook(
     let payload: GitHubWebhookPullRequestPayload = serde_json::from_slice(body)
         .map_err(|e| ForgeWebhookError::InvalidPayload(e.to_string()))?;
     let action = match payload.action.as_str() {
+        "labeled" | "unlabeled" => domain::ChangeRequestEventAction::LabelsChanged,
         "opened" => domain::ChangeRequestEventAction::Opened,
         "reopened" => domain::ChangeRequestEventAction::Reopened,
         "synchronize" => domain::ChangeRequestEventAction::Synchronized,
@@ -3274,7 +3274,16 @@ fn parse_pull_request_webhook(
         },
         _ => return Ok(None),
     };
-    if action.is_terminal() {
+    let labels_changed = action == domain::ChangeRequestEventAction::LabelsChanged;
+    if labels_changed {
+        crate::validate_pull_request_numbers(Some(payload.number), payload.pull_request.number)?;
+    }
+    if !labels_changed && payload.pull_request.number.is_none() {
+        return Err(ForgeWebhookError::InvalidPayload(
+            "pull request number missing".to_string(),
+        ));
+    }
+    if action.is_terminal() || labels_changed {
         crate::validate_terminal_identity(
             payload.number,
             &payload.repository.owner.login,
@@ -3282,12 +3291,12 @@ fn parse_pull_request_webhook(
         )?;
     }
     let head_sha = match payload.pull_request.head {
-        Some(head) if action.is_terminal() => head.sha.unwrap_or_default(),
+        Some(head) if action.is_terminal() || labels_changed => head.sha.unwrap_or_default(),
         Some(LifecycleHead {
             ref_name: Some(_),
             sha: Some(sha),
         }) => sha,
-        None if action.is_terminal() => String::new(),
+        None if action.is_terminal() || labels_changed => String::new(),
         _ => {
             return Err(ForgeWebhookError::InvalidPayload(
                 "pull request head metadata missing".to_string(),
@@ -3297,6 +3306,8 @@ fn parse_pull_request_webhook(
 
     Ok(Some(domain::WebhookEvent::ChangeRequest(
         domain::ChangeRequestEvent {
+            labels_changed,
+            payload_fingerprint: crate::label_payload_fingerprint(body, labels_changed),
             action,
             delivery_id,
             head_sha,

@@ -1859,6 +1859,10 @@ impl GitLabWebhookProject {
 
 #[derive(Debug, Deserialize)]
 struct GitLabWebhookMergeRequestEvent {
+    #[serde(default)]
+    object_kind: serde_json::Value,
+    #[serde(default)]
+    changes: serde_json::Value,
     object_attributes: GitLabWebhookMergeRequestAttrs,
     project: GitLabWebhookProject,
 }
@@ -1999,8 +2003,14 @@ fn parse_gitlab_merge_request_event(
         _ => return Ok(None),
     };
 
+    let labels_changed = gitlab_labels_changed(&payload.changes);
+    if labels_changed && payload.object_kind.as_str() != Some("merge_request") {
+        return Err(ForgeWebhookError::InvalidPayload(
+            "label delta requires a merge request payload".to_string(),
+        ));
+    }
     let (owner, name) = payload.project.owner_and_name();
-    if action.is_terminal() {
+    if action.is_terminal() || labels_changed {
         crate::validate_terminal_identity(payload.object_attributes.iid, &owner, &name)?;
     }
     let head_sha = payload
@@ -2011,6 +2021,8 @@ fn parse_gitlab_merge_request_event(
 
     Ok(Some(domain::WebhookEvent::ChangeRequest(
         ChangeRequestEvent {
+            labels_changed,
+            payload_fingerprint: crate::label_payload_fingerprint(body, labels_changed),
             action,
             delivery_id,
             head_sha,
@@ -2186,6 +2198,35 @@ fn aggregate_status_states(statuses: &[domain::CommitStatus]) -> domain::CommitS
     } else {
         domain::CommitStatusState::Success
     }
+}
+
+// Optional changes must never prevent publication of a valid lifecycle event.
+fn gitlab_labels_changed(changes: &serde_json::Value) -> bool {
+    use std::collections::BTreeSet;
+    #[derive(Deserialize)]
+    struct LabelIdentity {
+        id: u64,
+        title: String,
+    }
+    #[derive(Deserialize)]
+    struct Delta {
+        previous: Vec<LabelIdentity>,
+        current: Vec<LabelIdentity>,
+    }
+    let Some(delta) = changes.get("labels").filter(|value| !value.is_null()) else {
+        return false;
+    };
+    let Ok(delta) = serde_json::from_value::<Delta>(delta.clone()) else {
+        tracing::debug!("ignoring malformed merge request labels delta");
+        return false;
+    };
+    let identities = |labels: Vec<LabelIdentity>| {
+        labels
+            .into_iter()
+            .map(|label| (label.id, label.title))
+            .collect::<BTreeSet<_>>()
+    };
+    identities(delta.previous) != identities(delta.current)
 }
 
 // ---------------------------------------------------------------------------

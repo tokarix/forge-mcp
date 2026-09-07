@@ -1,9 +1,10 @@
 #[path = "../../forge/tests/support/forgejo.rs"]
 mod forgejo;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
 use std::time::Duration;
 
 use domain::ForgeKind;
@@ -25,6 +26,8 @@ use server::events::EventBus;
 use server::handlers::AppState;
 use server::registry::{ForgeInstance, ForgeRegistry};
 use transport::{GatewayConfig, McpShim, ShimConfig};
+
+type WireHeaders = Arc<Mutex<HashMap<String, (String, String)>>>;
 
 const CALLBACK_BASE_URL_ENV: &str = "FORGEJO_TEST_WEBHOOK_CALLBACK_BASE_URL";
 const LISTEN_ADDR_ENV: &str = "FORGEJO_TEST_WEBHOOK_LISTEN_ADDR";
@@ -320,6 +323,7 @@ async fn forgejo_issue_label_changes_reach_poll_events() -> Result<(), String> {
     let mut server_handle = None;
     let mut shim_handle = None;
     let mut mcp_client = None;
+    let wire_headers = WireHeaders::default();
 
     let primary: Result<(), String> = async {
         context
@@ -360,7 +364,31 @@ async fn forgejo_issue_label_changes_reach_poll_events() -> Result<(), String> {
         let local_addr = listener
             .local_addr()
             .map_err(|error| format!("could not inspect gateway listener: {error}"))?;
-        let router = server::build_router(state, false);
+        let captured = Arc::clone(&wire_headers);
+        let router = server::build_router(state, false).layer(axum::middleware::from_fn(
+            move |request: axum::extract::Request, next: axum::middleware::Next| {
+                let captured = Arc::clone(&captured);
+                async move {
+                    {
+                        let header = |name: &str| {
+                            request
+                                .headers()
+                                .get(name)
+                                .and_then(|value| value.to_str().ok())
+                                .unwrap_or_default()
+                                .to_string()
+                        };
+                        if let Ok(mut wire) = captured.lock() {
+                            wire.insert(
+                                header("x-forgejo-delivery"),
+                                (header("x-forgejo-event"), header("x-forgejo-event-type")),
+                            );
+                        }
+                    }
+                    next.run(request).await
+                }
+            },
+        ));
         server_handle = Some(tokio::spawn(async move {
             axum::serve(listener, router)
                 .await
@@ -413,7 +441,7 @@ async fn forgejo_issue_label_changes_reach_poll_events() -> Result<(), String> {
                     "secret": webhook_secret,
                     "url": callback_url.to_string(),
                 },
-                "events": ["issues"],
+                "events": ["issues", "pull_request_label"],
                 "type": "forgejo"
             })),
             &[context.token(), &webhook_secret],
@@ -459,6 +487,7 @@ async fn forgejo_issue_label_changes_reach_poll_events() -> Result<(), String> {
         if !poll_once(client).await?.is_empty() {
             return Err("label-remove delivery did not drain exactly once".to_string());
         }
+        verify_pr_labels(&context, client, &repo, label.id, &wire_headers).await?;
         Ok(())
     }
     .await;
@@ -492,4 +521,108 @@ async fn forgejo_issue_label_changes_reach_poll_events() -> Result<(), String> {
     }
     cleanup.push(context.revoke_token().await);
     combine_results(primary, cleanup)
+}
+
+// Same ignored CI target: no extra provider lane or local service is needed.
+// Forgejo v16.0.3 uses X-Forgejo-Event=pull_request and
+// X-Forgejo-Event-Type=pull_request_label (shared/payloader.go + type.go).
+async fn verify_pr_labels(
+    context: &Context,
+    client: &RunningService<RoleClient, TestClient>,
+    repo: &str,
+    first_label: u64,
+    wire_headers: &WireHeaders,
+) -> Result<(), String> {
+    let base = format!("/api/v1/repos/{}/{repo}", context.username);
+    let repository: Value = context.request_json(Method::GET, &base, None).await?;
+    let default_branch = repository["default_branch"]
+        .as_str()
+        .ok_or_else(|| "repository default branch missing".to_string())?;
+    context
+        .request_success(
+            Method::POST,
+            &format!("{base}/branches"),
+            Some(json!({"new_branch_name": "label-fixture", "old_branch_name": default_branch})),
+        )
+        .await?;
+    context.request_success(Method::POST, &format!("{base}/contents/label-fixture.txt"),
+        Some(json!({"branch": "label-fixture", "content": "Zml4dHVyZQo=", "message": "Add PR fixture"}))).await?;
+    let pr: IssueResponse = context.request_json(Method::POST, &format!("{base}/pulls"),
+        Some(json!({"base": default_branch, "head": "label-fixture", "title": "PR label fixture"}))).await?;
+    let second: LabelResponse = context
+        .request_json(
+            Method::POST,
+            &format!("{base}/labels"),
+            Some(json!({"color": "0055ff", "name": unique_name("unrelated-label")?})),
+        )
+        .await?;
+    let path = format!("{base}/issues/{}/labels", pr.number);
+    let mut deliveries = HashSet::new();
+    for (phase, method, path, body) in [
+        (
+            "pr-label-add",
+            Method::POST,
+            path.clone(),
+            Some(json!({"labels": [first_label]})),
+        ),
+        (
+            "pr-label-remove",
+            Method::DELETE,
+            format!("{path}/{first_label}"),
+            None,
+        ),
+        (
+            "pr-label-multiple",
+            Method::PUT,
+            path.clone(),
+            Some(json!({"labels": [first_label, second.id]})),
+        ),
+        (
+            "pr-label-replace",
+            Method::PUT,
+            path.clone(),
+            Some(json!({"labels": [second.id]})),
+        ),
+        ("pr-label-clear", Method::DELETE, path, None),
+    ] {
+        context.request_success(method, &path, body).await?;
+        let event = poll_one_event(client, phase).await?;
+        let meta = &event["meta"];
+        if event["kind"] != "change_request"
+            || meta["event_kind"] != "change_request"
+            || meta["action"] != "labels_changed"
+            || meta["labels_changed"] != true
+            || meta["change_request"] != pr.number
+            || !meta["issue"].is_null()
+            || !meta["issue_comment"].is_null()
+            || meta["forge_alias"] != FORGE_ALIAS
+            || meta["owner"] != context.username
+            || meta["repo"] != repo
+        {
+            return Err(format!("phase={phase} unexpected PR label hint: {event}"));
+        }
+        let id = meta["delivery_id"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| format!("phase={phase} missing delivery ID"))?;
+        let wire = wire_headers
+            .lock()
+            .map_err(|_| "wire header capture poisoned".to_string())?
+            .get(id)
+            .cloned()
+            .ok_or_else(|| format!("phase={phase} missing wire headers"))?;
+        if wire != ("pull_request".into(), "pull_request_label".into()) {
+            return Err(format!(
+                "phase={phase} unexpected Forgejo {} wire headers: {wire:?}",
+                context.version
+            ));
+        }
+        if !deliveries.insert(id.to_string()) {
+            return Err(format!("phase={phase} reused PR label delivery ID"));
+        }
+        if !poll_once(client).await?.is_empty() {
+            return Err(format!("phase={phase} did not drain exactly once"));
+        }
+    }
+    Ok(())
 }

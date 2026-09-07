@@ -273,6 +273,8 @@ mod tests {
         repo: &str,
     ) -> domain::ChangeRequestEvent {
         domain::ChangeRequestEvent {
+            labels_changed: false,
+            payload_fingerprint: String::new(),
             action,
             delivery_id: delivery_id.to_string(),
             head_sha: head_sha.to_string(),

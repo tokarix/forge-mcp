@@ -138,6 +138,8 @@ pub struct ChannelEvent {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ChannelEventMeta {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub labels_changed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ci: Option<CiEventDetails>,
     pub action: String,
@@ -267,6 +269,11 @@ pub trait PublishableEvent {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ChangeRequestEvent {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub labels_changed: bool,
+    /// SHA-256 of authenticated bytes; internal retry identity only.
+    #[serde(skip)]
+    pub payload_fingerprint: String,
     pub action: ChangeRequestEventAction,
     pub delivery_id: String,
     pub head_sha: String,
@@ -280,6 +287,17 @@ impl PublishableEvent for ChangeRequestEvent {
     fn dedupe_key(&self) -> String {
         if !self.delivery_id.is_empty() {
             return format!("{}:{}", self.repository.alias, self.delivery_id);
+        }
+        if self.labels_changed {
+            return format!(
+                "{}:change_request:labels:{}/{}/{}:{}:{}",
+                self.repository.alias,
+                self.repository.owner,
+                self.repository.name,
+                self.index,
+                self.action.as_str(),
+                self.payload_fingerprint,
+            );
         }
         format!(
             "{}:{}/{}/{}:{}:{}",
@@ -312,6 +330,7 @@ impl PublishableEvent for ChangeRequestEvent {
                 self.head_sha,
             ),
             meta: ChannelEventMeta {
+                labels_changed: self.labels_changed,
                 ci: None,
                 provider_action: None,
                 review_id: None,
@@ -321,7 +340,9 @@ impl PublishableEvent for ChangeRequestEvent {
                 delivery_id: self.delivery_id.clone(),
                 event_kind: "change_request".to_string(),
                 forge_alias: self.repository.alias.clone(),
-                head_sha: if self.action.is_terminal() && self.head_sha.is_empty() {
+                head_sha: if (self.action.is_terminal() || self.labels_changed)
+                    && self.head_sha.is_empty()
+                {
                     None
                 } else {
                     Some(self.head_sha.clone())
@@ -339,6 +360,7 @@ impl PublishableEvent for ChangeRequestEvent {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChangeRequestEventAction {
+    LabelsChanged,
     Closed,
     Merged,
     Opened,
@@ -356,6 +378,7 @@ impl ChangeRequestEventAction {
     #[must_use]
     pub const fn as_str(&self) -> &'static str {
         match self {
+            Self::LabelsChanged => "labels_changed",
             Self::Closed => "closed",
             Self::Merged => "merged",
             Self::Opened => "opened",
@@ -474,6 +497,7 @@ impl PublishableEvent for IssueCommentEvent {
                 self.issue_index,
             ),
             meta: ChannelEventMeta {
+                labels_changed: false,
                 ci: None,
                 provider_action: None,
                 review_id: None,
@@ -538,6 +562,7 @@ impl PublishableEvent for IssueEvent {
                 self.index,
             ),
             meta: ChannelEventMeta {
+                labels_changed: false,
                 ci: None,
                 provider_action: None,
                 review_id: None,
@@ -660,6 +685,7 @@ impl PublishableEvent for PullRequestReviewEvent {
                 self.index,
             ),
             meta: ChannelEventMeta {
+                labels_changed: false,
                 ci: None,
                 provider_action: self.provider_action.clone(),
                 // GitLab's legacy MR note path is not a formal review resource.
@@ -765,6 +791,7 @@ impl PublishableEvent for AutoMergeFailedEvent {
                 self.error,
             ),
             meta: ChannelEventMeta {
+                labels_changed: false,
                 ci: None,
                 provider_action: None,
                 review_id: None,
@@ -1614,6 +1641,8 @@ mod tests {
                 action
             );
             let mut event = ChangeRequestEvent {
+                labels_changed: false,
+                payload_fingerprint: String::new(),
                 action,
                 delivery_id: String::new(),
                 head_sha: String::new(),
@@ -1655,6 +1684,52 @@ mod tests {
             assert_eq!(event.dedupe_key(), "forge:delivery");
         }
         assert_ne!(keys[0], keys[1]);
+    }
+
+    #[test]
+    fn pr_label_contract_defaults_projection_and_internal_fingerprint() {
+        use super::{ChangeRequestEvent, ChannelEventMeta, PublishableEvent};
+        let legacy = serde_json::json!({
+            "action": "opened", "delivery_id": "", "head_sha": "", "index": 42,
+            "repository": {"alias": "forge", "forge": "Forgejo", "host": "https://forge.invalid", "owner": "org", "name": "repo"},
+            "title": "PR", "url": "url"
+        });
+        let mut event: ChangeRequestEvent =
+            serde_json::from_value(legacy.clone()).expect("old event");
+        assert!(!event.labels_changed);
+        assert!(event.payload_fingerprint.is_empty());
+        assert_eq!(
+            serde_json::to_value(&event).expect("old serialization"),
+            legacy
+        );
+        let old_meta = serde_json::to_value(event.to_channel_event().meta).expect("metadata");
+        let meta: ChannelEventMeta = serde_json::from_value(old_meta.clone()).expect("old meta");
+        assert!(!meta.labels_changed);
+        assert_eq!(
+            serde_json::to_value(meta).expect("meta serialization"),
+            old_meta
+        );
+        event.action = ChangeRequestEventAction::LabelsChanged;
+        assert!(!event.action.is_terminal());
+        assert_eq!(event.action.as_str(), "labels_changed");
+        assert_eq!(
+            serde_json::to_value(&event.action).expect("action"),
+            "labels_changed"
+        );
+        assert_eq!(
+            serde_json::from_str::<ChangeRequestEventAction>("\"labels_changed\"").expect("action"),
+            event.action
+        );
+        event.labels_changed = true;
+        event.payload_fingerprint = "internal-only".into();
+        let serialized = serde_json::to_value(&event).expect("event");
+        assert_eq!(serialized["labels_changed"], true);
+        assert!(serialized.get("payload_fingerprint").is_none());
+        let projected = event.to_channel_event().meta;
+        assert!(projected.labels_changed);
+        assert_eq!(projected.change_request, Some(42));
+        assert!(projected.head_sha.is_none());
+        assert!(projected.issue.is_none() && projected.issue_comment.is_none());
     }
 
     fn dependency_issue(index: u64) -> Issue {

@@ -16,7 +16,7 @@ use hmac::{Hmac, Mac};
 use reqwest::StatusCode;
 use reqwest::redirect::Policy;
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 mod ci_webhooks;
@@ -1706,6 +1706,7 @@ enum WebhookEventType {
     IssueComment,
     Issues,
     PullRequest,
+    PullRequestLabel,
     PullRequestReview,
     Unknown(String),
 }
@@ -1716,6 +1717,7 @@ impl WebhookEventType {
             "issue_comment" => Self::IssueComment,
             "issues" => Self::Issues,
             "pull_request" => Self::PullRequest,
+            "pull_request_label" => Self::PullRequestLabel,
             "pull_request_approved"
             | "pull_request_comment"
             | "pull_request_rejected"
@@ -1733,6 +1735,7 @@ struct ForgejoWebhookComment {
 
 #[derive(Debug, Deserialize)]
 struct ForgejoWebhookIssue {
+    pull_request: Option<serde_json::Value>,
     html_url: String,
     number: Option<u64>,
     title: String,
@@ -3145,13 +3148,31 @@ impl ForgeWebhookAdapter for ForgejoAdapter {
 
         let event_header = header_value(headers, &["x-forgejo-event", "x-gitea-event"])
             .ok_or_else(|| ForgeWebhookError::MissingHeader("x-forgejo-event".to_string()))?;
-        let event_type = WebhookEventType::parse(event_header);
+        // v16 groups PR labels under pull_request; Event-Type is the specific
+        // subscription. Keep its dispatch limited to label actions.
+        let event_type = if event_header == "pull_request"
+            && header_value(headers, &["x-forgejo-event-type", "x-gitea-event-type"])
+                == Some("pull_request_label")
+        {
+            WebhookEventType::PullRequestLabel
+        } else {
+            WebhookEventType::parse(event_header)
+        };
         let delivery_id = header_value(headers, &["x-forgejo-delivery", "x-gitea-delivery"])
             .unwrap_or_default()
             .to_string();
 
         match event_type {
             WebhookEventType::PullRequest => {
+                parse_pull_request_event(body, delivery_id, forge_alias, forge_kind, host)
+            }
+            WebhookEventType::PullRequestLabel => {
+                let payload: ForgejoWebhookPullRequestEventPayload =
+                    serde_json::from_slice(body)
+                        .map_err(|e| ForgeWebhookError::InvalidPayload(e.to_string()))?;
+                if !matches!(payload.action.as_str(), "label_updated" | "label_cleared") {
+                    return Ok(None);
+                }
                 parse_pull_request_event(body, delivery_id, forge_alias, forge_kind, host)
             }
             WebhookEventType::Issues => {
@@ -3195,6 +3216,7 @@ fn parse_pull_request_event(
         .map_err(|e| ForgeWebhookError::InvalidPayload(e.to_string()))?;
 
     let action = match payload.action.as_str() {
+        "label_updated" | "label_cleared" => ChangeRequestEventAction::LabelsChanged,
         "opened" => ChangeRequestEventAction::Opened,
         "reopened" => ChangeRequestEventAction::Reopened,
         "synchronize" | "synchronized" => ChangeRequestEventAction::Synchronized,
@@ -3210,6 +3232,10 @@ fn parse_pull_request_event(
         _ => return Ok(None),
     };
 
+    let labels_changed = action == ChangeRequestEventAction::LabelsChanged;
+    if labels_changed {
+        validate_pull_request_numbers(payload.number, payload.pull_request.number)?;
+    }
     let owner = payload.repository.owner.into_owner()?;
     let index = payload
         .number
@@ -3218,16 +3244,16 @@ fn parse_pull_request_event(
             ForgeWebhookError::InvalidPayload("pull request number missing".to_string())
         })?;
 
-    if action.is_terminal() {
+    if action.is_terminal() || labels_changed {
         validate_terminal_identity(index, &owner, &payload.repository.name)?;
     }
     let head_sha = match payload.pull_request.head {
-        Some(head) if action.is_terminal() => head.sha.unwrap_or_default(),
+        Some(head) if action.is_terminal() || labels_changed => head.sha.unwrap_or_default(),
         Some(LifecycleHead {
             ref_name: Some(_),
             sha: Some(sha),
         }) => sha,
-        None if action.is_terminal() => String::new(),
+        None if action.is_terminal() || labels_changed => String::new(),
         _ => {
             return Err(ForgeWebhookError::InvalidPayload(
                 "pull request head metadata missing".to_string(),
@@ -3237,6 +3263,8 @@ fn parse_pull_request_event(
 
     Ok(Some(domain::WebhookEvent::ChangeRequest(
         ChangeRequestEvent {
+            labels_changed,
+            payload_fingerprint: label_payload_fingerprint(body, labels_changed),
             action,
             delivery_id,
             head_sha,
@@ -3271,6 +3299,9 @@ fn parse_issue_event(
         _ => return Ok(None),
     };
 
+    if action == domain::IssueEventAction::LabelsChanged && payload.issue.pull_request.is_some() {
+        return Ok(None);
+    }
     let owner = payload.repository.owner.into_owner()?;
     let index = payload
         .number
@@ -3453,6 +3484,31 @@ fn verify_forgejo_signature(
     mac.update(body);
     mac.verify_slice(&signature)
         .map_err(|_| ForgeWebhookError::InvalidSignature)
+}
+
+/// Hash only authenticated label-bearing deliveries, never the projected hint.
+fn label_payload_fingerprint(body: &[u8], labels_changed: bool) -> String {
+    if labels_changed {
+        format!("{:x}", Sha256::digest(body))
+    } else {
+        String::new()
+    }
+}
+
+fn validate_pull_request_numbers(
+    top: Option<u64>,
+    nested: Option<u64>,
+) -> Result<(), ForgeWebhookError> {
+    if top == Some(0)
+        || nested == Some(0)
+        || top.or(nested).is_none()
+        || matches!((top, nested), (Some(a), Some(b)) if a != b)
+    {
+        return Err(ForgeWebhookError::InvalidPayload(
+            "invalid or conflicting pull request number".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
