@@ -11,6 +11,8 @@ pub mod git_proxy;
 pub mod handlers;
 pub mod registry;
 
+mod diagnostics;
+
 use axum::{Router, routing::delete, routing::get, routing::post};
 use handlers::AppState;
 use utoipa::OpenApi;
@@ -225,5 +227,7 @@ pub fn build_router(state: AppState, enable_docs: bool) -> Router {
         router = add_docs_routes(router);
     }
 
-    router.with_state(state)
+    router
+        .layer(axum::middleware::from_fn(diagnostics::request_context))
+        .with_state(state)
 }

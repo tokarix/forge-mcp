@@ -59,6 +59,7 @@ fn resolve_forge<'a>(
     alias: &str,
 ) -> Result<&'a crate::registry::ForgeInstance, (StatusCode, Json<ErrorBody>)> {
     registry.get(alias).ok_or_else(|| {
+        tracing::warn!(reason = "unknown_forge", "forge resolution failed");
         (
             StatusCode::NOT_FOUND,
             Json(ErrorBody {
@@ -73,6 +74,7 @@ fn resolve_authenticated_agent<'a>(
     registry: &'a AgentRegistry,
 ) -> Result<&'a crate::auth::ResolvedAgent, (StatusCode, Json<ErrorBody>)> {
     let token = extract_bearer_token(headers).ok_or_else(|| {
+        tracing::warn!(reason = "missing_authorization", "authentication failed");
         (
             StatusCode::UNAUTHORIZED,
             Json(ErrorBody {
@@ -81,14 +83,17 @@ fn resolve_authenticated_agent<'a>(
         )
     })?;
 
-    registry.resolve(token).ok_or_else(|| {
+    let agent = registry.resolve(token).ok_or_else(|| {
+        tracing::warn!(reason = "invalid_token", "authentication failed");
         (
             StatusCode::UNAUTHORIZED,
             Json(ErrorBody {
                 error: "invalid bearer token".to_string(),
             }),
         )
-    })
+    })?;
+    crate::diagnostics::record_agent(&agent.identity);
+    Ok(agent)
 }
 
 /// Serializes a value to a `serde_json::Value`, mapping errors to 500.
@@ -108,6 +113,14 @@ fn to_json_value<T: serde::Serialize>(
 /// Maps a `ServiceError` to an HTTP status code and error body.
 #[allow(clippy::needless_pass_by_value)]
 fn map_service_error(err: ServiceError) -> (StatusCode, Json<ErrorBody>) {
+    let error_kind = match &err {
+        ServiceError::Audit(_) => "audit",
+        ServiceError::GitExec(_) => "git_exec",
+        ServiceError::PolicyDenied { .. } => "policy_denied",
+        ServiceError::Validation(_) => "validation",
+        ServiceError::Upstream(_) => "upstream",
+    };
+    tracing::warn!(error_kind, "repository operation failed");
     let (status, message) = match &err {
         ServiceError::Audit(_) | ServiceError::GitExec(_) => {
             (StatusCode::INTERNAL_SERVER_ERROR, err.to_string())
@@ -136,6 +149,7 @@ fn resolve_agent<'a>(
         .policy_config
         .is_repo_allowed(forge_alias, owner, repo)
     {
+        tracing::warn!(reason = "repository_denied", "authorization failed");
         return Err((
             StatusCode::FORBIDDEN,
             Json(ErrorBody {
@@ -4143,6 +4157,46 @@ mod tests {
 
     fn test_state() -> AppState {
         test_state_with_write(Arc::new(FakeWriteService::new()))
+    }
+
+    #[tokio::test]
+    async fn diagnostics_authentication_and_denial() {
+        use tracing::instrument::WithSubscriber;
+        let capture = crate::diagnostics::tests::Capture::default();
+        let app = crate::build_router(test_state(), false);
+        async {
+            for (token, expected) in [
+                (None, StatusCode::UNAUTHORIZED),
+                (Some("wrong-secret"), StatusCode::UNAUTHORIZED),
+                (Some("test-token"), StatusCode::FORBIDDEN),
+            ] {
+                let mut request = axum::http::Request::builder()
+                    .uri("/api/v1/repos/test-forge/denied/repo/pulls/42");
+                if let Some(token) = token {
+                    request = request.header("authorization", format!("Bearer {token}"));
+                }
+                let response = app
+                    .clone()
+                    .oneshot(request.body(axum::body::Body::empty()).expect("request"))
+                    .await
+                    .expect("response");
+                assert_eq!(response.status(), expected);
+            }
+        }
+        .with_subscriber(capture.subscriber())
+        .await;
+        let logs = capture.logs();
+        for reason in [
+            "missing_authorization",
+            "invalid_token",
+            "repository_denied",
+        ] {
+            assert!(logs.contains(reason), "{logs}");
+        }
+        assert!(logs.contains("agent_id=\"codex\""));
+        assert!(logs.contains("session_id=\"default\""));
+        assert!(!logs.contains("wrong-secret"));
+        assert!(!logs.contains("test-token"));
     }
 
     fn test_state_with_write(write_svc: Arc<FakeWriteService>) -> AppState {
