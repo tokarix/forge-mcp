@@ -788,3 +788,23 @@ lossless delivery. Ingress makes no provider reads, git calls, rebase, merge,
 label or scheduling requests for these hints. Auto-merge remains restricted to
 newly enqueued submitted approvals. No webhook registration or CI branch-filter
 change is made by this feature.
+
+### Request diagnostics
+
+Request spans distinguish `route` (the matched route template, or `unmatched`)
+from `path` (a safe resolved path). The existing `operation` field remains a
+compatibility alias for the route template. Resolved paths are diagnostic text
+only and must not be used as metrics labels. Request IDs, methods, failure
+statuses and structured forge/owner/repo/target fields remain available, including
+on authentication failures.
+
+Only forge, owner and repository identifiers (ASCII letters, digits, `-`, `_`,
+`.`) and numeric issue/pull/dependency IDs are resolved. Identifier components
+are limited to 128 bytes; empty, dot-only (`.` or `..`), encoded, control-bearing
+or otherwise unsafe values become `[redacted]`. Values are never percent-decoded.
+File wildcards, labels and unreviewed parameters are also `[redacted]`.
+Structured repository fields use the same safe components. The complete resolved
+path is limited to 1024 bytes, with `[redacted]` as the fallback for unsafe path
+shapes or excessive length; unmatched requests use `unmatched`. Route/operation
+fields use the existing 128-character diagnostic bound. Query strings, full URLs,
+headers, credentials and bodies are never included in these fields.

@@ -1499,21 +1499,38 @@ mod tests {
 
     #[tokio::test]
     async fn info_refs_rejects_unauthorized() {
-        let mock_server = MockServer::start().await;
-        let (state, _) = test_state_with_forge(&mock_server.uri());
-        let app = git_proxy_router(state);
+        use tracing::instrument::WithSubscriber;
 
+        let (state, _) = test_state_with_forge("http://127.0.0.1:1");
+        let app = git_proxy_router(state);
+        let capture = crate::diagnostics::tests::Capture::default();
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri("/git/test-forge/org/repo.git/info/refs?service=git-upload-pack")
+                    .uri("/git/adlevio/stintel/trade/info/refs?service=git-upload-pack&token=query-secret")
                     .body(Body::empty())
                     .expect("build request"),
             )
+            .with_subscriber(capture.subscriber())
             .await
             .expect("request should succeed");
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let logs = capture.logs();
+        for field in [
+            "route=\"/git/{forge}/{owner}/{repo}/info/refs\"",
+            "path=\"/git/adlevio/stintel/trade/info/refs\"",
+            "forge=\"adlevio\"",
+            "owner=\"stintel\"",
+            "repo=\"trade\"",
+            "status=401",
+            "request_id=",
+            "method=GET",
+        ] {
+            assert!(logs.contains(field), "{logs}");
+        }
+        assert!(!logs.contains("query-secret"));
+        assert!(!logs.contains("git-upload-pack"));
     }
 
     #[tokio::test]
