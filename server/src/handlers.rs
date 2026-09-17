@@ -174,6 +174,11 @@ pub(crate) fn resolve_credential(
     forge: &crate::registry::ForgeInstance,
 ) -> domain::ForgeCredential {
     if let Some(credential) = agent.github_app_credentials.get(forge_alias) {
+        tracing::Span::current().record(
+            "upstream_username",
+            crate::diagnostics::bounded(&credential.username()),
+        );
+        record_credential_source("agent_github_app");
         return forge.adapter.effective_credential(&credential.credential());
     }
     let token = agent
@@ -181,9 +186,24 @@ pub(crate) fn resolve_credential(
         .get(forge_alias)
         .map(|id| id.token.clone())
         .or_else(|| forge.token.clone());
-    forge
+    let credential = forge
         .adapter
-        .effective_credential(&domain::ForgeCredential { token })
+        .effective_credential(&domain::ForgeCredential { token });
+    let source = if agent.forge_identities.contains_key(forge_alias) {
+        "agent_forge_identity"
+    } else if credential.token.is_some() {
+        "forge_default"
+    } else {
+        "none"
+    };
+    record_credential_source(source);
+    credential
+}
+
+pub(crate) fn record_credential_source(source: &'static str) {
+    tracing::Span::current().record("credential_source", source);
+    // Transport usernames (e.g. x-access-token) are not upstream identities.
+    tracing::debug!(credential_source = source, "upstream credential selected");
 }
 
 fn resolve_commit_author(
@@ -4157,6 +4177,130 @@ mod tests {
 
     fn test_state() -> AppState {
         test_state_with_write(Arc::new(FakeWriteService::new()))
+    }
+
+    #[test]
+    fn diagnostics_credential_selection_preserves_precedence() {
+        let capture = crate::diagnostics::tests::Capture::default();
+        let subscriber = capture.subscriber();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let mut agent = test_agent();
+        let mut instance = test_forge_instance(
+            "test-forge",
+            "https://forge.example",
+            Arc::new(FakeWriteService::new()),
+        );
+        assert_eq!(
+            resolve_credential(&agent, "test-forge", &instance)
+                .token
+                .as_deref(),
+            Some("forge-fallback-token")
+        );
+        agent.forge_identities.insert(
+            "test-forge".into(),
+            crate::config::ForgeIdentityConfig {
+                token: "identity-secret".into(),
+            },
+        );
+        assert_eq!(
+            resolve_credential(&agent, "test-forge", &instance)
+                .token
+                .as_deref(),
+            Some("identity-secret")
+        );
+        agent.forge_identities.clear();
+        instance.token = None;
+        assert!(
+            resolve_credential(&agent, "test-forge", &instance)
+                .token
+                .is_none()
+        );
+        let logs = capture.logs();
+        for source in ["forge_default", "agent_forge_identity", "none"] {
+            assert!(logs.contains(source), "{logs}");
+        }
+        assert!(!logs.contains("identity-secret"));
+        assert!(!logs.contains("forge-fallback-token"));
+    }
+
+    #[tokio::test]
+    async fn diagnostics_app_selection_uses_known_bot_identity() {
+        use tracing::instrument::WithSubscriber;
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/app"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"slug":"reviewer"})),
+            )
+            .expect(1)
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/app/installations/2/access_tokens"))
+            .respond_with(
+                ResponseTemplate::new(201)
+                    .set_body_json(serde_json::json!({"token":"installation-secret"})),
+            )
+            .expect(1)
+            .mount(&mock)
+            .await;
+        let credential = forge::github::GitHubAppCredential::new(
+            &mock.uri(),
+            forge::github::GitHubAppConfig {
+                app_id: 1,
+                installation_id: 2,
+                private_key_pem: include_str!("test-app-key.pem").into(),
+            },
+        )
+        .await
+        .expect("mock app credential");
+        let mut agent = test_agent();
+        agent
+            .github_app_credentials
+            .insert("test-forge".into(), credential);
+        agent.forge_identities.insert(
+            "test-forge".into(),
+            crate::config::ForgeIdentityConfig {
+                token: "identity-secret".into(),
+            },
+        );
+        let instance =
+            test_forge_instance("test-forge", &mock.uri(), Arc::new(FakeWriteService::new()));
+        let capture = crate::diagnostics::tests::Capture::default();
+        async {
+            let span = tracing::info_span!(
+                "request",
+                agent_id = "codex",
+                upstream_username = tracing::field::Empty,
+                credential_source = tracing::field::Empty
+            );
+            span.in_scope(|| {
+                assert_eq!(
+                    resolve_credential(&agent, "test-forge", &instance)
+                        .token
+                        .as_deref(),
+                    Some("installation-secret")
+                );
+            });
+        }
+        .with_subscriber(capture.subscriber())
+        .await;
+        let logs = capture.logs();
+        assert!(logs.contains("agent_github_app"), "{logs}");
+        assert!(logs.contains("reviewer[bot]"), "{logs}");
+        assert!(logs.contains("codex"));
+        for secret in [
+            "installation-secret",
+            "identity-secret",
+            "forge-fallback-token",
+        ] {
+            assert!(!logs.contains(secret));
+        }
+        mock.verify().await;
     }
 
     #[tokio::test]
