@@ -142,6 +142,30 @@ fn bounded_preview(value: &str, max_chars: usize) -> String {
     value.chars().take(max_chars).collect()
 }
 
+fn diagnostic_target(value: &str) -> String {
+    value
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(128)
+        .collect()
+}
+
+/// Diagnostic previews use an allowlist: arbitrary upstream text can contain
+/// credentials even when truncated or stored in a JSON `message` field.
+/// The input limit bounds parsing work and never slices a UTF-8 string.
+pub(crate) fn safe_upstream_preview(body: &str) -> &'static str {
+    if body.len() > 4096 {
+        return "[upstream text omitted]";
+    }
+    let message = parse_forge_error_message(body);
+    match message.as_deref().unwrap_or(body) {
+        "User not allowed to merge PR" => "User not allowed to merge PR",
+        "method not allowed" => "method not allowed",
+        "repository or resource not found" => "repository or resource not found",
+        _ => "[upstream text omitted]",
+    }
+}
+
 /// Safety limits for an exhaustive issue listing.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct IssuePaginationLimits {
@@ -1162,14 +1186,11 @@ impl ForgejoAdapter {
                 .to_string();
             tracing::warn!(
                 %status,
-                %location,
-                url = %response.url(),
                 "upstream returned redirect — repository may have moved or been renamed",
             );
             return Err(ForgeError::Redirect { status, location });
         }
 
-        let url = response.url().clone();
         let body = response.text().await.unwrap_or_default();
 
         if status == StatusCode::NOT_FOUND {
@@ -1179,17 +1200,15 @@ impl ForgejoAdapter {
             );
             tracing::warn!(
                 %status,
-                %message,
-                %url,
+                body_preview = %crate::safe_upstream_preview(&message),
                 "upstream returned 404",
             );
             return Err(ForgeError::NotFound { status, message });
         }
         tracing::warn!(
             %status,
-            %url,
             body_len = body.len(),
-            body_preview = %bounded_preview(&body, 512),
+            body_preview = %crate::safe_upstream_preview(&body),
             "unexpected upstream status",
         );
         Err(ForgeError::UnexpectedStatus {
@@ -2712,6 +2731,12 @@ impl ForgeAdapter for ForgejoAdapter {
         self.get_issue(repository, index, credential).await
     }
 
+    #[tracing::instrument(skip_all, fields(
+        operation = "schedule_auto_merge", method = "POST",
+        forge = %diagnostic_target(&repository.alias),
+        owner = %diagnostic_target(&repository.owner),
+        repo = %diagnostic_target(&repository.name), target = index
+    ))]
     async fn schedule_auto_merge(
         &self,
         repository: &RepositoryRef,
@@ -2750,7 +2775,13 @@ impl ForgeAdapter for ForgejoAdapter {
             request = request.bearer_auth(token);
         }
 
-        let response = request.send().await?;
+        let response = request.send().await.inspect_err(|_| {
+            tracing::warn!(
+                stage = "scheduling",
+                reason = "transport",
+                "upstream request failed"
+            );
+        })?;
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
@@ -2780,7 +2811,6 @@ impl ForgeAdapter for ForgejoAdapter {
                 let location = "<unknown>".to_string();
                 tracing::warn!(
                     %status,
-                    %location,
                     "upstream returned redirect — repository may have moved or been renamed",
                 );
                 return Err(ForgeError::Redirect { status, location });
@@ -2790,7 +2820,7 @@ impl ForgeAdapter for ForgejoAdapter {
                     .unwrap_or_else(|| "repository or resource not found".to_string());
                 tracing::warn!(
                     %status,
-                    %message,
+                    body_preview = %crate::safe_upstream_preview(&message),
                     "upstream returned 404",
                 );
                 return Err(ForgeError::NotFound { status, message });
@@ -2798,7 +2828,7 @@ impl ForgeAdapter for ForgejoAdapter {
             tracing::warn!(
                 %status,
                 body_len = body.len(),
-                body_preview = %&body[..body.len().min(512)],
+                body_preview = %crate::safe_upstream_preview(&body),
                 "unexpected upstream status",
             );
             return Err(ForgeError::UnexpectedStatus { status, body });
@@ -3607,6 +3637,31 @@ mod tests {
             woodpecker_token: None,
         })
         .expect("build forgejo adapter")
+    }
+
+    #[test]
+    fn diagnostic_previews_are_bounded_and_fail_closed() {
+        assert_eq!(
+            diagnostic_target(&format!("\n{}\r", "界".repeat(300))),
+            "界".repeat(128)
+        );
+        for text in [
+            "Authorization: Bearer secret".to_string(),
+            "https://user:password@example.org?token=secret".to_string(),
+            r#"{"message":"token=secret", "Authorization":"Basic secret"}"#.to_string(),
+            "ghp_secret glpat-secret ghs_secret".to_string(),
+            "界".repeat(10000),
+            format!("{}界", "x".repeat(511)),
+            "User not allowed to merge PR\nsecret".to_string(),
+        ] {
+            assert_eq!(safe_upstream_preview(&text), "[upstream text omitted]");
+        }
+        assert_eq!(
+            safe_upstream_preview(
+                r#"{"message":"User not allowed to merge PR", "token":"secret"}"#
+            ),
+            "User not allowed to merge PR"
+        );
     }
 
     fn test_repo() -> RepositoryRef {

@@ -1435,6 +1435,7 @@ dependencies = [
  "git-exec",
  "tempfile",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

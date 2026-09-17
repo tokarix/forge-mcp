@@ -305,6 +305,7 @@ impl GitHubAdapter {
         if status.is_success() {
             return Ok(response);
         }
+        tracing::warn!(%status, "upstream request failed");
         if status.is_redirection() {
             let location = response
                 .headers()

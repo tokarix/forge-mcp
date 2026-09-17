@@ -215,14 +215,11 @@ impl GitLabAdapter {
                 .to_string();
             tracing::warn!(
                 %status,
-                %location,
-                url = %response.url(),
                 "upstream returned redirect",
             );
             return Err(ForgeError::Redirect { status, location });
         }
 
-        let url = response.url().clone();
         let body = response.text().await.unwrap_or_default();
 
         if status == StatusCode::NOT_FOUND {
@@ -230,17 +227,15 @@ impl GitLabAdapter {
                 .unwrap_or_else(|| "repository or resource not found".to_string());
             tracing::warn!(
                 %status,
-                %message,
-                %url,
+                body_preview = %crate::safe_upstream_preview(&message),
                 "upstream returned 404",
             );
             return Err(ForgeError::NotFound { status, message });
         }
         tracing::warn!(
             %status,
-            %url,
             body_len = body.len(),
-            body_preview = %&body[..body.len().min(512)],
+            body_preview = %crate::safe_upstream_preview(&body),
             "unexpected upstream status",
         );
         Err(ForgeError::UnexpectedStatus { status, body })

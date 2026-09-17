@@ -4179,6 +4179,127 @@ mod tests {
         test_state_with_write(Arc::new(FakeWriteService::new()))
     }
 
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn diagnostics_auto_merge_failure_stages() {
+        use tracing::instrument::WithSubscriber;
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+        for schedule_status in [405, 200] {
+            let mock = MockServer::start().await;
+            Mock::given(method("GET")).and(path("/api/v1/repos/org/repo/pulls/42")).respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "base":{"ref":"main","sha":"base"}, "head":{"ref":"agent/topic","sha":"head"},
+                "html_url":"https://example/pull/42", "merged":false, "number":42, "state":"open", "title":"PR"
+            }))).expect(1).mount(&mock).await;
+            Mock::given(method("GET"))
+                .and(path("/api/v1/repos/org/repo"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({"allow_rebase":true,"default_merge_style":"rebase"}),
+                ))
+                .expect(1)
+                .mount(&mock)
+                .await;
+            Mock::given(method("POST")).and(path("/api/v1/repos/org/repo/pulls/42/merge")).respond_with(ResponseTemplate::new(schedule_status).set_body_json(serde_json::json!({"message":"User not allowed to merge PR", "token":"upstream-secret"}))).expect(1).mount(&mock).await;
+            Mock::given(method("POST"))
+                .and(path("/api/v1/repos/org/repo/statuses/head"))
+                .respond_with(
+                    ResponseTemplate::new(500)
+                        .set_body_string("Authorization: Bearer publication-secret"),
+                )
+                .expect(u64::from(schedule_status == 200))
+                .mount(&mock)
+                .await;
+            let adapter = Arc::new(
+                forge::ForgejoAdapter::new(forge::ForgejoConfig {
+                    base_url: mock.uri(),
+                    token: None,
+                    woodpecker_url: None,
+                    woodpecker_token: None,
+                })
+                .expect("adapter"),
+            );
+            let mut state = test_state();
+            let mut instance =
+                test_forge_instance("test-forge", &mock.uri(), Arc::new(FakeWriteService::new()));
+            instance.write_service = Arc::new(orchestrator::WriteOrchestrator::new(
+                adapter,
+                Arc::new(audit::InMemoryAuditSink::new()),
+                None,
+            ));
+            state.forge_registry =
+                Arc::new(crate::registry::ForgeRegistry::new(HashMap::from([(
+                    "test-forge".into(),
+                    instance,
+                )])));
+            let capture = crate::diagnostics::tests::Capture::default();
+            let response = crate::build_router(state, false)
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/repos/test-forge/org/repo/pulls/42/automerge")
+                        .header("authorization", "Bearer test-token")
+                        .header("content-type", "application/json")
+                        .body(axum::body::Body::from(
+                            r#"{"expected_head_sha":"head","merge_style":"rebase"}"#,
+                        ))
+                        .expect("request"),
+                )
+                .with_subscriber(capture.subscriber())
+                .await
+                .expect("response");
+            assert_eq!(
+                response.status(),
+                if schedule_status == 405 {
+                    StatusCode::BAD_GATEWAY
+                } else {
+                    StatusCode::OK
+                }
+            );
+            let logs = capture.logs();
+            let line = logs
+                .lines()
+                .find(|line| {
+                    line.contains(if schedule_status == 405 {
+                        "unexpected upstream status"
+                    } else {
+                        "evaluation-trigger publication failed"
+                    })
+                })
+                .expect("failure log");
+            for expected in [
+                "request_id=",
+                "test-forge",
+                "org",
+                "repo",
+                "42",
+                "codex",
+                "default",
+                "agent_forge_identity",
+                "POST",
+            ] {
+                assert!(line.contains(expected), "missing {expected}: {line}");
+            }
+            if schedule_status == 405 {
+                assert!(line.contains("405"));
+                assert!(line.contains("schedule_auto_merge"));
+            } else {
+                assert!(line.contains("scheduling_succeeded=true"));
+            }
+            for secret in [
+                "test-token",
+                "caller-forge-token",
+                "upstream-secret",
+                "publication-secret",
+                "Authorization",
+            ] {
+                assert!(!logs.contains(secret), "{logs}");
+            }
+            mock.verify().await;
+        }
+    }
+
     #[test]
     fn diagnostics_credential_selection_preserves_precedence() {
         let capture = crate::diagnostics::tests::Capture::default();

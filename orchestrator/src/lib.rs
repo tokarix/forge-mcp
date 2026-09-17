@@ -1470,7 +1470,7 @@ where
         // event fires and the PR sits forever. A synthetic success status
         // triggers the evaluation path.  Best-effort: ignore failures since
         // the auto-merge is already scheduled.
-        let _ = self
+        if self
             .adapter
             .create_commit_status(
                 &request.repository,
@@ -1480,7 +1480,16 @@ where
                 "success",
                 credential,
             )
-            .await;
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                operation = "schedule_auto_merge",
+                stage = "evaluation_trigger_publication",
+                scheduling_succeeded = true,
+                "auto-merge scheduled but evaluation-trigger publication failed"
+            );
+        }
 
         Ok(())
     }
