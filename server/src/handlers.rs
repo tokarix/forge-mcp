@@ -38,6 +38,7 @@ use crate::api::{
 use crate::auth::{AgentRegistry, extract_bearer_token};
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
+use tracing::{Instrument, instrument::WithSubscriber};
 
 /// Shared application state.
 #[derive(Clone)]
@@ -382,12 +383,12 @@ pub async fn post_webhook(
             .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorBody { error })))?;
 
         tracing::info!(
-            forge = %path.forge,
+            forge = %crate::diagnostics::bounded(&path.forge),
             event_kind = %channel_event.meta.event_kind,
             action = %channel_event.meta.action,
-            owner = %channel_event.meta.owner,
-            repo = %channel_event.meta.repo,
-            delivery_id = %channel_event.meta.delivery_id,
+            owner = %crate::diagnostics::bounded(&channel_event.meta.owner),
+            repo = %crate::diagnostics::bounded(&channel_event.meta.repo),
+            delivery_id = %crate::diagnostics::bounded(&channel_event.meta.delivery_id),
             status = ?status,
             "webhook accepted",
         );
@@ -412,17 +413,29 @@ fn spawn_review_auto_merge(
     enabled: bool,
     service: &Arc<crate::auto_merge::AutoMergeService>,
 ) -> Option<tokio::task::JoinHandle<()>> {
-    if enabled
-        && matches!(status, crate::events::PublishStatus::Enqueued { .. })
-        && review.action == domain::PullRequestReviewEventAction::Submitted
-        && review.review_state == Some(domain::ReviewState::Approved)
-    {
-        let service = Arc::clone(service);
-        Some(tokio::spawn(
-            async move { service.handle_review(review).await },
-        ))
+    let skip_reason = if !enabled {
+        Some("auto_merge_disabled")
+    } else if !matches!(status, crate::events::PublishStatus::Enqueued { .. }) {
+        Some("duplicate_delivery")
+    } else if review.action != domain::PullRequestReviewEventAction::Submitted {
+        Some("review_not_submitted")
+    } else if review.review_state != Some(domain::ReviewState::Approved) {
+        Some("review_not_approved")
     } else {
         None
+    };
+    if let Some(reason) = skip_reason {
+        tracing::debug!(reason, target = review.index,
+            delivery_id = %crate::diagnostics::bounded(&review.delivery_id),
+            "auto-merge: skipping review");
+        None
+    } else {
+        let service = Arc::clone(service);
+        Some(tokio::spawn(
+            async move { service.handle_review(review).await }
+                .in_current_span()
+                .with_current_subscriber(),
+        ))
     }
 }
 
@@ -3815,6 +3828,7 @@ mod tests {
         captured_add_dep: Arc<Mutex<Option<domain::AddIssueDependencyRequest>>>,
         captured_auto_merge: Arc<Mutex<CapturedAutoMerge>>,
         auto_merge_called: tokio::sync::Notify,
+        auto_merge_error: Option<String>,
         captured_remove_dep: Arc<Mutex<Option<domain::RemoveIssueDependencyRequest>>>,
     }
 
@@ -3826,6 +3840,7 @@ mod tests {
                 captured_add_dep: Arc::new(Mutex::new(None)),
                 captured_auto_merge: Arc::new(Mutex::new(Vec::new())),
                 auto_merge_called: tokio::sync::Notify::new(),
+                auto_merge_error: None,
                 captured_remove_dep: Arc::new(Mutex::new(None)),
             }
         }
@@ -4063,6 +4078,9 @@ mod tests {
                 .expect("poisoned")
                 .push((request, credential.token.clone()));
             self.auto_merge_called.notify_one();
+            if let Some(error) = &self.auto_merge_error {
+                return Err(ServiceError::Upstream(error.clone()));
+            }
             Ok(())
         }
 
@@ -5484,6 +5502,128 @@ mod tests {
                 .expect("error field is a string")
                 .contains("message is required"),
         );
+    }
+
+    #[tokio::test]
+    async fn diagnostics_detached_webhook_failure_preserves_correlation() {
+        let mut write = FakeWriteService::new();
+        write.auto_merge_error = Some("upstream Bearer background-secret".into());
+        let write = Arc::new(write);
+        let (state, mut events) = webhook_test_state(true, Arc::clone(&write));
+        let capture = crate::diagnostics::tests::Capture::default();
+        let response = crate::build_router(state, false)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/forges/test-forge/webhook")
+                    .body(Body::from("{}"))
+                    .expect("request"),
+            )
+            .with_subscriber(capture.subscriber())
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        for _ in 0..2 {
+            assert!(
+                tokio::time::timeout(Duration::from_secs(2), events.recv())
+                    .await
+                    .expect("event deadline")
+                    .is_some()
+            );
+        }
+        let logs = capture.logs();
+        let accepted = logs
+            .lines()
+            .find(|line| line.contains("webhook accepted"))
+            .expect("accepted log");
+        let failed = logs
+            .lines()
+            .find(|line| line.contains("failed to schedule"))
+            .expect("failure log");
+        let correlation = accepted
+            .split("request_id=")
+            .nth(1)
+            .expect("request id")
+            .split_whitespace()
+            .next()
+            .expect("id value");
+        assert!(failed.contains(correlation), "{logs}");
+        for expected in [
+            "system",
+            "auto-merge",
+            "test-forge",
+            "org",
+            "repo",
+            "42",
+            "approved-review-delivery",
+            "forge_default",
+            "scheduling",
+        ] {
+            assert!(failed.contains(expected), "{failed}");
+        }
+        for secret in [
+            "background-secret",
+            "forge-fallback-token",
+            "distinctive-webhook-secret",
+        ] {
+            assert!(!logs.contains(secret), "{logs}");
+        }
+        let records = write.captured_auto_merge.lock().expect("records");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].0.agent.agent_id, "system");
+    }
+
+    #[tokio::test]
+    async fn diagnostics_auto_merge_skip_reasons() {
+        use forge::ForgeWebhookAdapter;
+        let service = test_auto_merge_service();
+        let event = ApprovedReviewWebhookAdapter
+            .verify_and_parse_webhook_event(
+                &[],
+                b"{}",
+                "test-forge",
+                ForgeKind::Forgejo,
+                "https://forge.example",
+                "",
+            )
+            .expect("event")
+            .expect("review");
+        let review = match event {
+            domain::WebhookEvent::PullRequestReview(review) => Some(review),
+            _ => None,
+        }
+        .expect("review fixture");
+        let capture = crate::diagnostics::tests::Capture::default();
+        async {
+            let enqueued = crate::events::PublishStatus::Enqueued { delivered: 1 };
+            assert!(spawn_review_auto_merge(review.clone(), &enqueued, false, &service).is_none());
+            assert!(
+                spawn_review_auto_merge(
+                    review.clone(),
+                    &crate::events::PublishStatus::Duplicate,
+                    true,
+                    &service
+                )
+                .is_none()
+            );
+            let mut edited = review.clone();
+            edited.action = domain::PullRequestReviewEventAction::Edited;
+            assert!(spawn_review_auto_merge(edited, &enqueued, true, &service).is_none());
+            let mut comment = review;
+            comment.review_state = Some(domain::ReviewState::Comment);
+            assert!(spawn_review_auto_merge(comment, &enqueued, true, &service).is_none());
+        }
+        .with_subscriber(capture.subscriber())
+        .await;
+        let logs = capture.logs();
+        for reason in [
+            "auto_merge_disabled",
+            "duplicate_delivery",
+            "review_not_submitted",
+            "review_not_approved",
+        ] {
+            assert!(logs.contains(reason), "{logs}");
+        }
     }
 
     #[tokio::test]

@@ -12,6 +12,7 @@ use axum::{
     response::Response,
 };
 use serde::Deserialize;
+use tokio_stream::{Stream, StreamExt};
 
 use crate::api::ErrorBody;
 use crate::auth::{ResolvedAgent, extract_token};
@@ -105,16 +106,23 @@ fn resolve_agent_and_forge<'a>(
     repo_name: &str,
 ) -> Result<(&'a ResolvedAgent, &'a ForgeInstance), Response> {
     let Some(token) = extract_token(headers) else {
+        tracing::warn!(
+            reason = "missing_authorization",
+            "proxy authentication failed"
+        );
         return Err(auth_challenge("missing Authorization header"));
     };
     let Some(agent) = state.agent_registry.resolve(&token) else {
+        tracing::warn!(reason = "invalid_token", "proxy authentication failed");
         return Err(auth_challenge("invalid token"));
     };
+    crate::diagnostics::record_agent(&agent.identity);
 
     if !agent
         .policy_config
         .is_repo_allowed(&path.forge, &path.owner, repo_name)
     {
+        tracing::warn!(reason = "repository_denied", "proxy authorization failed");
         return Err(error_response(
             StatusCode::FORBIDDEN,
             &format!(
@@ -132,6 +140,34 @@ fn resolve_agent_and_forge<'a>(
     };
 
     Ok((agent, forge))
+}
+
+// Stream polling outlives the handler future. Capture both span and dispatcher
+// and enter them only for synchronous logging, never across an await.
+fn diagnose_stream<S, T, E>(stream: S, stage: &'static str) -> impl Stream<Item = Result<T, E>>
+where
+    S: Stream<Item = Result<T, E>>,
+{
+    let span = tracing::Span::current();
+    let dispatch = tracing::dispatcher::get_default(Clone::clone);
+    stream.map(move |result| {
+        if result.is_err() {
+            tracing::dispatcher::with_default(&dispatch, || {
+                span.in_scope(|| tracing::warn!(stage, "git proxy stream failed"));
+            });
+        }
+        result
+    })
+}
+
+fn diagnose_status(status: StatusCode) {
+    if status.is_client_error() || status.is_server_error() || status.is_redirection() {
+        tracing::warn!(
+            status = status.as_u16(),
+            stage = "upstream_response",
+            "git proxy upstream failed"
+        );
+    }
 }
 
 /// Records an audit event for a git proxy request.
@@ -222,6 +258,11 @@ pub async fn info_refs(
     let upstream_resp = match upstream_req.send().await {
         Ok(r) => r,
         Err(e) => {
+            tracing::warn!(
+                stage = "upstream_request",
+                reason = "transport",
+                "git proxy upstream failed"
+            );
             return error_response(
                 StatusCode::BAD_GATEWAY,
                 &format!("upstream request failed: {e}"),
@@ -230,13 +271,17 @@ pub async fn info_refs(
     };
 
     let status = upstream_resp.status();
+    diagnose_status(status);
     let content_type = upstream_resp
         .headers()
         .get("content-type")
         .cloned()
         .unwrap_or_else(|| HeaderValue::from_static("application/x-git-upload-pack-advertisement"));
 
-    let body = Body::from_stream(upstream_resp.bytes_stream());
+    let body = Body::from_stream(diagnose_stream(
+        upstream_resp.bytes_stream(),
+        "upstream_stream",
+    ));
 
     let mut response = Response::new(body);
     *response.status_mut() = status;
@@ -276,7 +321,7 @@ pub async fn upload_pack(
     };
 
     // Stream request body to upstream
-    let body_stream = body.into_data_stream();
+    let body_stream = diagnose_stream(body.into_data_stream(), "request_stream");
     let reqwest_body = reqwest::Body::wrap_stream(body_stream);
 
     // Use HTTP Basic auth for git smart HTTP transport.
@@ -300,6 +345,11 @@ pub async fn upload_pack(
     let upstream_resp = match upstream_req.send().await {
         Ok(r) => r,
         Err(e) => {
+            tracing::warn!(
+                stage = "upstream_request",
+                reason = "transport",
+                "git proxy upstream failed"
+            );
             return error_response(
                 StatusCode::BAD_GATEWAY,
                 &format!("upstream request failed: {e}"),
@@ -308,13 +358,17 @@ pub async fn upload_pack(
     };
 
     let status = upstream_resp.status();
+    diagnose_status(status);
     let content_type = upstream_resp
         .headers()
         .get("content-type")
         .cloned()
         .unwrap_or_else(|| HeaderValue::from_static("application/x-git-upload-pack-result"));
 
-    let body = Body::from_stream(upstream_resp.bytes_stream());
+    let body = Body::from_stream(diagnose_stream(
+        upstream_resp.bytes_stream(),
+        "upstream_stream",
+    ));
 
     let mut response = Response::new(body);
     *response.status_mut() = status;
@@ -1165,6 +1219,133 @@ mod tests {
 
     fn git_proxy_router(state: AppState) -> axum::Router {
         crate::build_router(state, false)
+    }
+
+    #[tokio::test]
+    async fn diagnostics_proxy_http_failures() {
+        use tracing::instrument::WithSubscriber;
+        for method_name in ["GET", "POST"] {
+            let mock = MockServer::start().await;
+            Mock::given(method(method_name))
+                .respond_with(ResponseTemplate::new(503).set_body_string("Bearer upstream-secret"))
+                .expect(1)
+                .mount(&mock)
+                .await;
+            let (state, _) = test_state_with_forge(&mock.uri());
+            let capture = crate::diagnostics::tests::Capture::default();
+            let suffix = if method_name == "GET" {
+                "info/refs?service=git-upload-pack"
+            } else {
+                "git-upload-pack"
+            };
+            let response = git_proxy_router(state)
+                .oneshot(
+                    Request::builder()
+                        .method(method_name)
+                        .uri(format!("/git/test-forge/org/repo.git/{suffix}"))
+                        .header("authorization", "Bearer test-token")
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .with_subscriber(capture.subscriber())
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            let logs = capture.logs();
+            let line = logs
+                .lines()
+                .find(|line| line.contains("git proxy upstream failed"))
+                .expect("failure log");
+            for expected in [
+                "request_id=",
+                method_name,
+                "test-forge",
+                "org",
+                "repo.git",
+                "codex",
+                "default",
+                "forge_default",
+                "503",
+                "upstream_response",
+            ] {
+                assert!(line.contains(expected), "{line}");
+            }
+            for secret in ["test-token", "upstream-token", "upstream-secret"] {
+                assert!(!logs.contains(secret));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn diagnostics_proxy_transport_and_detached_stream_failures() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tracing::instrument::WithSubscriber;
+        for streaming in [false, true] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("listener");
+            let url = format!("http://{}", listener.local_addr().expect("address"));
+            let mock = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.expect("connection");
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    assert!(request.len() < 4096);
+                    request.push(socket.read_u8().await.expect("request byte"));
+                }
+                if streaming {
+                    socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\nshort").await.expect("headers");
+                }
+            });
+            let (state, _) = test_state_with_forge(&url);
+            let capture = crate::diagnostics::tests::Capture::default();
+            let response = git_proxy_router(state)
+                .oneshot(
+                    Request::builder()
+                        .uri("/git/test-forge/org/repo.git/info/refs?service=git-upload-pack")
+                        .header("authorization", "Bearer test-token")
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .with_subscriber(capture.subscriber())
+                .await
+                .expect("response");
+            // Poll the body after the request's subscriber scope has ended.
+            if streaming {
+                assert_eq!(response.status(), StatusCode::OK);
+                assert!(
+                    axum::body::to_bytes(response.into_body(), 1024)
+                        .await
+                        .is_err()
+                );
+            } else {
+                assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+            }
+            mock.await.expect("mock task");
+            let logs = capture.logs();
+            let failure_stage = if streaming {
+                "upstream_stream"
+            } else {
+                "upstream_request"
+            };
+            let line = logs
+                .lines()
+                .find(|line| line.contains(failure_stage))
+                .expect("failure log");
+            for expected in [
+                "request_id=",
+                "test-forge",
+                "org",
+                "repo.git",
+                "codex",
+                "forge_default",
+                "GET",
+            ] {
+                assert!(line.contains(expected), "{line}");
+            }
+            assert!(!logs.contains("test-token"));
+            assert!(!logs.contains("upstream-token"));
+            assert!(!logs.contains(&url));
+        }
     }
 
     #[tokio::test]

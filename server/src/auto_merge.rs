@@ -25,22 +25,46 @@ impl AutoMergeService {
         }
     }
 
+    #[tracing::instrument(skip_all, fields(
+        operation = "webhook_auto_merge", agent_id = "system", session_id = "auto-merge",
+        forge = %crate::diagnostics::bounded(&event.repository.alias),
+        owner = %crate::diagnostics::bounded(&event.repository.owner),
+        repo = %crate::diagnostics::bounded(&event.repository.name), target = event.index,
+        delivery_id = %crate::diagnostics::bounded(&event.delivery_id),
+        credential_source = tracing::field::Empty
+    ))]
     pub async fn handle_review(&self, event: PullRequestReviewEvent) {
         if event.action != domain::PullRequestReviewEventAction::Submitted
             || event.review_state != Some(domain::ReviewState::Approved)
         {
+            tracing::debug!(
+                reason = "review_not_submitted_approval",
+                "auto-merge: skipping review"
+            );
             return;
         }
 
         let alias = &event.repository.alias;
         let Some(forge) = self.forge_registry.get(alias) else {
-            tracing::warn!(alias, "auto-merge: unknown forge");
+            tracing::warn!(reason = "unknown_forge", "auto-merge: unknown forge");
             return;
         };
 
         let credential = ForgeCredential {
             token: forge.token.clone(),
         };
+        crate::handlers::record_credential_source(
+            if forge
+                .adapter
+                .effective_credential(&credential)
+                .token
+                .is_some()
+            {
+                "forge_default"
+            } else {
+                "none"
+            },
+        );
 
         let agent = AgentIdentity {
             agent_id: "system".to_string(),
@@ -66,14 +90,7 @@ impl AutoMergeService {
             .await
         {
             Ok(()) => {
-                tracing::info!(
-                    forge = %event.repository.alias,
-                    owner = %event.repository.owner,
-                    repo = %event.repository.name,
-                    pr = event.index,
-                    head = %event.head_sha,
-                    "auto-merge: scheduled",
-                );
+                tracing::info!("auto-merge: scheduled");
             }
             Err(e) => self.handle_error(&event, &e),
         }
@@ -83,23 +100,12 @@ impl AutoMergeService {
         let msg = error.to_string();
         if msg.contains("does not match current") || msg.contains("head SHA") {
             tracing::debug!(
-                forge = %event.repository.alias,
-                owner = %event.repository.owner,
-                repo = %event.repository.name,
-                pr = event.index,
-                error = %msg,
+                reason = "stale_or_unavailable_head",
                 "auto-merge: stale head, skipping",
             );
             return;
         }
-        tracing::error!(
-            forge = %event.repository.alias,
-            owner = %event.repository.owner,
-            repo = %event.repository.name,
-            pr = event.index,
-            error = %msg,
-            "auto-merge: failed to schedule",
-        );
+        tracing::error!(stage = "scheduling", "auto-merge: failed to schedule",);
         self.publish_failure(event, &msg);
     }
 
@@ -110,13 +116,9 @@ impl AutoMergeService {
             index: event.index,
             repository: event.repository.clone(),
         };
-        if let Err(e) = self.event_bus.publish(&fail) {
+        if self.event_bus.publish(&fail).is_err() {
             tracing::warn!(
-                forge = %event.repository.alias,
-                owner = %event.repository.owner,
-                repo = %event.repository.name,
-                pr = event.index,
-                error = %e,
+                stage = "failure_event_publication",
                 "auto-merge: failed to publish failure event",
             );
         }
