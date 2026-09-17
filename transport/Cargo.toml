@@ -9,8 +9,9 @@ workspace = true
 [dependencies]
 clap = { version = "4", features = ["derive", "env"] }
 domain = { path = "../domain" }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.13.2", default-features = false, features = ["json", "rustls-no-provider"] }
 rmcp = { version = "1.2.0", features = ["transport-io"] }
+rustls = { version = "0.23.37", default-features = false, features = ["ring", "std", "tls12"] }
 schemars = "1.2.1"
 serde = { version = "1.0.228", features = ["derive"] }
 serde-aux = "4.7.0"
@@ -18,6 +19,7 @@ serde_json = "1.0.149"
 thiserror = "2.0.18"
 tokio = { version = "1.50.0", features = ["fs", "io-util", "macros", "rt-multi-thread", "time"] }
 tracing = "0.1"
+webpki-roots = "1.0.6"
 
 [dev-dependencies]
 rmcp = { version = "1.2.0", features = ["client", "transport-io"] }

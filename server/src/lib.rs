@@ -9,6 +9,7 @@ pub mod config;
 pub mod events;
 pub mod git_proxy;
 pub mod handlers;
+pub mod http_client;
 pub mod registry;
 
 mod diagnostics;

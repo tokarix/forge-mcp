@@ -253,7 +253,9 @@ fn build_state(
         adapter: adapter.clone(),
         alias: FORGE_ALIAS.to_string(),
         base_url: context.base_url.to_string(),
-        client: reqwest::Client::new(),
+        client: server::http_client::client_builder()
+            .build()
+            .map_err(|error| format!("could not build HTTP client: {error}"))?,
         forge_kind: ForgeKind::Forgejo,
         forge_type: "forgejo".to_string(),
         git_auth_user: String::new(),

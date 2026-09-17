@@ -231,7 +231,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!(version = %server_version(), listen = %config.server.listen, "forge-mcp starting");
 
     let audit_sink = Arc::new(InMemoryAuditSink::new());
-    let client = reqwest::Client::new();
+    let client = server::http_client::client_builder().build()?;
     let mut forges = HashMap::new();
     let agent_github_apps = configured_agent_github_apps(&config).await?;
 

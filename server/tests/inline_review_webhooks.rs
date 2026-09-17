@@ -115,7 +115,9 @@ fn app_with<A: forge::ForgeAdapter + ForgeWebhookAdapter + 'static>(
         adapter: adapter.clone(),
         alias: "github".into(),
         base_url: "https://provider.invalid".into(),
-        client: reqwest::Client::new(),
+        client: server::http_client::client_builder()
+            .build()
+            .expect("HTTP client"),
         forge_kind: kind,
         forge_type: "github".into(),
         git_auth_user: String::new(),

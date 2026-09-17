@@ -1148,7 +1148,9 @@ mod tests {
             }),
             alias: "test-forge".to_string(),
             base_url: base_url.to_string(),
-            client: reqwest::Client::new(),
+            client: crate::http_client::client_builder()
+                .build()
+                .expect("HTTP client"),
             forge_kind: domain::ForgeKind::Forgejo,
             forge_type: "forgejo".to_string(),
             git_auth_user: String::new(),
@@ -1169,7 +1171,9 @@ mod tests {
             }),
             alias: "test-forge".to_string(),
             base_url: base_url.to_string(),
-            client: reqwest::Client::new(),
+            client: crate::http_client::client_builder()
+                .build()
+                .expect("HTTP client"),
             forge_kind: domain::ForgeKind::GitHub,
             forge_type: "github".to_string(),
             git_auth_user: "x-access-token".to_string(),

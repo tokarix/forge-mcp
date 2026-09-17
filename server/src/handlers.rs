@@ -4172,7 +4172,9 @@ mod tests {
             adapter: Arc::new(FakeForgeAdapter),
             alias: alias.to_string(),
             base_url: base_url.to_string(),
-            client: reqwest::Client::new(),
+            client: crate::http_client::client_builder()
+                .build()
+                .expect("HTTP client"),
             forge_kind: ForgeKind::Forgejo,
             forge_type: "forgejo".to_string(),
             git_auth_user: String::new(),

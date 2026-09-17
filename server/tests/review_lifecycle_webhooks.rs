@@ -118,7 +118,9 @@ fn app() -> (Router, EventBus) {
         adapter: adapter.clone(),
         alias: "github".into(),
         base_url: "https://provider.invalid".into(),
-        client: reqwest::Client::new(),
+        client: server::http_client::client_builder()
+            .build()
+            .expect("HTTP client"),
         forge_kind: ForgeKind::GitHub,
         forge_type: "github".into(),
         git_auth_user: String::new(),

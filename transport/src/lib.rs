@@ -1,5 +1,7 @@
 //! MCP shim — translates MCP tool calls into HTTP requests to the control plane.
 
+mod http_client;
+
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Write as _;
 use std::process::Command;
@@ -847,10 +849,15 @@ pub struct McpShim {
 }
 
 impl McpShim {
+    /// # Panics
+    /// Panics if the HTTP client cannot initialize, as with `reqwest::Client::new`.
     #[must_use]
+    #[allow(clippy::expect_used)]
     pub fn new(config: ShimConfig) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: http_client::client_builder()
+                .build()
+                .expect("failed to build gateway client"),
             config,
             event_buffer: Arc::new(Mutex::new(VecDeque::new())),
             event_forwarder_started: AtomicBool::new(false),

@@ -87,7 +87,9 @@ fn app<A: ForgeAdapter + ForgeWebhookAdapter + 'static>(
         adapter: adapter.clone(),
         alias: "hint-forge".into(),
         base_url: "https://provider.invalid".into(),
-        client: reqwest::Client::new(),
+        client: server::http_client::client_builder()
+            .build()
+            .expect("HTTP client"),
         forge_kind: kind,
         forge_type: "hint-forge".into(),
         git_auth_user: String::new(),
