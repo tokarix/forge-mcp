@@ -12,7 +12,7 @@ use axum::{
 use domain::{ForgeKind, PublishableEvent, PullRequestReviewEvent, WebhookEvent};
 use forge::github::{GitHubAdapter, GitHubConfig};
 use forge::{ForgeWebhookAdapter, ForgeWebhookError, ForgejoAdapter, ForgejoConfig};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use orchestrator::{ReadOrchestrator, WriteOrchestrator};
 use serde_json::{Value, json};
 use server::{

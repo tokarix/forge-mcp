@@ -7,11 +7,11 @@ use domain::{
     ChangeRequestState, ForgeCredential, ForgeUser, Mergeability, ReadRepositoryFileResponse,
     RepositoryMergeSettings, RepositoryRef,
 };
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use reqwest::{RequestBuilder, StatusCode, Url};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -3505,7 +3505,7 @@ fn parse_review_lifecycle(
         domain::PullRequestReviewEvent {
             provider_action: Some(payload.action),
             action,
-            payload_fingerprint: format!("{:x}", Sha256::digest(body)),
+            payload_fingerprint: crate::payload_fingerprint(body),
             delivery_id,
             head_sha: reviewed_commit_id.clone().unwrap_or_default(),
             reviewed_commit_id,
@@ -3572,7 +3572,7 @@ mod tests {
     use std::sync::{Arc, Mutex, RwLock};
     use std::thread::JoinHandle;
 
-    use hmac::{Hmac, Mac};
+    use hmac::{Hmac, KeyInit, Mac};
     use sha2::Sha256;
     use tracing::instrument::WithSubscriber as _;
     use wiremock::matchers::{body_json, header, header_exists, method, path, query_param};
@@ -5307,6 +5307,77 @@ rRwzv5g6zr/Xm2UKcduXYVQs
             .schedule_auto_merge(&repository(), 7, "squash", "head-sha", None, &credential())
             .await
             .expect("auto merge");
+    }
+
+    #[test]
+    fn github_signature_fixed_vector() {
+        // RFC 4231 test case 2: expected MAC is independent of our signing helpers.
+        let body = b"what do ya want for nothing?";
+        let signature = "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843";
+        for header in ["x-hub-signature-256", "X-Hub-Signature-256"] {
+            for encoded in [
+                signature.to_string(),
+                format!(" {}\n", signature.to_uppercase()),
+            ] {
+                let headers = [(header.to_string(), format!("sha256={encoded}"))];
+                assert!(verify_github_signature(&headers, body, "Jefe").is_ok());
+                for (payload, key) in [
+                    (b"what do ya want for nothing!".as_slice(), "Jefe"),
+                    (b"what do ya want for nothing?\n".as_slice(), "Jefe"),
+                    (body.as_slice(), "wrong-key"),
+                ] {
+                    assert!(matches!(
+                        verify_github_signature(&headers, payload, key),
+                        Err(ForgeWebhookError::InvalidSignature)
+                    ));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn github_signature_rejects_malformed_and_incorrect_macs() {
+        let signature = "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843";
+        for encoded in [
+            String::new(),
+            " ".to_string(),
+            "0".to_string(),
+            "gg".repeat(32),
+            "é".repeat(32),
+            "00".to_string(),
+            signature[..62].to_string(),
+            format!("{signature}00"),
+            format!("00{}", &signature[2..]),
+            format!("{}00", &signature[..62]),
+        ] {
+            let headers = [(
+                "x-hub-signature-256".to_string(),
+                format!("sha256={encoded}"),
+            )];
+            assert!(matches!(
+                verify_github_signature(&headers, b"what do ya want for nothing?", "Jefe"),
+                Err(ForgeWebhookError::InvalidSignature)
+            ));
+        }
+        assert!(matches!(
+            verify_github_signature(&[], b"body", "Jefe"),
+            Err(ForgeWebhookError::MissingHeader(_))
+        ));
+    }
+
+    #[test]
+    fn github_signature_requires_exact_sha256_prefix() {
+        let signature = "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843";
+        for prefix in ["", "SHA256=", "sha1=", " sha256="] {
+            let headers = [(
+                "x-hub-signature-256".to_string(),
+                format!("{prefix}{signature}"),
+            )];
+            assert!(matches!(
+                verify_github_signature(&headers, b"what do ya want for nothing?", "Jefe"),
+                Err(ForgeWebhookError::InvalidSignature)
+            ));
+        }
     }
 
     #[test]

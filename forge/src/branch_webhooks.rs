@@ -5,7 +5,6 @@ use domain::{
     WebhookEvent,
 };
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
 
 use crate::ForgeWebhookError;
 
@@ -16,7 +15,7 @@ fn decode<T: serde::de::DeserializeOwned>(body: &[u8]) -> Result<T, ForgeWebhook
     serde_json::from_slice(body).map_err(|_| invalid())
 }
 fn fingerprint(body: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(body))
+    crate::payload_fingerprint(body)
 }
 fn valid_sha(sha: &str, allow_zero: bool) -> bool {
     matches!(sha.len(), 40 | 64)

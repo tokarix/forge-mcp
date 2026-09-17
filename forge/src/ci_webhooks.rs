@@ -5,7 +5,6 @@ use domain::{
     WebhookEvent,
 };
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
 
 fn invalid() -> ForgeWebhookError {
     ForgeWebhookError::InvalidPayload("invalid CI webhook projection".into())
@@ -189,7 +188,7 @@ pub(crate) fn github(
         delivery.unwrap_or_default(),
         action,
         details,
-        format!("{:x}", Sha256::digest(body)),
+        crate::payload_fingerprint(body),
     )
     .map_err(|_| invalid())?;
     finish(event)
@@ -330,7 +329,7 @@ pub(crate) fn gitlab(
         delivery,
         None,
         details,
-        format!("{:x}", Sha256::digest(body)),
+        crate::payload_fingerprint(body),
     )
     .map_err(|_| invalid())?;
     finish(event)

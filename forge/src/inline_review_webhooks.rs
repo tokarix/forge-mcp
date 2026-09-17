@@ -2,7 +2,6 @@
 use crate::ForgeWebhookError;
 use domain::{InlineReviewComment, InlineReviewDetails, RepositoryRef, WebhookEvent};
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
 
 fn invalid() -> ForgeWebhookError {
     ForgeWebhookError::InvalidPayload("invalid inline review webhook payload".into())
@@ -129,7 +128,7 @@ pub(crate) fn github(
         name: p.repository.name,
     };
     let head = optional(p.pull_request.head.and_then(|h| h.sha), 256)?;
-    let fingerprint = format!("{:x}", Sha256::digest(body));
+    let fingerprint = crate::payload_fingerprint(body);
     if kind == "pull_request_review_comment" {
         let comment = p.comment.ok_or_else(invalid)?.project()?;
         if comment.comment_id.is_none() {
@@ -312,7 +311,7 @@ pub(crate) fn gitlab(
         delivery.into(),
         None,
         details,
-        format!("{:x}", Sha256::digest(body)),
+        crate::payload_fingerprint(body),
     );
     event.provider_action = if event.action == domain::PullRequestReviewCommentAction::Created {
         "create".into()

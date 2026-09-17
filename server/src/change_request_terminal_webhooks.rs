@@ -2,6 +2,7 @@
 //! In-process provider fixtures; provenance is recorded in README.md.
 #![allow(clippy::expect_used)]
 
+use std::fmt::Write as _;
 use std::sync::{Arc, atomic::Ordering};
 
 use axum::{
@@ -10,7 +11,7 @@ use axum::{
 };
 use domain::{ForgeKind, PublishableEvent, WebhookEvent};
 use forge::{ForgeWebhookAdapter, ForgeWebhookError};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use serde_json::{Value, json};
 use sha2::Sha256;
 use tower::ServiceExt;
@@ -84,7 +85,14 @@ fn fixture(kind: &ForgeKind, merged: bool) -> Value {
 fn headers(kind: &ForgeKind, body: &[u8], delivery: &str) -> Vec<(String, String)> {
     let mut mac = Hmac::<Sha256>::new_from_slice(SECRET.as_bytes()).expect("HMAC");
     mac.update(body);
-    let signature = format!("{:x}", mac.finalize().into_bytes());
+    let signature = mac
+        .finalize()
+        .into_bytes()
+        .iter()
+        .fold(String::new(), |mut s, b| {
+            write!(s, "{b:02x}").expect("string");
+            s
+        });
     let (event_header, event, auth_header, auth, delivery_header) = match kind {
         ForgeKind::Forgejo => (
             "x-forgejo-event",

@@ -12,7 +12,7 @@ use domain::{
     ChangeRequestEventAction, ChangeRequestReview, ChangeRequestState, ForgeCredential, ForgeUser,
     Mergeability, ReadRepositoryFileResponse, RepositoryMergeSettings, RepositoryRef,
 };
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use reqwest::StatusCode;
 use reqwest::redirect::Policy;
 use serde::{Deserialize, Serialize};
@@ -3562,10 +3562,24 @@ fn verify_forgejo_signature(
         .map_err(|_| ForgeWebhookError::InvalidSignature)
 }
 
+/// Encode the raw payload's SHA-256 digest as 64 lowercase hexadecimal digits.
+fn payload_fingerprint(body: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    Sha256::digest(body)
+        .iter()
+        .flat_map(|byte| {
+            [
+                char::from(HEX[usize::from(byte >> 4)]),
+                char::from(HEX[usize::from(byte & 0x0f)]),
+            ]
+        })
+        .collect()
+}
+
 /// Hash only authenticated label-bearing deliveries, never the projected hint.
 fn label_payload_fingerprint(body: &[u8], labels_changed: bool) -> String {
     if labels_changed {
-        format!("{:x}", Sha256::digest(body))
+        payload_fingerprint(body)
     } else {
         String::new()
     }
@@ -3620,7 +3634,7 @@ mod tests {
     }
     use std::fmt::Write as _;
 
-    use hmac::{Hmac, Mac};
+    use hmac::{Hmac, KeyInit, Mac};
     use sha2::Sha256;
 
     use domain::ForgeCredential;
@@ -4457,6 +4471,81 @@ mod tests {
         assert_eq!(result[3].created_at, "2026-03-18T12:00:00Z");
         assert_eq!(result[3].kind, "comment");
         assert!(result[3].commit_id.is_none());
+    }
+
+    #[test]
+    fn payload_fingerprint_fixed_vectors() {
+        for (body, expected) in [
+            (
+                b"".as_slice(),
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            ),
+            (
+                b"abc".as_slice(),
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            ),
+        ] {
+            assert_eq!(payload_fingerprint(body), expected);
+            assert_eq!(label_payload_fingerprint(body, true), expected);
+            assert_eq!(label_payload_fingerprint(body, false), "");
+        }
+    }
+
+    #[test]
+    fn forgejo_signature_fixed_vector() {
+        // RFC 4231 test case 2: expected MAC is independent of our signing helpers.
+        let body = b"what do ya want for nothing?";
+        let signature = "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843";
+        for header in [
+            "x-forgejo-signature",
+            "X-Forgejo-Signature",
+            "X-Gitea-Signature",
+        ] {
+            for encoded in [
+                signature.to_string(),
+                format!(" {}\n", signature.to_uppercase()),
+            ] {
+                let headers = [(header.to_string(), encoded)];
+                assert!(verify_forgejo_signature(&headers, body, "Jefe").is_ok());
+                for (payload, key) in [
+                    (b"what do ya want for nothing!".as_slice(), "Jefe"),
+                    (b"what do ya want for nothing?\n".as_slice(), "Jefe"),
+                    (body.as_slice(), "wrong-key"),
+                ] {
+                    assert!(matches!(
+                        verify_forgejo_signature(&headers, payload, key),
+                        Err(ForgeWebhookError::InvalidSignature)
+                    ));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn forgejo_signature_rejects_malformed_and_incorrect_macs() {
+        let signature = "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843";
+        for encoded in [
+            String::new(),
+            " ".to_string(),
+            "0".to_string(),
+            "gg".repeat(32),
+            "é".repeat(32),
+            "00".to_string(),
+            signature[..62].to_string(),
+            format!("{signature}00"),
+            format!("00{}", &signature[2..]),
+            format!("{}00", &signature[..62]),
+        ] {
+            let headers = [("x-forgejo-signature".to_string(), encoded)];
+            assert!(matches!(
+                verify_forgejo_signature(&headers, b"what do ya want for nothing?", "Jefe"),
+                Err(ForgeWebhookError::InvalidSignature)
+            ));
+        }
+        assert!(matches!(
+            verify_forgejo_signature(&[], b"body", "Jefe"),
+            Err(ForgeWebhookError::MissingHeader(_))
+        ));
     }
 
     fn sign_payload(secret: &str, body: &[u8]) -> String {

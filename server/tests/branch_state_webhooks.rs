@@ -13,7 +13,7 @@ use domain::ForgeKind;
 use forge::github::{GitHubAdapter, GitHubConfig};
 use forge::gitlab::{GitLabAdapter, GitLabConfig};
 use forge::{ForgeAdapter, ForgeWebhookAdapter, ForgejoAdapter, ForgejoConfig};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use orchestrator::{ReadOrchestrator, WriteOrchestrator};
 use serde_json::{Value, json};
 use server::{
