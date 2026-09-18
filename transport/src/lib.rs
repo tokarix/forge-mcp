@@ -2244,6 +2244,34 @@ impl McpShim {
         self.gateway_post(url, &gw.token, &body).await
     }
 
+    /// Cancel a scheduled merge using the caller's gateway identity.
+    #[tool(
+        name = "cancel_auto_merge",
+        description = "Cancel scheduled auto-merge for a PR (Forgejo only). Authenticated bodyless DELETE; no head precondition. Only upstream 204 confirms cancellation. Every upstream 404 is uncertainty (502), including never-scheduled and repeated cancellation, even after a successful PR read. Read access need not grant cancellation rights. Does not undo completed merges or prevent future independent schedules."
+    )]
+    async fn cancel_auto_merge(
+        &self,
+        Parameters(request): Parameters<GetChangeRequestTool>,
+    ) -> Result<String, McpError> {
+        self.ensure_writable()?;
+        let gw = self.resolve_gateway(&request.forge).await?;
+        let url = Self::build_url(
+            &gw.url,
+            &[
+                "api",
+                "v1",
+                "repos",
+                &request.forge,
+                &request.owner,
+                &request.repo,
+                "pulls",
+                &request.index.to_string(),
+                "automerge",
+            ],
+        )?;
+        self.gateway_delete(url, &gw.token).await
+    }
+
     /// Schedule a pull request for automatic merge when all checks pass.
     #[tool(
         name = "schedule_auto_merge",
@@ -3969,6 +3997,100 @@ mod tests {
         let required = variant["required"].as_array().expect("required");
         for field in ["type", "commit", "message"] {
             assert!(required.contains(&serde_json::json!(field)));
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_read_only_precedes_discovery() {
+        let mock = wiremock::MockServer::start().await;
+        let mut config = test_config(&mock.uri());
+        config.read_only = true;
+        let shim = McpShim::new(config);
+        let error = shim
+            .cancel_auto_merge(Parameters(GetChangeRequestTool {
+                forge: "unknown".into(),
+                owner: "org".into(),
+                repo: "repo".into(),
+                index: 42,
+            }))
+            .await
+            .expect_err("read only");
+        assert!(error.message.contains("read-only mode"));
+        assert!(mock.received_requests().await.expect("requests").is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancellation_tool_schema_and_bodyless_gateway_request()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mock = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("DELETE"))
+            .and(wiremock::matchers::path(
+                "/api/v1/repos/test-forge/org/repo/pulls/42/automerge",
+            ))
+            .and(wiremock::matchers::header(
+                "authorization",
+                "Bearer test-token",
+            ))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        let (client, handle) = spawn_shim_and_client(test_config(&mock.uri())).await?;
+        let listing = client.list_tools(None).await?;
+        let tool = listing
+            .tools
+            .iter()
+            .find(|tool| tool.name == "cancel_auto_merge")
+            .expect("tool discovery");
+        let properties = tool.input_schema["properties"]
+            .as_object()
+            .expect("properties");
+        assert_eq!(properties.len(), 4);
+        for name in ["forge", "owner", "repo", "index"] {
+            assert!(properties.contains_key(name));
+        }
+        let result = client.call_tool(CallToolRequestParams::new("cancel_auto_merge").with_arguments(
+            serde_json::json!({"forge":"test-forge", "owner":"org", "repo":"repo", "index":42})
+                .as_object().expect("args").clone())).await?;
+        assert_ne!(result.is_error, Some(true));
+        let requests = mock.received_requests().await.expect("requests");
+        let deletes: Vec<_> = requests.iter().filter(|r| r.method == "DELETE").collect();
+        assert_eq!(deletes.len(), 1);
+        assert!(deletes[0].body.is_empty());
+        assert!(deletes[0].url.query().is_none());
+        drop(client);
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancellation_tool_propagates_gateway_failures() {
+        for status in [400, 401, 403, 500, 501, 502] {
+            let mock = wiremock::MockServer::start().await;
+            wiremock::Mock::given(wiremock::matchers::method("DELETE"))
+                .respond_with(
+                    wiremock::ResponseTemplate::new(status)
+                        .set_body_json(serde_json::json!({"error":"cancellation uncertain"})),
+                )
+                .expect(1)
+                .mount(&mock)
+                .await;
+            let shim = McpShim::new(test_config(&mock.uri()));
+            let error = shim
+                .cancel_auto_merge(Parameters(GetChangeRequestTool {
+                    forge: "test-forge".into(),
+                    owner: "org".into(),
+                    repo: "repo".into(),
+                    index: 42,
+                }))
+                .await
+                .expect_err("gateway failure");
+            let expected = if status == 401 {
+                "authentication failed"
+            } else {
+                "cancellation uncertain"
+            };
+            assert!(error.to_string().contains(expected));
         }
     }
 

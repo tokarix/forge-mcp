@@ -1442,6 +1442,30 @@ where
             .map_err(|e| ServiceError::Upstream(e.to_string()))
     }
 
+    #[tracing::instrument(skip_all, fields(operation = "cancel_auto_merge", target = request.index))]
+    async fn cancel_auto_merge(
+        &self,
+        request: domain::CancelAutoMergeRequest,
+        _authorized: domain::policy::AuthorizedWrite,
+        credential: &ForgeCredential,
+    ) -> Result<(), domain::CancelAutoMergeError> {
+        self.audit_sink
+            .record(AuditRecord {
+                agent: request.agent,
+                action: "cancel_auto_merge".into(),
+                repository: request.repository.clone(),
+                target: format!("#{}", request.index),
+            })
+            .await
+            .map_err(|_| {
+                tracing::warn!(stage = "audit", outcome = "failed", "cancellation blocked");
+                domain::CancelAutoMergeError::Audit
+            })?;
+        self.adapter
+            .cancel_auto_merge(&request.repository, request.index, credential)
+            .await
+    }
+
     async fn schedule_auto_merge(
         &self,
         request: ScheduleAutoMergeRequest,
@@ -5028,6 +5052,8 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
     }
 
     struct CredentialCapturingAdapter {
+        cancellation_result: Result<(), domain::CancelAutoMergeError>,
+        cancellation_target: Mutex<Option<(RepositoryRef, u64)>>,
         captured: std::sync::Mutex<CapturedCredential>,
     }
 
@@ -5035,6 +5061,8 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
         fn new() -> Self {
             Self {
                 captured: std::sync::Mutex::new(CapturedCredential::NotCalled),
+                cancellation_result: Ok(()),
+                cancellation_target: Mutex::new(None),
             }
         }
 
@@ -5052,6 +5080,18 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
 
     #[async_trait::async_trait]
     impl ForgeAdapter for CredentialCapturingAdapter {
+        async fn cancel_auto_merge(
+            &self,
+            repository: &RepositoryRef,
+            index: u64,
+            credential: &ForgeCredential,
+        ) -> Result<(), domain::CancelAutoMergeError> {
+            *self.captured.lock().expect("lock") =
+                CapturedCredential::Called(credential.token.clone());
+            *self.cancellation_target.lock().expect("lock") = Some((repository.clone(), index));
+            self.cancellation_result
+        }
+
         async fn add_issue_dependency(
             &self,
             _: &RepositoryRef,
@@ -5461,6 +5501,97 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
                 "unimplemented in test fake".into(),
             ))
         }
+    }
+
+    #[tokio::test]
+    async fn cancellation_forwards_target_and_typed_outcomes() {
+        use domain::{CancelAutoMergeError as Error, CancellationUncertainty as Reason};
+        for result in [
+            Ok(()),
+            Err(Error::Unauthorized),
+            Err(Error::Forbidden),
+            Err(Error::Unsupported),
+            Err(Error::Uncertain {
+                status: Some(404),
+                reason: Reason::Ambiguous404,
+            }),
+            Err(Error::Uncertain {
+                status: Some(202),
+                reason: Reason::UnexpectedStatus,
+            }),
+            Err(Error::Uncertain {
+                status: None,
+                reason: Reason::Transport,
+            }),
+            Err(Error::Uncertain {
+                status: None,
+                reason: Reason::Timeout,
+            }),
+        ] {
+            let mut adapter = CredentialCapturingAdapter::new();
+            adapter.cancellation_result = result;
+            let adapter = Arc::new(adapter);
+            let audit = Arc::new(InMemoryAuditSink::new());
+            let service = WriteOrchestrator::new(adapter.clone(), audit.clone(), None);
+            let template = comment_test_request(42);
+            let request = domain::CancelAutoMergeRequest {
+                agent: template.agent,
+                repository: template.repository,
+                index: 42,
+            };
+            assert_eq!(
+                service
+                    .cancel_auto_merge(
+                        request.clone(),
+                        default_authorized(),
+                        &ForgeCredential {
+                            token: Some("caller".into())
+                        }
+                    )
+                    .await,
+                result
+            );
+            assert_eq!(adapter.captured_token().as_deref(), Some("caller"));
+            assert_eq!(
+                *adapter.cancellation_target.lock().expect("lock"),
+                Some((request.repository.clone(), 42))
+            );
+            assert_eq!(
+                audit.records().expect("audit"),
+                vec![AuditRecord {
+                    agent: request.agent,
+                    repository: request.repository,
+                    action: "cancel_auto_merge".into(),
+                    target: "#42".into(),
+                }]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_failed_audit_prevents_adapter_call() {
+        let adapter = Arc::new(CredentialCapturingAdapter::new());
+        let service = WriteOrchestrator::new(adapter.clone(), Arc::new(FailingAuditSink), None);
+        let template = comment_test_request(42);
+        assert_eq!(
+            service
+                .cancel_auto_merge(
+                    domain::CancelAutoMergeRequest {
+                        agent: template.agent,
+                        repository: template.repository,
+                        index: 42,
+                    },
+                    default_authorized(),
+                    &ForgeCredential { token: None }
+                )
+                .await,
+            Err(domain::CancelAutoMergeError::Audit)
+        );
+        assert!(matches!(
+            *adapter.captured.lock().expect("lock"),
+            CapturedCredential::NotCalled
+        ));
+        assert!(adapter.cancellation_target.lock().expect("lock").is_none());
     }
 
     #[tokio::test]

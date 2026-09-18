@@ -1205,6 +1205,54 @@ pub struct RemoveIssueLabelRequest {
 /// Automatic review scheduling treats this as deferral, not upstream failure.
 pub const AUTO_MERGE_DRAFT_DEFERRAL: &str = "pull request is draft; auto-merge deferred";
 
+/// PR-scoped cancellation; no head or merge parameters apply.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CancelAutoMergeRequest {
+    pub agent: AgentIdentity,
+    pub repository: RepositoryRef,
+    pub index: u64,
+}
+
+/// Fixed reasons deliberately exclude provider bodies, URLs and credentials.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CancellationUncertainty {
+    Ambiguous404,
+    UnexpectedStatus,
+    Transport,
+    Timeout,
+}
+
+impl std::fmt::Display for CancellationUncertainty {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Ambiguous404 => "ambiguous_404",
+            Self::UnexpectedStatus => "unexpected_status",
+            Self::Transport => "transport",
+            Self::Timeout => "timeout",
+        })
+    }
+}
+
+/// Only a confirmed upstream 204 is success. Absence is never inferred.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Error)]
+pub enum CancelAutoMergeError {
+    #[error("auto-merge cancellation unauthorized")]
+    Unauthorized,
+    #[error("auto-merge cancellation forbidden")]
+    Forbidden,
+    #[error("auto-merge cancellation unsupported")]
+    Unsupported,
+    #[error(
+        "auto-merge cancellation uncertain: stage=delete reason={reason} upstream_status={status:?}"
+    )]
+    Uncertain {
+        status: Option<u16>,
+        reason: CancellationUncertainty,
+    },
+    #[error("auto-merge cancellation audit failed before write")]
+    Audit,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ScheduleAutoMergeRequest {
     pub agent: AgentIdentity,
@@ -1633,6 +1681,14 @@ pub trait RepositoryWriteService: Send + Sync {
         authorized: policy::AuthorizedWrite,
         credential: &ForgeCredential,
     ) -> Result<RebaseBranchResponse, ServiceError>;
+
+    /// Cancels a scheduled merge only when the provider confirms deletion.
+    async fn cancel_auto_merge(
+        &self,
+        request: CancelAutoMergeRequest,
+        authorized: policy::AuthorizedWrite,
+        credential: &ForgeCredential,
+    ) -> Result<(), CancelAutoMergeError>;
 
     /// Schedules a pull request for automatic merge when all branch
     /// protection requirements are met.

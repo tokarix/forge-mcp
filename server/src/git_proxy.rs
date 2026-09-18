@@ -971,6 +971,15 @@ mod tests {
 
     #[async_trait::async_trait]
     impl domain::RepositoryWriteService for FakeWriteService {
+        async fn cancel_auto_merge(
+            &self,
+            _request: domain::CancelAutoMergeRequest,
+            _authorized: domain::policy::AuthorizedWrite,
+            _credential: &domain::ForgeCredential,
+        ) -> Result<(), domain::CancelAutoMergeError> {
+            Err(domain::CancelAutoMergeError::Unsupported)
+        }
+
         async fn add_issue_dependency(
             &self,
             _: domain::AddIssueDependencyRequest,

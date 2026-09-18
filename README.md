@@ -631,6 +631,50 @@ Signed/token-verified deterministic fixtures cover normalization, HTTP
 publication, authorization/replay, deduplication and transport metadata.
 Provider processes and any live-delivery proof remain owned by dedicated CI.
 
+## Confirmed auto-merge cancellation
+
+`DELETE /api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}/automerge`
+and MCP `cancel_auto_merge(forge, owner, repo, index)` cancel a scheduled merge
+on Forgejo. DELETE has no body, head SHA, merge style, or branch-deletion flag.
+Gateway bearer authentication and repository authorization are required.
+The caller's forge credential takes precedence over the configured default;
+only callers without an override use that default. Rejected caller credentials
+are never retried with the default. Read access alone need not grant cancellation
+rights. GitHub and GitLab currently return unsupported without provider requests.
+
+| Condition | Gateway response |
+| --- | --- |
+| Exactly upstream 204 | 200 with JSON `{}` |
+| Missing/invalid gateway bearer, or upstream 401 | 401 |
+| Repository authorization denial, or upstream 403 | 403 |
+| Authorized unknown forge alias | 400 |
+| Unsupported backend | 501 |
+| Audit failure before the provider write | 500 |
+| Any upstream 404, unexpected status (including 200/202/501), redirect, timeout or transport failure | 502 |
+
+Only upstream 204 confirms cancellation. Forgejo 16.0.3 returns the same generic
+404 for an absent schedule and a missing PR; every such response remains 502,
+even after a successful same-credential PR read. Positive absence proof and
+successful never-scheduled/repeated cancellation are deferred. A successful
+DELETE whose response is lost can leave subsequent retries conservatively blocked
+indefinitely. No receipt or cache converts those retries to success.
+
+Cancellation audits the attempt before one bodyless provider DELETE. It performs
+no PR/head/settings reads, scheduling, status updates, branch deletion, or other
+PR mutations. Closed/merged state does not prove absence. Cancellation cannot undo
+an already completed merge or prevent an independently authorized future schedule.
+It is PR-scoped and does not promise head-specific cancellation or uniform success
+on repetition.
+
+Cockpit's revocation barrier remains intact: 200 permits the cancellation stage
+to proceed to its existing fresh-PR and binding/task-state checks; 401/403 retains
+an authorization diagnostic; 400/500/501/502 retains upstream uncertainty and
+`RevokePending`. This route removes the missing-method 405 but does not guarantee
+recovery of memory-server PR #65. It does not provide authoritative schedule
+status, serialized scheduling ownership, or every F2 remote-disarm guarantee.
+Provider-backed cancellation tests are ignored locally and run in the existing
+Forgejo CI lane; source findings and mock tests are not executed provider proof.
+
 ## Auto-merge scheduling
 
 Enqueued submitted approval webhooks schedule auto-merge by default for
@@ -944,7 +988,8 @@ Follow-up boundaries (not implemented here):
   It needs authorized fetches, resource/process limits, identity rechecks and
   permission-partitioned commit-pair caching. Errors remain uncertainty. No clone
   per list item or real merge/rebase probe. F1 is optional for this correction.
-- F2: provider-aware auto-merge status/cancellation with proven remote disarm,
+- F2: beyond the confirmed Forgejo cancellation endpoint above, provider-aware
+  auto-merge status/cancellation with proven remote disarm,
   authorization/audit, exact heads and serialized ownership generations. Assess
   GitLab scheduling's currently ignored head argument in that separate scope.
 - C1 (Cockpit): known drafts defer new owned review, conflict repair and scheduling;

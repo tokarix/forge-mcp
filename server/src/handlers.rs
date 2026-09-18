@@ -1361,6 +1361,85 @@ pub async fn get_pull_reviews(
 }
 
 #[utoipa::path(
+    delete,
+    path = "/api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}/automerge",
+    params(
+        ("forge" = String, Path, description = "Forge alias"),
+        ("owner" = String, Path, description = "Repository owner"),
+        ("repo" = String, Path, description = "Repository name"),
+        ("index" = u64, Path, description = "Pull request index"),
+    ),
+    responses(
+        (status = 200, description = "Confirmed cancellation (upstream 204), JSON {}"),
+        (status = 400, description = "Unknown forge alias or malformed target", body = ErrorBody),
+        (status = 401, description = "Gateway or upstream unauthorized", body = ErrorBody),
+        (status = 403, description = "Repository or upstream forbidden", body = ErrorBody),
+        (status = 500, description = "Audit failed before write", body = ErrorBody),
+        (status = 501, description = "Backend does not support cancellation", body = ErrorBody),
+        (status = 502, description = "Cancellation uncertain, including every upstream 404", body = ErrorBody),
+    ),
+    security(("bearer" = []))
+)]
+/// Bodyless PR-scoped cancellation. Only Forgejo 204 confirms success;
+/// even an accessible PR's 404 remains uncertain. No head precondition.
+pub async fn cancel_auto_merge(
+    State(state): State<AppState>,
+    Path(path): Path<PullPath>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let agent = resolve_agent(
+        &headers,
+        &state.agent_registry,
+        &path.forge,
+        &path.owner,
+        &path.repo,
+    )?;
+    let forge = state.forge_registry.get(&path.forge).ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorBody {
+                error: "unknown forge alias".into(),
+            }),
+        )
+    })?;
+    let credential = resolve_credential(agent, &path.forge, forge);
+    forge
+        .write_service
+        .cancel_auto_merge(
+            domain::CancelAutoMergeRequest {
+                agent: agent.identity.clone(),
+                repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
+                index: path.index,
+            },
+            domain::policy::AuthorizedWrite {
+                policy: agent.policy.clone(),
+            },
+            &credential,
+        )
+        .await
+        .map_err(map_cancellation_error)?;
+    Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(serde_json::json!({})))
+}
+
+fn map_cancellation_error(error: domain::CancelAutoMergeError) -> (StatusCode, Json<ErrorBody>) {
+    use domain::CancelAutoMergeError as Error;
+    let status = match error {
+        Error::Unauthorized => StatusCode::UNAUTHORIZED,
+        Error::Forbidden => StatusCode::FORBIDDEN,
+        Error::Unsupported => StatusCode::NOT_IMPLEMENTED,
+        Error::Uncertain { .. } => StatusCode::BAD_GATEWAY,
+        Error::Audit => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    tracing::warn!(operation = "cancel_auto_merge", outcome = "failed", reason = %error);
+    (
+        status,
+        Json(ErrorBody {
+            error: error.to_string(),
+        }),
+    )
+}
+
+#[utoipa::path(
     post,
     path = "/api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}/automerge",
     params(
@@ -3864,6 +3943,15 @@ mod tests {
 
     #[async_trait::async_trait]
     impl domain::RepositoryWriteService for FakeWriteService {
+        async fn cancel_auto_merge(
+            &self,
+            _request: domain::CancelAutoMergeRequest,
+            _authorized: domain::policy::AuthorizedWrite,
+            _credential: &domain::ForgeCredential,
+        ) -> Result<(), domain::CancelAutoMergeError> {
+            Err(domain::CancelAutoMergeError::Unsupported)
+        }
+
         async fn add_issue_dependency(
             &self,
             request: domain::AddIssueDependencyRequest,
@@ -4226,6 +4314,395 @@ mod tests {
 
     fn test_state() -> AppState {
         test_state_with_write(Arc::new(FakeWriteService::new()))
+    }
+
+    fn cancellation_state<S: audit::AuditSink + 'static>(
+        url: &str,
+        audit: Arc<S>,
+        caller: bool,
+    ) -> AppState {
+        let mut state = test_state();
+        let configs = [crate::config::AgentConfig {
+            agent_id: "codex".into(),
+            session_id: "cancel-session".into(),
+            token: "test-token".into(),
+            github_app: HashMap::new(),
+            forge_identity: if caller {
+                HashMap::from([(
+                    "test-forge".into(),
+                    crate::config::ForgeIdentityConfig {
+                        token: "caller-secret-marker".into(),
+                    },
+                )])
+            } else {
+                HashMap::new()
+            },
+            policy: AgentPolicyConfig {
+                allowed_repos: vec!["test-forge/org/repo".into(), "unknown/org/repo".into()],
+                branch_prefix: Some("agent/".into()),
+                protected_paths: vec![],
+            },
+        }];
+        state.agent_registry = AgentRegistry::from_configs(&configs);
+        let adapter = Arc::new(
+            forge::ForgejoAdapter::new(forge::ForgejoConfig {
+                base_url: url.into(),
+                token: Some("default-secret-marker".into()),
+                woodpecker_url: None,
+                woodpecker_token: None,
+            })
+            .expect("adapter"),
+        );
+        let mut instance =
+            test_forge_instance("test-forge", url, Arc::new(FakeWriteService::new()));
+        instance.adapter = adapter.clone();
+        instance.token = Some("default-secret-marker".into());
+        instance.write_service =
+            Arc::new(orchestrator::WriteOrchestrator::new(adapter, audit, None));
+        state.forge_registry = Arc::new(crate::registry::ForgeRegistry::new(HashMap::from([(
+            "test-forge".into(),
+            instance,
+        )])));
+        state
+    }
+
+    fn cancel_request(alias: &str, repo: &str, bearer: Option<&str>) -> Request<Body> {
+        let mut builder = Request::builder().method("DELETE").uri(format!(
+            "/api/v1/repos/{alias}/org/{repo}/pulls/42/automerge"
+        ));
+        if let Some(bearer) = bearer {
+            builder = builder.header("authorization", bearer);
+        }
+        builder.body(Body::empty()).expect("request")
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn cancellation_router_provider_contract_and_credentials() {
+        use tracing::instrument::WithSubscriber;
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+        // Other cancellation tests can first register shared tracing callsites
+        // without a subscriber, caching disabled interest process-wide. Keep
+        // the diagnostic assertions isolated while retaining parallel tests.
+        const CHILD: &str = "FORGE_MCP_CANCELLATION_DIAGNOSTICS_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status =
+                std::process::Command::new(std::env::current_exe().expect("test executable"))
+                    .args([
+                        "--exact",
+                        "handlers::tests::cancellation_router_provider_contract_and_credentials",
+                        "--nocapture",
+                    ])
+                    .env(CHILD, "1")
+                    .status()
+                    .expect("isolated cancellation diagnostics test");
+            assert!(status.success(), "isolated cancellation diagnostics failed");
+            return;
+        }
+        let capture = crate::diagnostics::tests::Capture::default();
+        let dispatch = tracing::Dispatch::new(capture.subscriber());
+        for caller in [true, false] {
+            for (upstream, expected) in [
+                (204, 200),
+                (401, 401),
+                (403, 403),
+                (404, 502),
+                (200, 502),
+                (202, 502),
+                (302, 502),
+                (405, 502),
+                (409, 502),
+                (429, 502),
+                (500, 502),
+                (501, 502),
+            ] {
+                let mock = MockServer::start().await;
+                let audit = Arc::new(audit::InMemoryAuditSink::new());
+                let observed_audit = audit.clone();
+                Mock::given(method("DELETE"))
+                    .respond_with(move |_: &wiremock::Request| {
+                        let records = observed_audit.records().expect("audit");
+                        assert_eq!(records.len(), 1, "audit must precede provider write");
+                        assert_eq!(records[0].action, "cancel_auto_merge");
+                        assert_eq!(records[0].agent.agent_id, "codex");
+                        assert_eq!(records[0].agent.session_id, "cancel-session");
+                        assert_eq!(records[0].target, "#42");
+                        assert_eq!(records[0].repository.owner, "org");
+                        assert_eq!(records[0].repository.name, "repo");
+                        ResponseTemplate::new(upstream)
+                            .set_body_string("provider-secret-marker already absent")
+                    })
+                    .expect(1)
+                    .mount(&mock)
+                    .await;
+                let app =
+                    crate::build_router(cancellation_state(&mock.uri(), audit, caller), false);
+                let log_start = capture.logs().len();
+                let response = app
+                    .oneshot(cancel_request(
+                        "test-forge",
+                        "repo",
+                        Some("Bearer test-token"),
+                    ))
+                    .with_subscriber(dispatch.clone())
+                    .await
+                    .expect("response");
+                assert_eq!(response.status().as_u16(), expected);
+                let body = axum::body::to_bytes(response.into_body(), 1024)
+                    .await
+                    .expect("body");
+                if expected == 200 {
+                    assert_eq!(&body[..], b"{}");
+                }
+                assert!(!String::from_utf8_lossy(&body).contains("secret-marker"));
+                let requests = mock.received_requests().await.expect("requests");
+                assert_eq!(requests.len(), 1, "no probes or other mutations");
+                assert_eq!(
+                    requests[0].url.path(),
+                    "/api/v1/repos/org/repo/pulls/42/merge"
+                );
+                assert!(requests[0].body.is_empty());
+                assert!(requests[0].url.query().is_none());
+                assert_eq!(
+                    requests[0].headers["authorization"],
+                    if caller {
+                        "Bearer caller-secret-marker"
+                    } else {
+                        "Bearer default-secret-marker"
+                    }
+                );
+                let all_logs = capture.logs();
+                let logs = &all_logs[log_start..];
+                for field in [
+                    "codex",
+                    "cancel-session",
+                    "test-forge",
+                    "org",
+                    "repo",
+                    "42",
+                    "delete",
+                    "upstream_status",
+                    "outcome",
+                ] {
+                    assert!(logs.contains(field), "missing {field}: {logs}");
+                }
+                assert!(!logs.contains("secret-marker"), "{logs}");
+                assert_eq!(logs.contains("confirmed_cancelled"), upstream == 204);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_authorization_precedes_resolution() {
+        let mock = wiremock::MockServer::start().await;
+        let audit = Arc::new(audit::InMemoryAuditSink::new());
+        let app = crate::build_router(cancellation_state(&mock.uri(), audit.clone(), true), false);
+        for (alias, repo, token, expected) in [
+            ("test-forge", "repo", None, 401),
+            ("unknown", "repo", None, 401),
+            ("unknown", "repo", Some("Bearer invalid"), 401),
+            ("unknown", "denied", Some("Bearer test-token"), 403),
+            ("test-forge", "denied", Some("Bearer test-token"), 403),
+            ("unknown", "repo", Some("Bearer test-token"), 400),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(cancel_request(alias, repo, token))
+                .await
+                .expect("response");
+            assert_eq!(response.status().as_u16(), expected);
+        }
+        assert!(audit.records().expect("audit").is_empty());
+        assert!(mock.received_requests().await.expect("requests").is_empty());
+    }
+
+    struct CancellationFailingAudit;
+    #[async_trait::async_trait]
+    impl audit::AuditSink for CancellationFailingAudit {
+        async fn record(&self, _: audit::AuditRecord) -> Result<(), audit::AuditError> {
+            Err(audit::AuditError::Unavailable)
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_audit_failure_blocks_provider_and_unsupported_is_501() {
+        let mock = wiremock::MockServer::start().await;
+        let app = crate::build_router(
+            cancellation_state(&mock.uri(), Arc::new(CancellationFailingAudit), true),
+            false,
+        );
+        let response = app
+            .oneshot(cancel_request(
+                "test-forge",
+                "repo",
+                Some("Bearer test-token"),
+            ))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(mock.received_requests().await.expect("requests").is_empty());
+        let response = crate::build_router(test_state(), false)
+            .oneshot(cancel_request(
+                "test-forge",
+                "repo",
+                Some("Bearer test-token"),
+            ))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+    }
+
+    #[tokio::test]
+    async fn cancellation_repetition_never_caches_success() {
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+        let mock = MockServer::start().await;
+        let audit = Arc::new(audit::InMemoryAuditSink::new());
+        let app = crate::build_router(cancellation_state(&mock.uri(), audit.clone(), true), false);
+        for status in [204, 404, 404] {
+            mock.reset().await;
+            Mock::given(method("DELETE"))
+                .respond_with(ResponseTemplate::new(status))
+                .expect(1)
+                .mount(&mock)
+                .await;
+            let response = app
+                .clone()
+                .oneshot(cancel_request(
+                    "test-forge",
+                    "repo",
+                    Some("Bearer test-token"),
+                ))
+                .await
+                .expect("response");
+            assert_eq!(
+                response.status().as_u16(),
+                if status == 204 { 200 } else { 502 }
+            );
+            assert_eq!(mock.received_requests().await.expect("requests").len(), 1);
+        }
+        assert_eq!(audit.records().expect("audit").len(), 3);
+    }
+
+    #[tokio::test]
+    async fn cancellation_prior_reads_and_terminal_states_never_prove_absence() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+        for (state, merged, head) in [
+            ("open", false, Some("changed-head")),
+            ("open", false, None),
+            ("closed", false, Some("closed-head")),
+            ("closed", true, Some("merged-head")),
+        ] {
+            for status in [204, 404] {
+                let mock = MockServer::start().await;
+                Mock::given(method("GET"))
+                    .and(path("/api/v1/repos/org/repo/pulls/42"))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "base":{"ref":"main","sha":"base"}, "head":{"ref":"topic","sha":head},
+                        "html_url":"https://example/pull/42", "merged":merged, "number":42,
+                        "state":state, "title":"Fixture", "mergeable":false
+                    })))
+                    .expect(1)
+                    .mount(&mock)
+                    .await;
+                Mock::given(method("DELETE"))
+                    .respond_with(
+                        ResponseTemplate::new(status)
+                            .set_body_string("No scheduled merge; already merged; already absent"),
+                    )
+                    .expect(1)
+                    .mount(&mock)
+                    .await;
+                let app_state = cancellation_state(
+                    &mock.uri(),
+                    Arc::new(audit::InMemoryAuditSink::new()),
+                    true,
+                );
+                let instance = app_state
+                    .forge_registry
+                    .get("test-forge")
+                    .expect("instance");
+                // Test setup only: cancellation itself must not perform this read.
+                let read = instance
+                    .adapter
+                    .get_change_request(
+                        &repo_ref("test-forge", "org", "repo", instance),
+                        42,
+                        &domain::ForgeCredential {
+                            token: Some("caller-secret-marker".into()),
+                        },
+                    )
+                    .await;
+                assert_eq!(read.is_ok(), head.is_some());
+                let response = crate::build_router(app_state, false)
+                    .oneshot(cancel_request(
+                        "test-forge",
+                        "repo",
+                        Some("Bearer test-token"),
+                    ))
+                    .await
+                    .expect("response");
+                assert_eq!(
+                    response.status().as_u16(),
+                    if status == 204 { 200 } else { 502 }
+                );
+                let requests = mock.received_requests().await.expect("requests");
+                assert_eq!(requests.len(), 2, "only setup GET and cancellation DELETE");
+                assert_eq!(requests[0].method, "GET");
+                assert_eq!(requests[1].method, "DELETE");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_transport_and_malformed_target_never_return_404() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let url = format!("http://{}", listener.local_addr().expect("address"));
+        drop(listener);
+        let app = crate::build_router(
+            cancellation_state(&url, Arc::new(audit::InMemoryAuditSink::new()), true),
+            false,
+        );
+        let response = app
+            .clone()
+            .oneshot(cancel_request(
+                "test-forge",
+                "repo",
+                Some("Bearer test-token"),
+            ))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/repos/test-forge/org/repo/pulls/not-a-number/automerge")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn cancellation_openapi_is_bodyless_and_conservative() {
+        use utoipa::OpenApi;
+        let schema = serde_json::to_value(crate::ApiDoc::openapi()).expect("schema");
+        let path = &schema["paths"]["/api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}/automerge"];
+        assert!(path.get("post").is_some());
+        let delete = &path["delete"];
+        assert!(delete.get("requestBody").is_none());
+        for status in ["200", "400", "401", "403", "500", "501", "502"] {
+            assert!(delete["responses"].get(status).is_some());
+        }
+        assert!(delete["responses"].get("404").is_none());
     }
 
     #[tokio::test]

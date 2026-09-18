@@ -646,6 +646,16 @@ pub trait ForgeAdapter: Send + Sync {
         credential: &ForgeCredential,
     ) -> Result<Vec<domain::Repository>, ForgeError>;
 
+    /// Cancels a scheduled merge. Unsupported backends perform no request.
+    async fn cancel_auto_merge(
+        &self,
+        _repository: &RepositoryRef,
+        _index: u64,
+        _credential: &ForgeCredential,
+    ) -> Result<(), domain::CancelAutoMergeError> {
+        Err(domain::CancelAutoMergeError::Unsupported)
+    }
+
     /// Schedules a pull request for automatic merge when all branch
     /// protection requirements are met.
     async fn schedule_auto_merge(
@@ -785,6 +795,7 @@ impl std::fmt::Debug for ForgejoConfig {
 #[derive(Clone, Debug)]
 pub struct ForgejoAdapter {
     client: reqwest::Client,
+    cancellation_client: reqwest::Client,
     config: ForgejoConfig,
 }
 
@@ -1075,6 +1086,13 @@ impl ForgejoAdapter {
         Ok(Self {
             client: reqwest::Client::builder()
                 .redirect(Policy::none())
+                .build()?,
+            // Cancellation must not inherit reqwest's protocol-level retries.
+            // Keep the existing client policy unchanged for other operations.
+            cancellation_client: reqwest::Client::builder()
+                .redirect(Policy::none())
+                .retry(reqwest::retry::never())
+                .timeout(Duration::from_secs(30))
                 .build()?,
             config,
         })
@@ -2739,6 +2757,68 @@ impl ForgeAdapter for ForgejoAdapter {
     }
 
     #[tracing::instrument(skip_all, fields(
+        operation = "cancel_auto_merge", method = "DELETE",
+        forge = %diagnostic_target(&repository.alias),
+        owner = %diagnostic_target(&repository.owner),
+        repo = %diagnostic_target(&repository.name), target = index
+    ))]
+    async fn cancel_auto_merge(
+        &self,
+        repository: &RepositoryRef,
+        index: u64,
+        credential: &ForgeCredential,
+    ) -> Result<(), domain::CancelAutoMergeError> {
+        use domain::{CancelAutoMergeError as Error, CancellationUncertainty as Reason};
+        let url = format!(
+            "{}/api/v1/repos/{}/{}/pulls/{index}/merge",
+            self.config.base_url.trim_end_matches('/'),
+            repository.owner,
+            repository.name,
+        );
+        let mut request = self.cancellation_client.delete(url);
+        if let Some(token) = credential.token.as_deref().or(self.config.token.as_deref()) {
+            request = request.bearer_auth(token);
+        }
+        let response = request.send().await.map_err(|error| {
+            let reason = if error.is_timeout() {
+                Reason::Timeout
+            } else {
+                Reason::Transport
+            };
+            tracing::warn!(stage = "delete", %reason, outcome = "uncertain", "cancellation failed");
+            Error::Uncertain {
+                status: None,
+                reason,
+            }
+        })?;
+        let status = response.status().as_u16();
+        let result = match status {
+            204 => Ok(()),
+            401 => Err(Error::Unauthorized),
+            403 => Err(Error::Forbidden),
+            404 => Err(Error::Uncertain {
+                status: Some(status),
+                reason: Reason::Ambiguous404,
+            }),
+            _ => Err(Error::Uncertain {
+                status: Some(status),
+                reason: Reason::UnexpectedStatus,
+            }),
+        };
+        match &result {
+            Ok(()) => tracing::info!(
+                stage = "delete",
+                upstream_status = status,
+                outcome = "confirmed_cancelled"
+            ),
+            Err(error) => {
+                tracing::warn!(stage = "delete", upstream_status = status, outcome = "failed", reason = %error);
+            }
+        }
+        result
+    }
+
+    #[tracing::instrument(skip_all, fields(
         operation = "schedule_auto_merge", method = "POST",
         forge = %diagnostic_target(&repository.alias),
         owner = %diagnostic_target(&repository.owner),
@@ -4076,6 +4156,140 @@ mod tests {
             .await;
 
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn cancellation_unsupported_backends_make_no_request() {
+        let mock = MockServer::start().await;
+        let github = github::GitHubAdapter::new(github::GitHubConfig {
+            api_url: mock.uri(),
+            token: Some("default".into()),
+        })
+        .expect("github");
+        let gitlab = gitlab::GitLabAdapter::new(gitlab::GitLabConfig {
+            base_url: mock.uri(),
+            token: Some("default".into()),
+        })
+        .expect("gitlab");
+        for adapter in [&github as &dyn ForgeAdapter, &gitlab as &dyn ForgeAdapter] {
+            assert_eq!(
+                adapter
+                    .cancel_auto_merge(
+                        &test_repo(),
+                        42,
+                        &ForgeCredential {
+                            token: Some("caller".into()),
+                        }
+                    )
+                    .await,
+                Err(domain::CancelAutoMergeError::Unsupported)
+            );
+        }
+        assert!(mock.received_requests().await.expect("requests").is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancellation_exact_status_matrix_and_no_other_requests() {
+        use domain::{CancelAutoMergeError as Error, CancellationUncertainty as Reason};
+        for status in [
+            204, 200, 202, 301, 302, 307, 308, 401, 403, 404, 405, 409, 429, 500, 501, 503,
+        ] {
+            let mock = MockServer::start().await;
+            let destination = MockServer::start().await;
+            Mock::given(method("DELETE"))
+                .and(path_regex("^/api/v1/repos/org/repo/pulls/42/merge$"))
+                .and(header("authorization", "Bearer caller-secret-marker"))
+                .respond_with(
+                    ResponseTemplate::new(status)
+                        .insert_header("location", destination.uri())
+                        .set_body_string(
+                            "already absent provider-secret-marker https://url-secret-marker",
+                        ),
+                )
+                .expect(1)
+                .mount(&mock)
+                .await;
+            let result = test_adapter(&mock.uri())
+                .cancel_auto_merge(
+                    &test_repo(),
+                    42,
+                    &ForgeCredential {
+                        token: Some("caller-secret-marker".into()),
+                    },
+                )
+                .await;
+            let expected = match status {
+                204 => Ok(()),
+                401 => Err(Error::Unauthorized),
+                403 => Err(Error::Forbidden),
+                404 => Err(Error::Uncertain {
+                    status: Some(status),
+                    reason: Reason::Ambiguous404,
+                }),
+                _ => Err(Error::Uncertain {
+                    status: Some(status),
+                    reason: Reason::UnexpectedStatus,
+                }),
+            };
+            assert_eq!(result, expected);
+            if let Err(error) = result {
+                let text = error.to_string();
+                assert!(text.len() < 160);
+                assert!(!text.contains("secret-marker"));
+            }
+            let requests = mock.received_requests().await.expect("requests");
+            assert_eq!(requests.len(), 1);
+            assert!(requests[0].body.is_empty());
+            assert!(requests[0].url.query().is_none());
+            assert!(
+                destination
+                    .received_requests()
+                    .await
+                    .expect("redirect requests")
+                    .is_empty()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_transport_and_timeout_are_bounded() {
+        use domain::{CancelAutoMergeError as Error, CancellationUncertainty as Reason};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let url = format!("http://{}", listener.local_addr().expect("address"));
+        drop(listener);
+        let result = test_adapter(&url)
+            .cancel_auto_merge(&test_repo(), 42, &ForgeCredential { token: None })
+            .await;
+        assert_eq!(
+            result,
+            Err(Error::Uncertain {
+                status: None,
+                reason: Reason::Transport
+            })
+        );
+        let mock = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .respond_with(ResponseTemplate::new(204).set_delay(Duration::from_millis(100)))
+            .mount(&mock)
+            .await;
+        let mut adapter = test_adapter(&mock.uri());
+        adapter.cancellation_client = reqwest::Client::builder()
+            .read_timeout(Duration::from_millis(10))
+            .redirect(Policy::none())
+            .build()
+            .expect("client");
+        let result = adapter
+            .cancel_auto_merge(&test_repo(), 42, &ForgeCredential { token: None })
+            .await;
+        assert_eq!(
+            result,
+            Err(Error::Uncertain {
+                status: None,
+                reason: Reason::Timeout
+            })
+        );
     }
 
     #[tokio::test]

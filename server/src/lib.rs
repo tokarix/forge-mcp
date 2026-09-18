@@ -51,6 +51,7 @@ use utoipa_scalar::{Scalar, Servable};
         handlers::remove_issue_dependency,
         handlers::remove_issue_label,
         handlers::schedule_auto_merge,
+        handlers::cancel_auto_merge,
         handlers::submit_pull_review,
         handlers::update_issue,
         handlers::update_pull,
@@ -178,7 +179,7 @@ pub fn build_router(state: AppState, enable_docs: bool) -> Router {
         )
         .route(
             "/api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}/automerge",
-            post(handlers::schedule_auto_merge),
+            post(handlers::schedule_auto_merge).delete(handlers::cancel_auto_merge),
         )
         .route(
             "/api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}/checks",

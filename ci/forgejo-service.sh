@@ -51,7 +51,9 @@ ROOT_PATH = $work_path/log
 EOF
 
 forgejo --work-path "$work_path" --config "$config_path" migrate
+# The cancellation fixture uses the admin API to create and clean up reader users.
 forgejo --work-path "$work_path" --config "$config_path" admin user create \
+  --admin \
   --username "$FORGEJO_BOOTSTRAP_USERNAME" \
   --password "$FORGEJO_BOOTSTRAP_PASSWORD" \
   --email "$FORGEJO_BOOTSTRAP_EMAIL" \

@@ -1,3 +1,5 @@
+#[path = "support/cancellation.rs"]
+mod cancellation;
 mod support;
 
 use domain::{ForgeCredential, ForgeKind, RepositoryRef};
