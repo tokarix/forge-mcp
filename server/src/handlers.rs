@@ -4230,6 +4230,153 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
+    async fn explicit_and_review_schedules_share_draft_deferral() {
+        use forge::ForgeWebhookAdapter;
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+        for draft in [Some(true), Some(false), None] {
+            let mock = MockServer::start().await;
+            let schedules = if draft == Some(true) { 0 } else { 2 };
+            Mock::given(method("GET"))
+                .and(path("/api/v1/repos/org/repo/pulls/42"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "base":{"ref":"main","sha":"base"}, "head":{"ref":"topic","sha":"abc123"},
+                    "html_url":"https://example/pull/42", "merged":false, "number":42,
+                    "state":"open", "title":"PR", "draft":draft, "mergeable":true
+                })))
+                .expect(2)
+                .mount(&mock)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/api/v1/repos/org/repo"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "allow_rebase":true,"default_merge_style":"rebase"
+                })))
+                .expect(schedules)
+                .mount(&mock)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/api/v1/repos/org/repo/pulls/42/merge"))
+                .respond_with(ResponseTemplate::new(200))
+                .expect(schedules)
+                .mount(&mock)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/api/v1/repos/org/repo/statuses/abc123"))
+                .respond_with(ResponseTemplate::new(201))
+                .expect(schedules)
+                .mount(&mock)
+                .await;
+            let adapter = Arc::new(
+                forge::ForgejoAdapter::new(forge::ForgejoConfig {
+                    base_url: mock.uri(),
+                    token: None,
+                    woodpecker_url: None,
+                    woodpecker_token: None,
+                })
+                .expect("adapter"),
+            );
+            let audit = Arc::new(audit::InMemoryAuditSink::new());
+            let mut state = test_state();
+            let mut instance =
+                test_forge_instance("test-forge", &mock.uri(), Arc::new(FakeWriteService::new()));
+            instance.write_service = Arc::new(orchestrator::WriteOrchestrator::new(
+                adapter,
+                Arc::clone(&audit),
+                None,
+            ));
+            let registry = Arc::new(crate::registry::ForgeRegistry::new(HashMap::from([(
+                "test-forge".into(),
+                instance,
+            )])));
+            state.forge_registry = Arc::clone(&registry);
+            let bus = crate::events::EventBus::new();
+            let mut events = bus.subscribe(
+                "codex".into(),
+                AgentPolicyConfig {
+                    allowed_repos: vec!["test-forge/org/repo".into()],
+                    branch_prefix: None,
+                    protected_paths: vec![],
+                },
+                "draft-guard".into(),
+                None,
+            );
+            let automatic = crate::auto_merge::AutoMergeService::new(bus, registry);
+            let app = crate::build_router(state, false);
+            // Authorization still rejects unauthenticated explicit requests before get.
+            let denied = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/repos/test-forge/org/repo/pulls/42/automerge")
+                        .header("content-type", "application/json")
+                        .body(Body::from(r#"{"expected_head_sha":"abc123"}"#))
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/repos/test-forge/org/repo/pulls/42/automerge")
+                        .header("authorization", "Bearer test-token")
+                        .header("content-type", "application/json")
+                        .body(Body::from(r#"{"expected_head_sha":"abc123"}"#))
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(
+                response.status(),
+                if draft == Some(true) {
+                    StatusCode::BAD_REQUEST
+                } else {
+                    StatusCode::OK
+                }
+            );
+            if draft == Some(true) {
+                let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .expect("body");
+                assert!(
+                    String::from_utf8_lossy(&bytes).contains(domain::AUTO_MERGE_DRAFT_DEFERRAL)
+                );
+            }
+            let event = ApprovedReviewWebhookAdapter
+                .verify_and_parse_webhook_event(
+                    &[],
+                    b"{}",
+                    "test-forge",
+                    ForgeKind::Forgejo,
+                    &mock.uri(),
+                    "",
+                )
+                .expect("event")
+                .expect("review");
+            let review = match event {
+                domain::WebhookEvent::PullRequestReview(review) => Some(review),
+                _ => None,
+            }
+            .expect("review fixture");
+            automatic.handle_review(review).await;
+            assert!(matches!(
+                events.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ));
+            assert_eq!(audit.records().expect("audit").len() as u64, schedules);
+            mock.verify().await;
+            let requests = mock.received_requests().await.expect("requests");
+            assert_eq!(requests.len() as u64, 2 + schedules * 3);
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn diagnostics_auto_merge_failure_stages() {
         use tracing::instrument::WithSubscriber;
         use wiremock::{

@@ -1475,6 +1475,14 @@ where
             )));
         }
 
+        // Known drafts defer new schedules before settings, audit or writes.
+        // Unknown metadata retains compatibility; it is not proof of readiness.
+        if pr.draft == Some(true) {
+            return Err(ServiceError::Validation(
+                domain::AUTO_MERGE_DRAFT_DEFERRAL.to_string(),
+            ));
+        }
+
         // 5. Load merge settings for validation and default behavior.
         let merge_settings = self
             .adapter
@@ -5499,6 +5507,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
     // --- schedule_auto_merge tests ---
 
     struct AutoMergeTestForgeAdapter {
+        draft: Option<bool>,
         allowed_merge_styles: Vec<String>,
         default_delete_branch_after_merge: Option<bool>,
         default_merge_style: Option<String>,
@@ -5511,6 +5520,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
     impl AutoMergeTestForgeAdapter {
         fn new(head_sha: &str) -> Self {
             Self {
+                draft: None,
                 allowed_merge_styles: vec!["rebase".to_string(), "squash".to_string()],
                 default_delete_branch_after_merge: Some(true),
                 default_merge_style: Some("rebase".to_string()),
@@ -5814,7 +5824,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             _credential: &domain::ForgeCredential,
         ) -> Result<ChangeRequest, ForgeError> {
             Ok(ChangeRequest {
-                draft: None,
+                draft: self.draft,
                 base_branch: "main".to_string(),
                 body: String::new(),
                 changed_files_count: None,
@@ -6001,6 +6011,58 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
     }
 
     #[tokio::test]
+    async fn schedule_auto_merge_draft_guard_preserves_head_checks_and_has_no_side_effects() {
+        for (expected_head, expected_reason) in [
+            ("abc123", domain::AUTO_MERGE_DRAFT_DEFERRAL),
+            ("stale", "does not match current"),
+        ] {
+            let mut fake = AutoMergeTestForgeAdapter::new("abc123");
+            fake.draft = Some(true);
+            let adapter = Arc::new(fake);
+            let audit = Arc::new(InMemoryAuditSink::new());
+            let orchestrator =
+                WriteOrchestrator::new(Arc::clone(&adapter), Arc::clone(&audit), None);
+            let error = orchestrator
+                .schedule_auto_merge(
+                    omitted_auto_merge_test_request(expected_head),
+                    default_authorized(),
+                    &domain::ForgeCredential { token: None },
+                )
+                .await
+                .expect_err("draft or stale head must defer");
+            assert!(
+                matches!(error, ServiceError::Validation(ref reason) if reason.contains(expected_reason))
+            );
+            assert!(adapter.recorded_merge_styles().is_empty());
+            assert!(adapter.recorded_commit_statuses().is_empty());
+            assert!(audit.records().expect("audit").is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn schedule_auto_merge_ready_and_unknown_remain_compatible() {
+        for draft in [Some(false), None] {
+            let mut fake = AutoMergeTestForgeAdapter::new("abc123");
+            fake.draft = draft;
+            let adapter = Arc::new(fake);
+            let audit = Arc::new(InMemoryAuditSink::new());
+            let orchestrator =
+                WriteOrchestrator::new(Arc::clone(&adapter), Arc::clone(&audit), None);
+            orchestrator
+                .schedule_auto_merge(
+                    omitted_auto_merge_test_request("abc123"),
+                    default_authorized(),
+                    &domain::ForgeCredential { token: None },
+                )
+                .await
+                .expect("compatible schedule");
+            assert_eq!(adapter.recorded_merge_styles().len(), 1);
+            assert_eq!(adapter.recorded_commit_statuses().len(), 1);
+            assert_eq!(audit.records().expect("audit").len(), 1);
+        }
+    }
+
+    #[tokio::test]
     async fn schedule_auto_merge_valid_merge_style() {
         let adapter = Arc::new(AutoMergeTestForgeAdapter::new("abc123"));
         let audit = Arc::new(InMemoryAuditSink::new());
@@ -6173,6 +6235,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
     #[tokio::test]
     async fn schedule_auto_merge_missing_head_sha() {
         let adapter = Arc::new(AutoMergeTestForgeAdapter {
+            draft: None,
             allowed_merge_styles: vec!["rebase".to_string(), "squash".to_string()],
             default_delete_branch_after_merge: Some(true),
             default_merge_style: Some("rebase".to_string()),

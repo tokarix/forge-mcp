@@ -972,3 +972,13 @@ strict decoders need inventory and Rust constructors need the new field. Existin
 Forgejo draft hints are unsupported, so polling is required; GitHub/GitLab refresh
 hints only expedite authoritative reads. This correction alone does not remediate
 already-armed schedules or the incomplete-worker incident.
+
+New auto-merge schedules re-read the PR and validate the expected head, then reject
+`draft=true` with `pull request is draft; auto-merge deferred` before repository
+settings, success audit, provider scheduling or synthetic status writes. Explicit
+REST/MCP callers receive validation failure; submitted-approval scheduling treats
+this exact validation as expected deferral without `AutoMergeFailed`. Other
+failures remain visible. Unknown draft retains existing gateway scheduling
+behavior for compatibility and is not readiness; C1's owned policy is stricter.
+This guard does not cancel already-armed remote schedules and does not eliminate
+the race between reading draft state and scheduling. Those require F2/C1.

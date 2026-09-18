@@ -2247,7 +2247,7 @@ impl McpShim {
     /// Schedule a pull request for automatic merge when all checks pass.
     #[tool(
         name = "schedule_auto_merge",
-        description = "Schedule a pull request for automatic merge when all branch protection requirements are met. Requires the expected head SHA to prevent scheduling on a stale PR. The merge style is optional; when omitted, the repository default is used when allowed, followed by the scheduler fallback order."
+        description = "Schedule a pull request for automatic merge when all branch protection requirements are met. Requires the expected head SHA to prevent scheduling on a stale PR. Known drafts return validation deferral; this does not cancel existing schedules. The merge style is optional; when omitted, the repository default is used when allowed, followed by the scheduler fallback order."
     )]
     async fn schedule_auto_merge(
         &self,
@@ -4260,6 +4260,34 @@ mod tests {
 
         drop(client);
         server_handle.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn schedule_auto_merge_propagates_draft_validation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mock = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path(
+                "/api/v1/repos/test-forge/org/repo/pulls/42/automerge",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                    "error": "pull request is draft; auto-merge deferred"
+                })),
+            )
+            .expect(1)
+            .mount(&mock)
+            .await;
+        let shim = McpShim::new(test_config(&mock.uri()));
+        let error = shim.schedule_auto_merge(Parameters(serde_json::from_value(serde_json::json!({
+            "forge":"test-forge", "owner":"org", "repo":"repo", "index":42, "expected_head_sha":"abc123"
+        }))?)).await.expect_err("draft validation must reach MCP caller");
+        assert!(
+            error
+                .to_string()
+                .contains("pull request is draft; auto-merge deferred")
+        );
         Ok(())
     }
 

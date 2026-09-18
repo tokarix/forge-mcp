@@ -97,6 +97,11 @@ impl AutoMergeService {
     }
 
     fn handle_error(&self, event: &PullRequestReviewEvent, error: &ServiceError) {
+        if matches!(error, ServiceError::Validation(reason) if reason == domain::AUTO_MERGE_DRAFT_DEFERRAL)
+        {
+            tracing::debug!(reason = "draft", "auto-merge: draft, deferring");
+            return;
+        }
         let msg = error.to_string();
         if msg.contains("does not match current") || msg.contains("head SHA") {
             tracing::debug!(

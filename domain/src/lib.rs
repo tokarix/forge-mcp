@@ -1201,6 +1201,10 @@ pub struct RemoveIssueLabelRequest {
     pub repository: RepositoryRef,
 }
 
+/// Stable validation reason for a known draft's new auto-merge schedule.
+/// Automatic review scheduling treats this as deferral, not upstream failure.
+pub const AUTO_MERGE_DRAFT_DEFERRAL: &str = "pull request is draft; auto-merge deferred";
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ScheduleAutoMergeRequest {
     pub agent: AgentIdentity,
