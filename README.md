@@ -692,7 +692,15 @@ Woodpecker is the service-backed integration authority. The separate
 `checks` workflow runs the normal Rust gates and lints both workflow files with
 Woodpecker CLI 2.8.3. After it succeeds, `forgejo-integration` starts the pinned
 `codeberg.org/forgejo/forgejo:16.0.3-rootless` image as a detached `forgejo`
-step. Later steps reach it at `http://forgejo:3000`. The fixture uses bounded
+step. This workflow places the checkout directly at the shared `/woodpecker`
+volume root, avoiding the nested default checkout path that failed with
+`Permission denied` in the rootless service's generated startup wrapper.
+A foreground `forgejo-preflight` step uses the same rootless image to check
+checkout access, script executability, `/tmp` writability, and the Forgejo binary
+before the detached service starts. A workspace failure therefore fails a normal
+step instead of being hidden behind the integration readiness timeout. It does
+not run Forgejo as root or change host permissions.
+Later steps reach the service at `http://forgejo:3000`. The fixture uses bounded
 readiness polling, authenticates the throwaway user, creates a short-lived API
 token, and reports redacted, bounded diagnostics. Repositories and tokens are
 logically cleaned up, while the user, SQLite database, repositories, and all

@@ -6,9 +6,27 @@ when:
 depends_on:
   - checks
 
+# Keep the checkout at the shared volume root. The rootless service must not
+# create the default /woodpecker/src/<forge>/<owner>/<repo> hierarchy.
+workspace:
+  base: /woodpecker
+  path: .
+
 steps:
+  forgejo-preflight:
+    image: codeberg.org/forgejo/forgejo:16.0.3-rootless
+    commands:
+      - id
+      - pwd
+      - test -r ci/forgejo-service.sh
+      - test -x ci/forgejo-service.sh
+      - test -w /tmp
+      - forgejo --version
+
   forgejo:
     image: codeberg.org/forgejo/forgejo:16.0.3-rootless
+    depends_on:
+      - forgejo-preflight
     detach: true
     commands:
       - ci/forgejo-service.sh
