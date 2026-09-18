@@ -510,6 +510,15 @@ pub struct RebaseBranchTool {
     /// For squash/fixup cleanup, `{"type":"rebase_onto"}` is wrong; use
     /// `{"type":"fixup","commit":"<fix_sha>","into":"<original_sha>"}`.
     /// Supported operations also include `{"type":"drop","commit":"<sha>"}`.
+    /// Message-only mode accepts one or more distinct rewords, exclusively:
+    /// `{"type":"reword","commit":"<full-id>","message":"Subject\n"}`.
+    /// Targets must be exact full IDs in merge-base..original-head. Request
+    /// order does not change commit order. Messages must be nonblank, NUL-free,
+    /// and at most 65536 UTF-8 bytes. Trailing newlines are retained; one LF is
+    /// appended if absent. Returns `old_commit_sha` and a complete ordered
+    /// `commit_mapping`. Targets and descendants may change IDs and lose old
+    /// signatures; earlier IDs, trees, authors and author dates are preserved.
+    /// Uses the server's existing committer policy and current committer dates.
     pub operations: Vec<RebaseBranchOperationTool>,
     /// Repository owner or organization.
     pub owner: String,
@@ -520,6 +529,13 @@ pub struct RebaseBranchTool {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RebaseBranchOperationTool {
+    Reword {
+        /// Exact full object ID within merge-base..original-head.
+        commit: String,
+        /// Replacement message: nonblank, no NUL, at most 65536 UTF-8 bytes.
+        /// Retains trailing newlines, or appends one LF if absent.
+        message: String,
+    },
     Drop {
         /// Full SHA of the commit to remove.
         commit: String,
@@ -2171,7 +2187,7 @@ impl McpShim {
     /// Rewrite a branch with explicit operations or update its base.
     #[tool(
         name = "rebase_branch",
-        description = "Rewrite a branch with explicit operations or update its base. Use `rebase_onto` only to replay the existing branch commits onto the latest `base_branch` tip. It preserves the branch's commits as separate commits and does not squash, fix up, drop, rename, or reorder them. For review-driven commit hygiene, use explicit `fixup` and/or `drop` operations with full commit SHAs. This is the REQUIRED way to rewrite history and force-push (raw `git push` is strictly blocked). Performs a full clone, validates operations, runs the rebase, and force-pushes with lease. Only works on branches matching your configured branch prefix."
+        description = "Rewrite a branch with explicit operations or update its base. Use `rebase_onto` only to replay the existing branch commits onto the latest `base_branch` tip. It preserves the branch's commits as separate commits and does not squash, fix up, drop, rename, or reorder them. For review-driven commit hygiene, use explicit `fixup` and/or `drop` operations with full commit SHAs. Use exclusive reword-only operations to replace messages for distinct exact full IDs in merge-base..original-head, preserving commit order and trees. Messages must be nonblank, NUL-free and at most 65536 UTF-8 bytes; retain supplied trailing newlines or append one LF if absent. Reword returns old_commit_sha and the complete ordered commit_mapping. Targets and descendants may change IDs and lose signatures; authors and author dates are preserved, with the existing server committer policy and current committer dates. This is the REQUIRED way to rewrite history and force-push (raw `git push` is strictly blocked). Performs a full clone, validates operations, runs the rebase, and force-pushes with lease. Only works on branches matching your configured branch prefix."
     )]
     async fn rebase_branch(
         &self,
@@ -2196,6 +2212,9 @@ impl McpShim {
             .operations
             .iter()
             .map(|op| match op {
+                RebaseBranchOperationTool::Reword { commit, message } => {
+                    serde_json::json!({"type": "reword", "commit": commit, "message": message})
+                }
                 RebaseBranchOperationTool::Drop { commit } => {
                     serde_json::json!({
                         "type": "drop",
@@ -3884,7 +3903,10 @@ mod tests {
             base_branch: "main".to_string(),
             branch: "agent/branch".to_string(),
             forge: "test".to_string(),
-            operations: vec![RebaseBranchOperationTool::RebaseOnto {}],
+            operations: vec![RebaseBranchOperationTool::Reword {
+                commit: "full-id".into(),
+                message: "subject".into(),
+            }],
             owner: "owner".to_string(),
             repo: "repo".to_string(),
         };
@@ -3903,6 +3925,51 @@ mod tests {
             requests.is_empty(),
             "no requests should reach the gateway in read-only mode"
         );
+    }
+
+    #[tokio::test]
+    async fn reword_transmits_exact_message_and_returns_mapping() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{body_json, method, path},
+        };
+        let mock = MockServer::start().await;
+        let message = "  café\n\n# comment `cmd`; $(cmd)\n\n";
+        let response = serde_json::json!({"branch":"agent/reword", "commit_sha":"new", "old_commit_sha":"old", "commit_mapping":[{"old_commit_sha":"old", "new_commit_sha":"new"}]});
+        Mock::given(method("POST")).and(path("/api/v1/repos/test/owner/repo/rebase"))
+            .and(body_json(serde_json::json!({"base_branch":"main", "branch":"agent/reword", "operations":[{"type":"reword", "commit":"old", "message":message}]})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&response)).expect(1).mount(&mock).await;
+        let shim = McpShim::new(test_config(&mock.uri()));
+        let result = shim
+            .rebase_branch(Parameters(RebaseBranchTool {
+                base_branch: "main".into(),
+                branch: "agent/reword".into(),
+                forge: "test".into(),
+                owner: "owner".into(),
+                repo: "repo".into(),
+                operations: vec![RebaseBranchOperationTool::Reword {
+                    commit: "old".into(),
+                    message: message.into(),
+                }],
+            }))
+            .await
+            .expect("reword");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&result).expect("response"),
+            response
+        );
+        let schema =
+            serde_json::to_value(schemars::schema_for!(RebaseBranchOperationTool)).expect("schema");
+        let variant = schema["oneOf"]
+            .as_array()
+            .expect("variants")
+            .iter()
+            .find(|v| v["properties"]["type"]["const"] == "reword")
+            .expect("reword variant");
+        let required = variant["required"].as_array().expect("required");
+        for field in ["type", "commit", "message"] {
+            assert!(required.contains(&serde_json::json!(field)));
+        }
     }
 
     #[tokio::test]

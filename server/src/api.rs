@@ -61,6 +61,7 @@ pub struct RebaseBranchBody {
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RebaseOperationBody {
+    Reword { commit: String, message: String },
     Drop { commit: String },
     Fixup { commit: String, into: String },
     RebaseOnto {},
@@ -71,6 +72,16 @@ pub enum RebaseOperationBody {
 pub struct RebaseBranchResult {
     pub branch: String,
     pub commit_sha: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub old_commit_sha: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit_mapping: Option<Vec<RebaseCommitMapping>>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct RebaseCommitMapping {
+    pub old_commit_sha: String,
+    pub new_commit_sha: String,
 }
 
 /// POST /api/v1/repos/{owner}/{repo}/pulls

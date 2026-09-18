@@ -935,6 +935,9 @@ pub async fn post_rebase(
         .operations
         .into_iter()
         .map(|op| match op {
+            RebaseOperationBody::Reword { commit, message } => {
+                domain::RebaseOperation::Reword { commit, message }
+            }
             RebaseOperationBody::Drop { commit } => domain::RebaseOperation::Drop { commit },
             RebaseOperationBody::Fixup { commit, into } => {
                 domain::RebaseOperation::Fixup { commit, into }
@@ -962,6 +965,16 @@ pub async fn post_rebase(
     Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(RebaseBranchResult {
         branch: result.branch,
         commit_sha: result.commit_sha,
+        old_commit_sha: result.old_commit_sha,
+        commit_mapping: result.commit_mapping.map(|mapping| {
+            mapping
+                .into_iter()
+                .map(|pair| crate::api::RebaseCommitMapping {
+                    old_commit_sha: pair.old_commit_sha,
+                    new_commit_sha: pair.new_commit_sha,
+                })
+                .collect()
+        }),
     }))
 }
 
@@ -3825,6 +3838,7 @@ mod tests {
     pub(super) struct FakeWriteService {
         pub(super) calls: std::sync::atomic::AtomicUsize,
         captured_close_msg: Arc<Mutex<Option<String>>>,
+        captured_rebase: Mutex<Option<domain::RebaseBranchRequest>>,
         captured_add_dep: Arc<Mutex<Option<domain::AddIssueDependencyRequest>>>,
         captured_auto_merge: Arc<Mutex<CapturedAutoMerge>>,
         auto_merge_called: tokio::sync::Notify,
@@ -3837,6 +3851,7 @@ mod tests {
             Self {
                 calls: std::sync::atomic::AtomicUsize::new(0),
                 captured_close_msg: Arc::new(Mutex::new(None)),
+                captured_rebase: Mutex::new(None),
                 captured_add_dep: Arc::new(Mutex::new(None)),
                 captured_auto_merge: Arc::new(Mutex::new(Vec::new())),
                 auto_merge_called: tokio::sync::Notify::new(),
@@ -4021,12 +4036,22 @@ mod tests {
 
         async fn rebase_branch(
             &self,
-            _request: domain::RebaseBranchRequest,
+            request: domain::RebaseBranchRequest,
             _authorized: domain::policy::AuthorizedWrite,
             _credential: &domain::ForgeCredential,
         ) -> Result<domain::RebaseBranchResponse, ServiceError> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Err(ServiceError::Upstream("unimplemented in test fake".into()))
+            let branch = request.branch.clone();
+            *self.captured_rebase.lock().expect("request") = Some(request);
+            Ok(domain::RebaseBranchResponse {
+                branch,
+                commit_sha: "new-head".into(),
+                old_commit_sha: Some("old-head".into()),
+                commit_mapping: Some(vec![domain::RebaseCommitMapping {
+                    old_commit_sha: "old-head".into(),
+                    new_commit_sha: "new-head".into(),
+                }]),
+            })
         }
 
         async fn remove_issue_dependency(
@@ -4482,6 +4507,88 @@ mod tests {
         assert!(logs.contains("session_id=\"default\""));
         assert!(!logs.contains("wrong-secret"));
         assert!(!logs.contains("test-token"));
+    }
+
+    #[tokio::test]
+    async fn reword_handler_preserves_request_and_mapping() {
+        use http_body_util::BodyExt;
+        let write = Arc::new(FakeWriteService::new());
+        let app = crate::build_router(test_state_with_write(Arc::clone(&write)), false);
+        let message = "  Subject\n\n# café; `cmd` $(cmd)\n\n";
+        let body = serde_json::json!({"base_branch":"main", "branch":"agent/reword", "operations":[{"type":"reword", "commit":"full-id", "message":message}]});
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos/test-forge/org/repo/rebase")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let result: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(result["old_commit_sha"], "old-head");
+        assert_eq!(result["commit_mapping"][0]["new_commit_sha"], "new-head");
+        let captured = write.captured_rebase.lock().expect("request");
+        let request = captured.as_ref().expect("captured");
+        assert_eq!(request.branch, "agent/reword");
+        assert_eq!(request.base_branch, "main");
+        assert_eq!(
+            request.operations,
+            vec![domain::RebaseOperation::Reword {
+                commit: "full-id".into(),
+                message: message.into()
+            }]
+        );
+        assert_eq!(request.agent.agent_id, "codex");
+        assert_eq!(request.repository.owner, "org");
+    }
+
+    #[test]
+    fn reword_openapi_and_legacy_response_contract() {
+        use utoipa::OpenApi;
+        let schema = serde_json::to_value(crate::ApiDoc::openapi()).expect("schema");
+        let variants = schema["components"]["schemas"]["RebaseOperationBody"]["oneOf"]
+            .as_array()
+            .expect("variants");
+        let reword = variants
+            .iter()
+            .find(|variant| variant["properties"]["type"]["enum"][0] == "reword")
+            .expect("reword variant");
+        let required = reword["required"].as_array().expect("required");
+        for field in ["type", "commit", "message"] {
+            assert!(required.contains(&serde_json::json!(field)));
+        }
+        assert!(schema["components"]["schemas"]["RebaseCommitMapping"].is_object());
+        assert!(
+            schema["components"]["schemas"]["RebaseBranchResult"]["properties"]["commit_mapping"]
+                .is_object()
+        );
+        let response = crate::api::RebaseBranchResult {
+            branch: "agent/test".into(),
+            commit_sha: "head".into(),
+            old_commit_sha: None,
+            commit_mapping: None,
+        };
+        assert_eq!(
+            serde_json::to_value(response).expect("response"),
+            serde_json::json!({"branch":"agent/test", "commit_sha":"head"})
+        );
+        for operation in [
+            serde_json::json!({"type":"reword", "commit":"id"}),
+            serde_json::json!({"type":"reword", "message":"subject"}),
+        ] {
+            assert!(serde_json::from_value::<crate::api::RebaseOperationBody>(operation).is_err());
+        }
     }
 
     fn test_state_with_write(write_svc: Arc<FakeWriteService>) -> AppState {

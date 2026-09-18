@@ -456,19 +456,37 @@ where
     }
 }
 
-/// Validates rebase operations against the list of commits in the branch.
-///
-/// Checks that:
-/// - All referenced SHAs exist in the commit list
-/// - No commit is used as both a fixup source and target
-/// - No commit fixups into itself
-/// - Each commit appears as a fixup source at most once
-/// - Fixup targets appear before sources in commit order
+/// Validate reword-only mode and messages before cloning or identity lookup.
+fn validate_reword_mode(operations: &[domain::RebaseOperation]) -> Result<bool, ServiceError> {
+    let is_reword = operations
+        .iter()
+        .any(|op| matches!(op, domain::RebaseOperation::Reword { .. }));
+    if is_reword {
+        let mut targets = std::collections::HashSet::new();
+        for operation in operations {
+            let domain::RebaseOperation::Reword { commit, message } = operation else {
+                return Err(ServiceError::Validation(
+                    "reword cannot be combined with other operations".into(),
+                ));
+            };
+            git_exec::validate_reword_message(message)
+                .map_err(|reason| ServiceError::Validation(reason.into()))?;
+            if !targets.insert(commit) {
+                return Err(ServiceError::Validation("duplicate reword target".into()));
+            }
+        }
+    }
+    Ok(is_reword)
+}
+
+/// Validate exact range membership and commit-operation consistency.
 fn validate_rebase_operations(
     operations: &[domain::RebaseOperation],
     commits: &[String],
 ) -> Result<(), ServiceError> {
     use std::collections::{HashMap, HashSet};
+
+    validate_reword_mode(operations)?;
 
     let commit_set: HashSet<&str> = commits.iter().map(String::as_str).collect();
     let commit_index: HashMap<&str, usize> = commits
@@ -483,6 +501,13 @@ fn validate_rebase_operations(
 
     for op in operations {
         match op {
+            domain::RebaseOperation::Reword { commit, .. } => {
+                if !commit_set.contains(commit.as_str()) {
+                    return Err(ServiceError::Validation(
+                        "reword target must be an exact full ID in the branch range".into(),
+                    ));
+                }
+            }
             domain::RebaseOperation::Drop { commit } => {
                 if !commit_set.contains(commit.as_str()) {
                     return Err(ServiceError::Validation(format!(
@@ -1121,6 +1146,8 @@ where
             ));
         }
 
+        let is_reword = validate_reword_mode(&request.operations)?;
+
         // 2a. Validate rebase_onto exclusivity
         let is_rebase_onto = request
             .operations
@@ -1181,6 +1208,7 @@ where
                 .rev_parse("HEAD")
                 .map_err(|e| ServiceError::GitExec(e.to_string()))?;
 
+            let mut commit_mapping = None;
             if is_rebase_onto {
                 // 7a. Rebase all commits onto the latest base branch
                 workspace
@@ -1202,31 +1230,59 @@ where
                     .rev_parse("HEAD^{tree}")
                     .map_err(|e| ServiceError::GitExec(e.to_string()))?;
 
-                // Convert domain operations to git-exec operations
-                let git_ops: Vec<git_exec::RebaseOperation> = operations
-                    .iter()
-                    .map(|op| match op {
-                        domain::RebaseOperation::Drop { commit } => {
-                            git_exec::RebaseOperation::Drop {
-                                commit: commit.clone(),
+                if is_reword {
+                    let rewords = operations
+                        .iter()
+                        .filter_map(|op| match op {
+                            domain::RebaseOperation::Reword { commit, message } => {
+                                Some(git_exec::RewordOperation {
+                                    commit: commit.clone(),
+                                    message: message.clone(),
+                                })
                             }
-                        }
-                        domain::RebaseOperation::Fixup { commit, into } => {
-                            git_exec::RebaseOperation::Fixup {
-                                commit: commit.clone(),
-                                into: into.clone(),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>();
+                    // This helper returns only after complete series verification.
+                    commit_mapping = Some(
+                        workspace
+                            .reword_series(&mb, &rewords, &committer_name, &committer_email)
+                            .map_err(|e| ServiceError::GitExec(e.to_string()))?
+                            .into_iter()
+                            .map(|pair| domain::RebaseCommitMapping {
+                                old_commit_sha: pair.old_commit_sha,
+                                new_commit_sha: pair.new_commit_sha,
+                            })
+                            .collect::<Vec<_>>(),
+                    );
+                } else {
+                    // Convert domain operations to git-exec operations
+                    let git_ops: Vec<git_exec::RebaseOperation> = operations
+                        .iter()
+                        .map(|op| match op {
+                            domain::RebaseOperation::Drop { commit } => {
+                                git_exec::RebaseOperation::Drop {
+                                    commit: commit.clone(),
+                                }
                             }
-                        }
-                        domain::RebaseOperation::RebaseOnto => {
-                            unreachable!("rebase_onto excluded by prior validation")
-                        }
-                    })
-                    .collect();
+                            domain::RebaseOperation::Fixup { commit, into } => {
+                                git_exec::RebaseOperation::Fixup {
+                                    commit: commit.clone(),
+                                    into: into.clone(),
+                                }
+                            }
+                            domain::RebaseOperation::RebaseOnto
+                            | domain::RebaseOperation::Reword { .. } => {
+                                unreachable!("exclusive modes excluded by prior validation")
+                            }
+                        })
+                        .collect();
 
-                // Run interactive rebase
-                workspace
-                    .rebase_interactive(&mb, &git_ops, &committer_name, &committer_email)
-                    .map_err(|e| ServiceError::GitExec(e.to_string()))?;
+                    // Run interactive rebase
+                    workspace
+                        .rebase_interactive(&mb, &git_ops, &committer_name, &committer_email)
+                        .map_err(|e| ServiceError::GitExec(e.to_string()))?;
+                }
 
                 // Verify tree integrity (skip when drops are present — drops
                 // intentionally remove content, so the tree is expected to change)
@@ -1256,15 +1312,24 @@ where
                 branch,
                 agent_identity,
                 repository,
+                commit_mapping,
             ))
         })
         .await
         .map_err(|e| ServiceError::GitExec(e.to_string()))?;
 
-        let (workspace, old_head, new_head, branch, agent_identity, repository) = git_result?;
+        let (workspace, old_head, new_head, branch, agent_identity, repository, commit_mapping) =
+            git_result?;
 
         // 9. Audit BEFORE push — failure blocks the write
-        let audit_target = if is_rebase_onto {
+        let audit_target = if is_reword {
+            let count = request.operations.len();
+            let targets = commit_mapping.as_deref().unwrap_or_default().iter()
+                .filter(|pair| request.operations.iter().any(|op| matches!(op, domain::RebaseOperation::Reword { commit, .. } if commit == &pair.old_commit_sha)))
+                .map(|pair| format!("{}=>{}", pair.old_commit_sha, pair.new_commit_sha))
+                .collect::<Vec<_>>().join(",");
+            format!("{old_head}..{new_head} reword:{count} {branch} targets:{targets}")
+        } else if is_rebase_onto {
             format!(
                 "{}..{} rebase-onto:{} {branch}",
                 &old_head[..8.min(old_head.len())],
@@ -1290,6 +1355,7 @@ where
             .map_err(|e| ServiceError::Audit(e.to_string()))?;
 
         // 10. Force push with lease (after audit succeeds)
+        let old_commit_sha = is_reword.then(|| old_head.clone());
         tokio::task::spawn_blocking(move || {
             workspace
                 .force_push_with_lease(&branch, &old_head)
@@ -1301,6 +1367,8 @@ where
         Ok(RebaseBranchResponse {
             branch: request.branch,
             commit_sha: new_head,
+            old_commit_sha,
+            commit_mapping,
         })
     }
 
@@ -1640,6 +1708,7 @@ where
     clippy::unimplemented
 )]
 mod tests {
+    mod reword_tests;
     use std::sync::{Arc, Mutex};
 
     use audit::{AuditError, AuditRecord, AuditSink, InMemoryAuditSink};

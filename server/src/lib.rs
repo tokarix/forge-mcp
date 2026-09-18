@@ -83,6 +83,7 @@ use utoipa_scalar::{Scalar, Servable};
         api::OpenPullBody,
         api::RebaseBranchBody,
         api::RebaseBranchResult,
+        api::RebaseCommitMapping,
         api::RebaseOperationBody,
         api::ScheduleAutoMergeBody,
         api::SubmitReviewBody,

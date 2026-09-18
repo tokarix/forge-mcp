@@ -1150,6 +1150,7 @@ pub struct OpenChangeRequestRequest {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RebaseOperation {
+    Reword { commit: String, message: String },
     Drop { commit: String },
     Fixup { commit: String, into: String },
     RebaseOnto,
@@ -1168,6 +1169,16 @@ pub struct RebaseBranchRequest {
 pub struct RebaseBranchResponse {
     pub branch: String,
     pub commit_sha: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub old_commit_sha: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit_mapping: Option<Vec<RebaseCommitMapping>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct RebaseCommitMapping {
+    pub old_commit_sha: String,
+    pub new_commit_sha: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
