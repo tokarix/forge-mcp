@@ -233,3 +233,26 @@ pub fn build_router(state: AppState, enable_docs: bool) -> Router {
         .layer(axum::middleware::from_fn(diagnostics::request_context))
         .with_state(state)
 }
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod draft_schema_tests {
+    use super::*;
+
+    #[test]
+    fn change_request_draft_schema_is_optional_nullable_boolean() {
+        let document = serde_json::to_value(ApiDoc::openapi()).expect("valid test fixture");
+        let schema = &document["components"]["schemas"]["ChangeRequest"];
+        assert_eq!(
+            schema["properties"]["draft"]["type"],
+            serde_json::json!(["boolean", "null"])
+        );
+        assert!(
+            !schema["required"]
+                .as_array()
+                .expect("valid test fixture")
+                .iter()
+                .any(|field| field == "draft")
+        );
+    }
+}

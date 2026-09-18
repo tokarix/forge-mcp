@@ -1465,6 +1465,8 @@ struct ForgejoPullBranch {
 
 #[derive(Debug, Deserialize)]
 struct ForgejoPullRequest {
+    #[serde(default)]
+    draft: Option<bool>,
     base: ForgejoPullBranch,
     body: Option<String>,
     changed_files: Option<u64>,
@@ -1491,8 +1493,9 @@ impl ForgejoPullRequest {
                 _ => ChangeRequestState::Closed,
             }
         };
-        let (has_conflicts, mergeability) = Self::compute_mergeability(self.mergeable);
+        let (has_conflicts, mergeability) = Self::compute_mergeability(self.mergeable, self.draft);
         ChangeRequest {
+            draft: self.draft,
             base_branch: self.base.ref_name,
             body: self.body.unwrap_or_default(),
             changed_files_count: self.changed_files,
@@ -1515,10 +1518,14 @@ impl ForgejoPullRequest {
         }
     }
 
-    fn compute_mergeability(mergeable: Option<bool>) -> (Option<bool>, Mergeability) {
+    fn compute_mergeability(
+        mergeable: Option<bool>,
+        draft: Option<bool>,
+    ) -> (Option<bool>, Mergeability) {
         match mergeable {
+            Some(true) if draft == Some(true) => (None, Mergeability::Unknown),
             Some(true) => (Some(false), Mergeability::Mergeable),
-            Some(false) => (Some(true), Mergeability::Conflicting),
+            Some(false) => (None, Mergeability::NotMergeable),
             None => (None, Mergeability::Unknown),
         }
     }
@@ -3604,6 +3611,78 @@ fn validate_pull_request_numbers(
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::panic)]
 mod tests {
+
+    #[tokio::test]
+    async fn draft_contract_is_shared_by_all_response_paths() {
+        use crate::ForgeAdapter;
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+        let mock = MockServer::start().await;
+        let adapter = test_adapter(&mock.uri());
+        let repo = test_repo();
+        let credential = domain::ForgeCredential { token: None };
+        for draft in [Some(true), Some(false), None] {
+            mock.reset().await;
+            let mut value = super::draft_contract_tests::fixture();
+            value["draft"] = serde_json::json!(draft);
+            value["mergeable"] = serde_json::json!(false);
+            value["detailed_merge_status"] = serde_json::json!("draft_status");
+            Mock::given(method("GET"))
+                .and(path("/api/v1/repos/org/repo/pulls"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!([value.clone()])),
+                )
+                .expect(1)
+                .mount(&mock)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/api/v1/repos/org/repo/pulls/1"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(value.clone()))
+                .expect(1)
+                .mount(&mock)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/api/v1/repos/org/repo/pulls"))
+                .respond_with(ResponseTemplate::new(201).set_body_json(value.clone()))
+                .expect(1)
+                .mount(&mock)
+                .await;
+            Mock::given(method("PATCH"))
+                .and(path("/api/v1/repos/org/repo/pulls/1"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(value))
+                .expect(2)
+                .mount(&mock)
+                .await;
+            let get = adapter
+                .get_change_request(&repo, 1, &credential)
+                .await
+                .expect("valid test fixture");
+            let list = adapter
+                .list_change_requests(&repo, None, &credential)
+                .await
+                .expect("valid test fixture");
+            let create = adapter
+                .create_change_request(&repo, "fixture", "body", "topic", "main", &credential)
+                .await
+                .expect("valid test fixture");
+            let update = adapter
+                .update_change_request(&repo, 1, Some("fixture"), None, &credential)
+                .await
+                .expect("valid test fixture");
+            let close = adapter
+                .close_change_request(&repo, 1, &credential)
+                .await
+                .expect("valid test fixture");
+            for request in [&get, &list[0], &create, &update, &close] {
+                assert_eq!(request.draft, draft);
+                assert_eq!(request.mergeability, domain::Mergeability::NotMergeable);
+                assert_eq!(request.has_conflicts, None);
+            }
+            mock.verify().await;
+        }
+    }
 
     #[test]
     fn forgejo_lifecycle_optional_head_does_not_relax_review_payloads() {
@@ -7526,21 +7605,21 @@ mod tests {
 
     #[test]
     fn forgejo_mergeability_mergeable() {
-        let (hc, m) = ForgejoPullRequest::compute_mergeability(Some(true));
+        let (hc, m) = ForgejoPullRequest::compute_mergeability(Some(true), None);
         assert_eq!(m, Mergeability::Mergeable);
         assert_eq!(hc, Some(false));
     }
 
     #[test]
-    fn forgejo_mergeability_conflicting() {
-        let (hc, m) = ForgejoPullRequest::compute_mergeability(Some(false));
-        assert_eq!(m, Mergeability::Conflicting);
-        assert_eq!(hc, Some(true));
+    fn forgejo_mergeability_non_mergeable_is_ambiguous() {
+        let (hc, m) = ForgejoPullRequest::compute_mergeability(Some(false), None);
+        assert_eq!(m, Mergeability::NotMergeable);
+        assert_eq!(hc, None);
     }
 
     #[test]
     fn forgejo_mergeability_unknown() {
-        let (hc, m) = ForgejoPullRequest::compute_mergeability(None);
+        let (hc, m) = ForgejoPullRequest::compute_mergeability(None, None);
         assert_eq!(m, Mergeability::Unknown);
         assert_eq!(hc, None);
     }
@@ -7636,5 +7715,90 @@ mod tests {
             Err(ForgeError::Http(_)) => {}
             other => panic!("expected ForgeError::Http, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod draft_contract_tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    pub(super) fn fixture() -> Value {
+        json!({"base":{"ref":"main","sha":"base"},"head":{"ref":"topic","sha":"head"},"merged":false,"number":1,"state":"open","title":"Work in progress","body":"Work in progress","html_url":"https://example.invalid/pull/1"})
+    }
+
+    fn convert(value: Value) -> ChangeRequest {
+        serde_json::from_value::<ForgejoPullRequest>(value)
+            .expect("valid test fixture")
+            .into_change_request()
+    }
+
+    #[test]
+    fn draft_metadata_is_authoritative_and_typed() {
+        for draft in [
+            Some(json!(true)),
+            Some(json!(false)),
+            Some(Value::Null),
+            None,
+        ] {
+            let mut value = fixture();
+            if let Some(draft) = draft.clone() {
+                value["draft"] = draft;
+            }
+            let expected = draft.and_then(|value| value.as_bool());
+            assert_eq!(convert(value).draft, expected);
+        }
+        let mut value = fixture();
+        value["draft"] = json!("false");
+        assert!(serde_json::from_value::<ForgejoPullRequest>(value).is_err());
+    }
+
+    #[test]
+    fn forgejo_cross_product_never_invents_conflicts() {
+        for draft in [
+            Some(json!(true)),
+            Some(json!(false)),
+            Some(Value::Null),
+            None,
+        ] {
+            for mergeable in [
+                Some(json!(true)),
+                Some(json!(false)),
+                Some(Value::Null),
+                None,
+            ] {
+                let mut value = fixture();
+                if let Some(draft) = draft.clone() {
+                    value["draft"] = draft;
+                }
+                if let Some(mergeable) = mergeable.clone() {
+                    value["mergeable"] = mergeable;
+                }
+                let expected = match (
+                    mergeable.and_then(|v| v.as_bool()),
+                    draft.clone().and_then(|v| v.as_bool()),
+                ) {
+                    (Some(true), Some(true)) | (None, _) => (Mergeability::Unknown, None),
+                    (Some(true), _) => (Mergeability::Mergeable, Some(false)),
+                    (Some(false), _) => (Mergeability::NotMergeable, None),
+                };
+                let request = convert(value);
+                assert_eq!((request.mergeability, request.has_conflicts), expected);
+            }
+        }
+        // Simulated semantic causes: all have the same observable REST false.
+        // These labels are not upstream fields or live reproduced checker states.
+        for _cause in ["checking", "checker error", "content conflict"] {
+            let mut value = fixture();
+            value["mergeable"] = json!(false);
+            assert_eq!(convert(value).has_conflicts, None);
+        }
+        let mut value = fixture();
+        value["title"] = json!("WIP: fixture");
+        assert_eq!(convert(value).draft, None);
+        let mut value = fixture();
+        value["mergeable"] = json!("false");
+        assert!(serde_json::from_value::<ForgejoPullRequest>(value).is_err());
     }
 }

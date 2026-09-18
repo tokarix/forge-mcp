@@ -3060,6 +3060,7 @@ mod tests {
             _: &ForgeCredential,
         ) -> Result<ChangeRequest, ForgeError> {
             Ok(ChangeRequest {
+                draft: None,
                 base_branch: "main".to_string(),
                 body: String::new(),
                 changed_files_count: None,
@@ -3710,6 +3711,7 @@ mod tests {
             _credential: &domain::ForgeCredential,
         ) -> Result<ChangeRequest, ForgeError> {
             Ok(ChangeRequest {
+                draft: None,
                 base_branch: "main".to_string(),
                 body: String::new(),
                 changed_files_count: None,
@@ -3754,6 +3756,7 @@ mod tests {
             _credential: &domain::ForgeCredential,
         ) -> Result<ChangeRequest, ForgeError> {
             Ok(ChangeRequest {
+                draft: None,
                 base_branch: base_branch.to_string(),
                 body: body.to_string(),
                 changed_files_count: None,
@@ -3814,6 +3817,7 @@ mod tests {
             _credential: &domain::ForgeCredential,
         ) -> Result<ChangeRequest, ForgeError> {
             Ok(ChangeRequest {
+                draft: None,
                 base_branch: "main".to_string(),
                 body: String::new(),
                 changed_files_count: None,
@@ -3924,6 +3928,7 @@ mod tests {
             _credential: &domain::ForgeCredential,
         ) -> Result<ChangeRequest, ForgeError> {
             Ok(ChangeRequest {
+                draft: None,
                 base_branch: "main".to_string(),
                 body: body.unwrap_or_default().to_string(),
                 changed_files_count: None,
@@ -4570,6 +4575,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             _credential: &domain::ForgeCredential,
         ) -> Result<ChangeRequest, ForgeError> {
             Ok(ChangeRequest {
+                draft: None,
                 base_branch: "main".to_string(),
                 body: String::new(),
                 changed_files_count: None,
@@ -4656,6 +4662,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             _credential: &domain::ForgeCredential,
         ) -> Result<ChangeRequest, ForgeError> {
             Ok(ChangeRequest {
+                draft: None,
                 base_branch: "main".to_string(),
                 body: String::new(),
                 changed_files_count: None,
@@ -5807,6 +5814,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             _credential: &domain::ForgeCredential,
         ) -> Result<ChangeRequest, ForgeError> {
             Ok(ChangeRequest {
+                draft: None,
                 base_branch: "main".to_string(),
                 body: String::new(),
                 changed_files_count: None,

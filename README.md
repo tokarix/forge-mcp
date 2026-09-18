@@ -890,3 +890,85 @@ path is limited to 1024 bytes, with `[redacted]` as the fallback for unsafe path
 shapes or excessive length; unmatched requests use `unmatched`. Route/operation
 fields use the existing 128-character diagnostic bound. Query strings, full URLs,
 headers, credentials and bodies are never included in these fields.
+
+### Draft and mergeability contract
+
+Change-request REST and MCP list/get responses, and create/update/close responses,
+include `draft`: `true` means authoritative provider draft, `false` means
+explicitly ready, and `null` means unavailable, absent or unsupported metadata.
+Missing fields in older JSON remain accepted. No title/body inference or GitLab
+`work_in_progress` fallback is used. Wrong-type metadata fails deserialization.
+Sparse list results stay sparse; the gateway does not fetch each list item.
+Consumers must re-read authoritative get before readiness decisions.
+
+`mergeability` retains `mergeable`, `not_mergeable`, `conflicting`, and `unknown`.
+`has_conflicts=null` means unknown, including generic blockers; consumers must
+never translate `not_mergeable` back into a conflict. `conflicting` always has
+positive evidence and `has_conflicts=true`. `mergeable` is evidence, not permission
+to merge or advance ownership. Draft is independent and can coexist with conflict.
+
+| Provider evidence | Normalized mergeability / has_conflicts |
+| --- | --- |
+| Forgejo `mergeable=true`, draft not true | `mergeable` / `false` |
+| Forgejo `mergeable=true`, draft true (contradictory pinned contract) | `unknown` / `null` |
+| Forgejo `mergeable=false`, any draft state | `not_mergeable` / `null` |
+| Forgejo absent/null mergeable | `unknown` / `null` |
+| GitHub false + `dirty` | `conflicting` / `true` |
+| GitHub true, except contradictory `dirty` | `mergeable` / `false` |
+| GitHub true + `dirty`, or absent/null mergeable | `unknown` / `null` |
+| GitHub other false | `not_mergeable` / `null` |
+| GitLab `conflict` or explicit true without contradiction | `conflicting` / `true` |
+| GitLab `mergeable`, or legacy `can_be_merged` without detailed status | `mergeable` / `false` |
+| GitLab conflict + explicit false, clean + explicit true, or pending + true | `unknown` / `null` |
+| GitLab generic blockers, including `draft_status` and legacy `cannot_be_merged` | `not_mergeable` / `null` unless independent positive conflict evidence |
+| GitLab checking/unchecked/recheck, error, unrecognized or missing status | `unknown` / `null` absent independent positive evidence; pending computation contradicts positive evidence |
+
+GitLab detailed status takes precedence over legacy status. Conditional explicit
+false during pending, unknown or blocked states is not clean-content evidence.
+GitHub draft plus clean evidence is valid. Contradictions preserve draft metadata.
+
+Forgejo 16.0.3's false boolean conflates WIP, pending/error checking and content
+conflicts. This correction intentionally disables automatic Forgejo conflict
+classification from that boolean, even for known ready PRs. Surface ambiguous
+non-mergeability visibly. The CI-owned `forgejo_mergeability` test retains the
+ready/WIP/ready regression from closed PR #236, diagnostic commit
+`408437b7b5e4363166593b491bd7759a6f1e79b4`, and verifies a genuine conflicting
+single-line replacement from a common ancestor, both ready and draft. Exact
+ancestry/content establish the control's conflict; raw false does not establish
+checker completion. No provider processes are started by local tests.
+
+Follow-up boundaries (not implemented here):
+
+- F1: opt-in bounded read-only conflict proof using documented exact source/target
+  identities and supported Git merge-tree capabilities, outside normal conversion.
+  It needs authorized fetches, resource/process limits, identity rechecks and
+  permission-partitioned commit-pair caching. Errors remain uncertainty. No clone
+  per list item or real merge/rebase probe. F1 is optional for this correction.
+- F2: provider-aware auto-merge status/cancellation with proven remote disarm,
+  authorization/audit, exact heads and serialized ownership generations. Assess
+  GitLab scheduling's currently ignored head argument in that separate scope.
+- C1 (Cockpit): known drafts defer new owned review, conflict repair and scheduling;
+  retain active workers and completion evidence, terminal/cancellation/integrity
+  and needs-input reconciliation. ReviewOnly may review drafts without ownership.
+  Unknown draft requires get reconciliation and a visible bounded hold/escalation.
+  Same-head readiness must invalidate eligibility and claim each action exactly
+  once across concurrent/replayed events. Worker exit with incomplete draft needs
+  a visible operator state, not completion or endless automatic continuation.
+
+Safe activation of C1's automatic merge lifecycle depends on F2: eligibility loss
+must persist a revocation barrier and advance authority before new actions;
+coordinate in-flight schedules and cancel late obsolete successes. Only confirmed
+remote disarm clears that barrier, including across restarts or same-head readiness.
+Unsupported/failed/unknown cancellation escalates visibly and blocks new authority.
+Independent remote schedules and unobserved transitions remain provider race risks;
+validate enforcement before activation. Reconcile a merge/close race truthfully.
+Required downstream tests include active-worker preservation, ReviewOnly isolation,
+all draft gates, duplicate dispatch, stale metadata, incomplete worker visibility,
+late scheduling, cancellation failure/restart and terminal/provider races. Cockpit
+#366 SQL repair and the broader completion protocol remain separate work.
+
+Deploy this producer contract before consumer activation. JSON is additive, but
+strict decoders need inventory and Rust constructors need the new field. Existing
+Forgejo draft hints are unsupported, so polling is required; GitHub/GitLab refresh
+hints only expedite authoritative reads. This correction alone does not remediate
+already-armed schedules or the incomplete-worker incident.

@@ -376,6 +376,8 @@ struct GitLabLabelResponse {
 #[derive(Debug, Deserialize)]
 struct GitLabMergeRequest {
     #[serde(default)]
+    draft: Option<bool>,
+    #[serde(default)]
     changes_count: Option<String>,
     description: Option<String>,
     diff_refs: Option<GitLabDiffRefs>,
@@ -425,6 +427,7 @@ impl GitLabMergeRequest {
             self.merge_status.as_ref(),
         );
         ChangeRequest {
+            draft: self.draft,
             base_branch: self.target_branch,
             body: self.description.unwrap_or_default(),
             changed_files_count,
@@ -447,13 +450,27 @@ impl GitLabMergeRequest {
         has_conflicts: Option<bool>,
         merge_status: Option<&String>,
     ) -> (Option<bool>, Mergeability) {
-        let (hc, mut mergeability) = if let Some(status) = detailed_merge_status {
-            match status.as_str() {
-                "conflict" => {
-                    let hc_inferred = has_conflicts.or(Some(true));
-                    (hc_inferred, Mergeability::Conflicting)
-                }
-                "mergeable" => (has_conflicts, Mergeability::Mergeable),
+        // Detailed status supersedes legacy status, including pending/unknown values.
+        let status = detailed_merge_status.or(merge_status).map(String::as_str);
+        let clean = detailed_merge_status.map(String::as_str) == Some("mergeable")
+            || (detailed_merge_status.is_none() && status == Some("can_be_merged"));
+        let detailed_conflict = detailed_merge_status.map(String::as_str) == Some("conflict");
+        let conflict = detailed_conflict || has_conflicts == Some(true);
+        let pending = matches!(status, Some("checking" | "unchecked" | "recheck"));
+        if (clean && conflict)
+            || (detailed_conflict && has_conflicts == Some(false))
+            || (pending && conflict)
+        {
+            return (None, Mergeability::Unknown);
+        }
+        if conflict {
+            return (Some(true), Mergeability::Conflicting);
+        }
+        if clean {
+            return (Some(false), Mergeability::Mergeable);
+        }
+        let mergeability = match status {
+            Some(
                 "ci_must_pass"
                 | "commits_status"
                 | "not_approved"
@@ -478,22 +495,14 @@ impl GitLabMergeRequest {
                 | "status_checks_must_pass"
                 | "locked_paths"
                 | "locked_lfs_files"
-                | "title_regex" => (has_conflicts, Mergeability::NotMergeable),
-                _ => (has_conflicts, Mergeability::Unknown),
+                | "title_regex",
+            ) if detailed_merge_status.is_some() => Mergeability::NotMergeable,
+            Some("cannot_be_merged") if detailed_merge_status.is_none() => {
+                Mergeability::NotMergeable
             }
-        } else {
-            match merge_status {
-                Some(s) if s == "can_be_merged" => (has_conflicts, Mergeability::Mergeable),
-                Some(s) if s == "cannot_be_merged" => (has_conflicts, Mergeability::NotMergeable),
-                _ => (has_conflicts, Mergeability::Unknown),
-            }
+            _ => Mergeability::Unknown,
         };
-
-        if hc == Some(true) {
-            mergeability = Mergeability::Conflicting;
-        }
-
-        (hc, mergeability)
+        (None, mergeability)
     }
 }
 
@@ -2321,6 +2330,86 @@ pub(crate) fn gitlab_labels_changed(changes: &serde_json::Value) -> bool {
 #[allow(clippy::expect_used, clippy::panic)]
 mod tests {
 
+    #[tokio::test]
+    async fn draft_contract_is_shared_by_all_response_paths() {
+        use crate::ForgeAdapter;
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+        let mock = MockServer::start().await;
+        let adapter = test_adapter(&mock.uri());
+        let repo = test_repo();
+        let credential = domain::ForgeCredential { token: None };
+        for draft in [Some(true), Some(false), None] {
+            mock.reset().await;
+            let mut value = super::draft_contract_tests::fixture();
+            value["draft"] = serde_json::json!(draft);
+            value["mergeable"] = serde_json::json!(false);
+            value["detailed_merge_status"] = serde_json::json!("draft_status");
+            Mock::given(method("GET"))
+                .and(path(
+                    "/api/v4/projects/group%2Fsubgroup%2Frepo/merge_requests",
+                ))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!([value.clone()])),
+                )
+                .expect(1)
+                .mount(&mock)
+                .await;
+            Mock::given(method("GET"))
+                .and(path(
+                    "/api/v4/projects/group%2Fsubgroup%2Frepo/merge_requests/1",
+                ))
+                .respond_with(ResponseTemplate::new(200).set_body_json(value.clone()))
+                .expect(1)
+                .mount(&mock)
+                .await;
+            Mock::given(method("POST"))
+                .and(path(
+                    "/api/v4/projects/group%2Fsubgroup%2Frepo/merge_requests",
+                ))
+                .respond_with(ResponseTemplate::new(201).set_body_json(value.clone()))
+                .expect(1)
+                .mount(&mock)
+                .await;
+            Mock::given(method("PUT"))
+                .and(path(
+                    "/api/v4/projects/group%2Fsubgroup%2Frepo/merge_requests/1",
+                ))
+                .respond_with(ResponseTemplate::new(200).set_body_json(value))
+                .expect(2)
+                .mount(&mock)
+                .await;
+            let get = adapter
+                .get_change_request(&repo, 1, &credential)
+                .await
+                .expect("valid test fixture");
+            let list = adapter
+                .list_change_requests(&repo, None, &credential)
+                .await
+                .expect("valid test fixture");
+            let create = adapter
+                .create_change_request(&repo, "fixture", "body", "topic", "main", &credential)
+                .await
+                .expect("valid test fixture");
+            let update = adapter
+                .update_change_request(&repo, 1, Some("fixture"), None, &credential)
+                .await
+                .expect("valid test fixture");
+            let close = adapter
+                .close_change_request(&repo, 1, &credential)
+                .await
+                .expect("valid test fixture");
+            for request in [&get, &list[0], &create, &update, &close] {
+                assert_eq!(request.draft, draft);
+                assert_eq!(request.mergeability, domain::Mergeability::NotMergeable);
+                assert_eq!(request.has_conflicts, None);
+            }
+            mock.verify().await;
+        }
+    }
+
     #[test]
     #[allow(clippy::too_many_lines)]
     fn issue_update_delta_matrix() {
@@ -2514,6 +2603,7 @@ mod tests {
     #[test]
     fn merge_request_state_mapping() {
         let mr = GitLabMergeRequest {
+            draft: None,
             changes_count: None,
             description: Some("body".to_string()),
             diff_refs: None,
@@ -2537,6 +2627,7 @@ mod tests {
     #[test]
     fn merge_request_merged_state() {
         let mr = GitLabMergeRequest {
+            draft: None,
             changes_count: Some("3".to_string()),
             description: None,
             diff_refs: None,
@@ -3776,12 +3867,12 @@ mod tests {
     fn gitlab_mergeability_conflict() {
         let status = "conflict".to_string();
         let (hc, m) = GitLabMergeRequest::compute_mergeability(Some(&status), Some(false), None);
-        assert_eq!(m, Mergeability::Conflicting);
-        assert_eq!(hc, Some(false));
+        assert_eq!(m, Mergeability::Unknown);
+        assert_eq!(hc, None);
     }
 
     #[test]
-    fn gitlab_mergeability_conflict_preserves_has_conflicts_false() {
+    fn gitlab_mergeability_conflict_supplies_positive_evidence() {
         let status = "conflict".to_string();
         let (hc, m) = GitLabMergeRequest::compute_mergeability(Some(&status), None, None);
         assert_eq!(m, Mergeability::Conflicting);
@@ -3793,7 +3884,7 @@ mod tests {
         let status = "mergeable".to_string();
         let (hc, m) = GitLabMergeRequest::compute_mergeability(Some(&status), None, None);
         assert_eq!(m, Mergeability::Mergeable);
-        assert_eq!(hc, None);
+        assert_eq!(hc, Some(false));
     }
 
     #[test]
@@ -3801,7 +3892,7 @@ mod tests {
         let status = "ci_must_pass".to_string();
         let (hc, m) = GitLabMergeRequest::compute_mergeability(Some(&status), Some(false), None);
         assert_eq!(m, Mergeability::NotMergeable);
-        assert_eq!(hc, Some(false));
+        assert_eq!(hc, None);
     }
 
     #[test]
@@ -3823,7 +3914,7 @@ mod tests {
         let merge_status = "can_be_merged".to_string();
         let (hc, m) = GitLabMergeRequest::compute_mergeability(None, None, Some(&merge_status));
         assert_eq!(m, Mergeability::Mergeable);
-        assert_eq!(hc, None);
+        assert_eq!(hc, Some(false));
     }
 
     #[test]
@@ -3840,11 +3931,11 @@ mod tests {
     }
 
     #[test]
-    fn gitlab_mergeability_has_conflicts_overrides_mergeable() {
+    fn gitlab_mergeability_clean_conflict_contradiction() {
         let status = "mergeable".to_string();
         let (hc, m) = GitLabMergeRequest::compute_mergeability(Some(&status), Some(true), None);
-        assert_eq!(m, Mergeability::Conflicting);
-        assert_eq!(hc, Some(true));
+        assert_eq!(m, Mergeability::Unknown);
+        assert_eq!(hc, None);
     }
 
     #[test]
@@ -3974,5 +4065,211 @@ mod tests {
         let cred = ForgeCredential { token: None };
         let result = adapter.get_change_request(&test_repo(), 1, &cred).await;
         assert!(result.is_err());
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod draft_contract_tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    pub(super) fn fixture() -> Value {
+        json!({"iid":1,"source_branch":"topic","target_branch":"main","state":"opened","title":"WIP: fixture","web_url":"https://example.invalid/pull/1"})
+    }
+
+    fn convert(value: Value) -> ChangeRequest {
+        serde_json::from_value::<GitLabMergeRequest>(value)
+            .expect("valid test fixture")
+            .into_change_request()
+    }
+
+    #[test]
+    fn draft_metadata_is_authoritative_and_typed() {
+        for draft in [
+            Some(json!(true)),
+            Some(json!(false)),
+            Some(Value::Null),
+            None,
+        ] {
+            let mut value = fixture();
+            if let Some(draft) = draft.clone() {
+                value["draft"] = draft;
+            }
+            let expected = draft.and_then(|value| value.as_bool());
+            assert_eq!(convert(value).draft, expected);
+        }
+        let mut value = fixture();
+        value["draft"] = json!("false");
+        assert!(serde_json::from_value::<GitLabMergeRequest>(value).is_err());
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // Explicit truth table for provider evidence combinations.
+    fn gitlab_evidence_matrix() {
+        for (status, legacy, explicit, expected, conflicts) in [
+            (None, Some("mergeable"), None, Mergeability::Unknown, None),
+            (None, Some("conflict"), None, Mergeability::Unknown, None),
+            (
+                None,
+                Some("draft_status"),
+                None,
+                Mergeability::Unknown,
+                None,
+            ),
+            (
+                Some("cannot_be_merged"),
+                None,
+                None,
+                Mergeability::Unknown,
+                None,
+            ),
+            (
+                Some("mergeable"),
+                None,
+                None,
+                Mergeability::Mergeable,
+                Some(false),
+            ),
+            (
+                Some("mergeable"),
+                None,
+                Some(true),
+                Mergeability::Unknown,
+                None,
+            ),
+            (
+                Some("conflict"),
+                None,
+                Some(false),
+                Mergeability::Unknown,
+                None,
+            ),
+            (
+                Some("conflict"),
+                None,
+                None,
+                Mergeability::Conflicting,
+                Some(true),
+            ),
+            (
+                Some("draft_status"),
+                None,
+                Some(true),
+                Mergeability::Conflicting,
+                Some(true),
+            ),
+            (
+                Some("draft_status"),
+                None,
+                Some(false),
+                Mergeability::NotMergeable,
+                None,
+            ),
+            (
+                Some("checking"),
+                Some("can_be_merged"),
+                Some(true),
+                Mergeability::Unknown,
+                None,
+            ),
+            (
+                Some("unchecked"),
+                None,
+                Some(true),
+                Mergeability::Unknown,
+                None,
+            ),
+            (
+                Some("recheck"),
+                None,
+                Some(true),
+                Mergeability::Unknown,
+                None,
+            ),
+            (
+                Some("checking"),
+                None,
+                Some(false),
+                Mergeability::Unknown,
+                None,
+            ),
+            (
+                Some("error"),
+                None,
+                Some(false),
+                Mergeability::Unknown,
+                None,
+            ),
+            (
+                Some("new-status"),
+                Some("can_be_merged"),
+                None,
+                Mergeability::Unknown,
+                None,
+            ),
+            (
+                Some("new-status"),
+                None,
+                Some(true),
+                Mergeability::Conflicting,
+                Some(true),
+            ),
+            (
+                Some("draft_status"),
+                Some("can_be_merged"),
+                None,
+                Mergeability::NotMergeable,
+                None,
+            ),
+            (
+                None,
+                Some("can_be_merged"),
+                None,
+                Mergeability::Mergeable,
+                Some(false),
+            ),
+            (
+                None,
+                Some("cannot_be_merged"),
+                Some(false),
+                Mergeability::NotMergeable,
+                None,
+            ),
+            (None, None, Some(false), Mergeability::Unknown, None),
+            (
+                None,
+                None,
+                Some(true),
+                Mergeability::Conflicting,
+                Some(true),
+            ),
+        ] {
+            for draft in [Some(true), Some(false), None] {
+                let mut value = fixture();
+                value["detailed_merge_status"] = json!(status);
+                value["merge_status"] = json!(legacy);
+                value["has_conflicts"] = json!(explicit);
+                value["draft"] = json!(draft);
+                let request = convert(value);
+                assert_eq!(
+                    (request.mergeability, request.has_conflicts, request.draft),
+                    (expected.clone(), conflicts, draft),
+                    "{status:?}/{legacy:?}/{explicit:?}"
+                );
+            }
+        }
+        for (field, invalid) in [
+            ("has_conflicts", json!("false")),
+            ("detailed_merge_status", json!(false)),
+            ("merge_status", json!(false)),
+        ] {
+            let mut value = fixture();
+            value[field] = invalid;
+            assert!(serde_json::from_value::<GitLabMergeRequest>(value).is_err());
+        }
+        let mut value = fixture();
+        value["work_in_progress"] = json!(true);
+        assert_eq!(convert(value).draft, None);
     }
 }

@@ -106,6 +106,9 @@ pub struct Repository {
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct ChangeRequest {
+    /// Authoritative provider draft state; absent metadata remains unknown.
+    #[serde(default)]
+    pub draft: Option<bool>,
     pub base_branch: String,
     pub body: String,
     pub changed_files_count: Option<u64>,
@@ -1920,6 +1923,7 @@ mod tests {
     #[test]
     fn change_request_serializes_to_json() {
         let cr = ChangeRequest {
+            draft: None,
             base_branch: "main".to_string(),
             body: "fix".to_string(),
             changed_files_count: None,
@@ -1945,6 +1949,7 @@ mod tests {
     #[test]
     fn change_request_mergeability_serializes_correctly() {
         let cr = ChangeRequest {
+            draft: None,
             base_branch: "main".to_string(),
             body: "fix".to_string(),
             changed_files_count: None,
@@ -1982,6 +1987,7 @@ mod tests {
     #[test]
     fn change_request_labels_always_serialized() {
         let cr = ChangeRequest {
+            draft: None,
             base_branch: "main".to_string(),
             body: "fix".to_string(),
             changed_files_count: None,
@@ -2374,5 +2380,38 @@ mod tests {
             json["details"][0]["resolution"]["failed_steps"][0]["log_excerpt"]["lines"][0],
             "assertion failed"
         );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod draft_contract_tests {
+    use super::*;
+
+    #[test]
+    fn draft_is_nullable_and_legacy_json_remains_compatible() {
+        for draft in [Some(true), Some(false), None] {
+            let request = ChangeRequest {
+                draft,
+                ..ChangeRequest::default()
+            };
+            let mut json = serde_json::to_value(&request).expect("valid test fixture");
+            assert_eq!(json["draft"], serde_json::json!(draft));
+            assert_eq!(
+                serde_json::from_value::<ChangeRequest>(json.clone())
+                    .expect("valid test fixture")
+                    .draft,
+                draft
+            );
+            json.as_object_mut()
+                .expect("valid test fixture")
+                .remove("draft");
+            assert_eq!(
+                serde_json::from_value::<ChangeRequest>(json)
+                    .expect("valid test fixture")
+                    .draft,
+                None
+            );
+        }
     }
 }

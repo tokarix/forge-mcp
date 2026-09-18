@@ -3787,6 +3787,7 @@ mod tests {
                 Ok(resp)
             } else {
                 Ok(ChangeRequest {
+                    draft: None,
                     base_branch: "main".to_string(),
                     body: "body".to_string(),
                     changed_files_count: None,
@@ -3943,6 +3944,7 @@ mod tests {
         ) -> Result<ChangeRequest, ServiceError> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(ChangeRequest {
+                draft: None,
                 base_branch: "main".to_string(),
                 body: String::new(),
                 changed_files_count: None,
@@ -4015,6 +4017,7 @@ mod tests {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(OpenChangeRequestResponse {
                 change_request: ChangeRequest {
+                    draft: None,
                     base_branch: "main".to_string(),
                     body: "body".to_string(),
                     changed_files_count: None,
@@ -4132,6 +4135,7 @@ mod tests {
         ) -> Result<ChangeRequest, ServiceError> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(ChangeRequest {
+                draft: None,
                 base_branch: "main".to_string(),
                 body: request.body.unwrap_or_default(),
                 changed_files_count: None,
@@ -5028,96 +5032,106 @@ mod tests {
 
     #[tokio::test]
     async fn get_pull_serializes_mergeability_and_has_conflicts() {
-        let cr = ChangeRequest {
-            base_branch: "main".to_string(),
-            body: "body".to_string(),
-            changed_files_count: None,
-            commit_count: None,
-            head_branch: "agent/fix".to_string(),
-            head_sha: Some("abc123".to_string()),
-            has_conflicts: Some(true),
-            index: 1,
-            labels: vec!["ready-for-code-review".to_string()],
-            merge_base_sha: None,
-            mergeability: Mergeability::Conflicting,
-            state: ChangeRequestState::Open,
-            title: "Fix".to_string(),
-            url: "https://example.com/pulls/1".to_string(),
-        };
+        for draft in [Some(true), Some(false), None] {
+            let cr = ChangeRequest {
+                draft,
+                base_branch: "main".to_string(),
+                body: "body".to_string(),
+                changed_files_count: None,
+                commit_count: None,
+                head_branch: "agent/fix".to_string(),
+                head_sha: Some("abc123".to_string()),
+                has_conflicts: Some(true),
+                index: 1,
+                labels: vec!["ready-for-code-review".to_string()],
+                merge_base_sha: None,
+                mergeability: Mergeability::Conflicting,
+                state: ChangeRequestState::Open,
+                title: "Fix".to_string(),
+                url: "https://example.com/pulls/1".to_string(),
+            };
 
-        let state = test_state_with_read(
-            FakeReadService::with_get_change_request(cr),
-            vec!["test-forge/org/repo".to_string()],
-            Arc::new(FakeWriteService::new()),
-        );
+            let state = test_state_with_read(
+                FakeReadService::with_get_change_request(cr),
+                vec!["test-forge/org/repo".to_string()],
+                Arc::new(FakeWriteService::new()),
+            );
 
-        let app = crate::build_router(state, false);
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/repos/test-forge/org/repo/pulls/1")
-                    .header("authorization", "Bearer test-token")
-                    .body(Body::empty())
-                    .expect("build request"),
-            )
-            .await
-            .expect("request should succeed");
+            let app = crate::build_router(state, false);
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/v1/repos/test-forge/org/repo/pulls/1")
+                        .header("authorization", "Bearer test-token")
+                        .body(Body::empty())
+                        .expect("build request"),
+                )
+                .await
+                .expect("request should succeed");
 
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("read response body");
-        let json: serde_json::Value = serde_json::from_slice(&body).expect("parse JSON response");
-        assert_eq!(json["mergeability"], "conflicting");
-        assert_eq!(json["has_conflicts"], true);
-        assert_eq!(json["labels"], serde_json::json!(["ready-for-code-review"]));
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("read response body");
+            let json: serde_json::Value =
+                serde_json::from_slice(&body).expect("parse JSON response");
+            assert_eq!(json["mergeability"], "conflicting");
+            assert_eq!(json["has_conflicts"], true);
+            assert_eq!(json["draft"], serde_json::json!(draft));
+            assert_eq!(json["labels"], serde_json::json!(["ready-for-code-review"]));
+        }
     }
 
     #[tokio::test]
     async fn list_pulls_serializes_mergeability_and_has_conflicts() {
-        let crs = vec![ChangeRequest {
-            base_branch: "main".to_string(),
-            body: "body".to_string(),
-            changed_files_count: None,
-            commit_count: None,
-            head_branch: "agent/fix".to_string(),
-            head_sha: Some("abc123".to_string()),
-            has_conflicts: Some(false),
-            index: 1,
-            labels: vec![],
-            merge_base_sha: None,
-            mergeability: Mergeability::Mergeable,
-            state: ChangeRequestState::Open,
-            title: "Fix".to_string(),
-            url: "https://example.com/pulls/1".to_string(),
-        }];
+        for draft in [Some(true), Some(false), None] {
+            let crs = vec![ChangeRequest {
+                draft,
+                base_branch: "main".to_string(),
+                body: "body".to_string(),
+                changed_files_count: None,
+                commit_count: None,
+                head_branch: "agent/fix".to_string(),
+                head_sha: Some("abc123".to_string()),
+                has_conflicts: Some(false),
+                index: 1,
+                labels: vec![],
+                merge_base_sha: None,
+                mergeability: Mergeability::Mergeable,
+                state: ChangeRequestState::Open,
+                title: "Fix".to_string(),
+                url: "https://example.com/pulls/1".to_string(),
+            }];
 
-        let state = test_state_with_read(
-            FakeReadService::with_list_change_requests(crs),
-            vec!["test-forge/org/repo".to_string()],
-            Arc::new(FakeWriteService::new()),
-        );
+            let state = test_state_with_read(
+                FakeReadService::with_list_change_requests(crs),
+                vec!["test-forge/org/repo".to_string()],
+                Arc::new(FakeWriteService::new()),
+            );
 
-        let app = crate::build_router(state, false);
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/repos/test-forge/org/repo/pulls")
-                    .header("authorization", "Bearer test-token")
-                    .body(Body::empty())
-                    .expect("build request"),
-            )
-            .await
-            .expect("request should succeed");
+            let app = crate::build_router(state, false);
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/v1/repos/test-forge/org/repo/pulls")
+                        .header("authorization", "Bearer test-token")
+                        .body(Body::empty())
+                        .expect("build request"),
+                )
+                .await
+                .expect("request should succeed");
 
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("read response body");
-        let json: serde_json::Value = serde_json::from_slice(&body).expect("parse JSON response");
-        assert_eq!(json[0]["mergeability"], "mergeable");
-        assert_eq!(json[0]["has_conflicts"], false);
-        assert!(json[0]["labels"].is_array());
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("read response body");
+            let json: serde_json::Value =
+                serde_json::from_slice(&body).expect("parse JSON response");
+            assert_eq!(json[0]["mergeability"], "mergeable");
+            assert_eq!(json[0]["has_conflicts"], false);
+            assert_eq!(json[0]["draft"], serde_json::json!(draft));
+            assert!(json[0]["labels"].is_array());
+        }
     }
 
     #[tokio::test]

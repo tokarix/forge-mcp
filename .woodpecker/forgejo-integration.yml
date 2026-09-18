@@ -49,6 +49,7 @@ steps:
     commands:
       - apt-get update
       - apt-get install -y --no-install-recommends git
+      - cargo test -p forge --test forgejo_mergeability -- --ignored --nocapture
       - cargo test -p forge --test forgejo_ci_smoke -- --ignored --nocapture
       - cargo test -p forge --test forgejo_issue_dependencies -- --ignored --nocapture
       - cargo test -p server --test forgejo_reword -- --ignored --nocapture

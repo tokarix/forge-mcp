@@ -932,6 +932,7 @@ mod tests {
             _: &domain::ForgeCredential,
         ) -> Result<ChangeRequest, ServiceError> {
             Ok(ChangeRequest {
+                draft: None,
                 base_branch: "main".to_string(),
                 body: "body".to_string(),
                 changed_files_count: None,
@@ -1059,6 +1060,7 @@ mod tests {
         ) -> Result<OpenChangeRequestResponse, ServiceError> {
             Ok(OpenChangeRequestResponse {
                 change_request: ChangeRequest {
+                    draft: None,
                     base_branch: "main".to_string(),
                     body: "body".to_string(),
                     changed_files_count: None,

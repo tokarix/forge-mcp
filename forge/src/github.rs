@@ -770,6 +770,8 @@ struct GitHubRef {
 
 #[derive(Debug, Deserialize)]
 struct GitHubPullRequest {
+    #[serde(default)]
+    draft: Option<bool>,
     base: GitHubRef,
     body: Option<String>,
     #[serde(default)]
@@ -802,12 +804,14 @@ impl GitHubPullRequest {
             ChangeRequestState::Closed
         };
         let mergeability = match (self.mergeable, self.mergeable_state.as_deref()) {
+            (Some(true), Some("dirty")) => Mergeability::Unknown,
             (Some(true), _) => Mergeability::Mergeable,
             (Some(false), Some("dirty")) => Mergeability::Conflicting,
             (Some(false), _) => Mergeability::NotMergeable,
             _ => Mergeability::Unknown,
         };
         ChangeRequest {
+            draft: self.draft,
             base_branch: self.base.name,
             body: self.body.unwrap_or_default(),
             changed_files_count: self.changed_files,
@@ -816,8 +820,8 @@ impl GitHubPullRequest {
             head_sha: Some(self.head.sha),
             has_conflicts: match mergeability {
                 Mergeability::Conflicting => Some(true),
-                Mergeability::Mergeable | Mergeability::NotMergeable => Some(false),
-                Mergeability::Unknown => None,
+                Mergeability::Mergeable => Some(false),
+                Mergeability::Unknown | Mergeability::NotMergeable => None,
             },
             index: self.number,
             labels: self.labels.into_iter().map(|label| label.name).collect(),
@@ -3540,6 +3544,78 @@ fn parse_review_lifecycle(
 #[allow(clippy::expect_used, clippy::panic)]
 mod tests {
 
+    #[tokio::test]
+    async fn draft_contract_is_shared_by_all_response_paths() {
+        use crate::ForgeAdapter;
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+        let mock = MockServer::start().await;
+        let adapter = adapter(&mock.uri());
+        let repo = repository();
+        let credential = domain::ForgeCredential { token: None };
+        for draft in [Some(true), Some(false), None] {
+            mock.reset().await;
+            let mut value = super::draft_contract_tests::fixture();
+            value["draft"] = serde_json::json!(draft);
+            value["mergeable"] = serde_json::json!(false);
+            value["detailed_merge_status"] = serde_json::json!("draft_status");
+            Mock::given(method("GET"))
+                .and(path("/repos/org/repo/pulls"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!([value.clone()])),
+                )
+                .expect(1)
+                .mount(&mock)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/repos/org/repo/pulls/1"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(value.clone()))
+                .expect(1)
+                .mount(&mock)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/repos/org/repo/pulls"))
+                .respond_with(ResponseTemplate::new(201).set_body_json(value.clone()))
+                .expect(1)
+                .mount(&mock)
+                .await;
+            Mock::given(method("PATCH"))
+                .and(path("/repos/org/repo/pulls/1"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(value))
+                .expect(2)
+                .mount(&mock)
+                .await;
+            let get = adapter
+                .get_change_request(&repo, 1, &credential)
+                .await
+                .expect("valid test fixture");
+            let list = adapter
+                .list_change_requests(&repo, None, &credential)
+                .await
+                .expect("valid test fixture");
+            let create = adapter
+                .create_change_request(&repo, "fixture", "body", "topic", "main", &credential)
+                .await
+                .expect("valid test fixture");
+            let update = adapter
+                .update_change_request(&repo, 1, Some("fixture"), None, &credential)
+                .await
+                .expect("valid test fixture");
+            let close = adapter
+                .close_change_request(&repo, 1, &credential)
+                .await
+                .expect("valid test fixture");
+            for request in [&get, &list[0], &create, &update, &close] {
+                assert_eq!(request.draft, draft);
+                assert_eq!(request.mergeability, domain::Mergeability::NotMergeable);
+                assert_eq!(request.has_conflicts, None);
+            }
+            mock.verify().await;
+        }
+    }
+
     #[test]
     fn github_lifecycle_optional_head_does_not_relax_review_payloads() {
         for head in [
@@ -5427,5 +5503,95 @@ rRwzv5g6zr/Xm2UKcduXYVQs
         assert_eq!(event.index, 7);
         assert_eq!(event.head_sha, "new-head");
         assert_eq!(event.action, domain::ChangeRequestEventAction::Synchronized);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod draft_contract_tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    pub(super) fn fixture() -> Value {
+        json!({"base":{"ref":"main","sha":"base"},"head":{"ref":"topic","sha":"head"},"node_id":"node","number":1,"state":"open","title":"WIP: fixture","html_url":"https://example.invalid/pull/1"})
+    }
+
+    fn convert(value: Value) -> ChangeRequest {
+        serde_json::from_value::<GitHubPullRequest>(value)
+            .expect("valid test fixture")
+            .into_change_request()
+    }
+
+    #[test]
+    fn draft_metadata_is_authoritative_and_typed() {
+        for draft in [
+            Some(json!(true)),
+            Some(json!(false)),
+            Some(Value::Null),
+            None,
+        ] {
+            let mut value = fixture();
+            if let Some(draft) = draft.clone() {
+                value["draft"] = draft;
+            }
+            let expected = draft.and_then(|value| value.as_bool());
+            assert_eq!(convert(value).draft, expected);
+        }
+        let mut value = fixture();
+        value["draft"] = json!("false");
+        assert!(serde_json::from_value::<GitHubPullRequest>(value).is_err());
+    }
+
+    #[test]
+    fn github_evidence_matrix() {
+        for (mergeable, state, expected, conflicts) in [
+            (
+                Some(false),
+                Some("dirty"),
+                Mergeability::Conflicting,
+                Some(true),
+            ),
+            (Some(true), Some("dirty"), Mergeability::Unknown, None),
+            (
+                Some(true),
+                Some("clean"),
+                Mergeability::Mergeable,
+                Some(false),
+            ),
+            (
+                Some(false),
+                Some("blocked"),
+                Mergeability::NotMergeable,
+                None,
+            ),
+            (
+                Some(false),
+                Some("new-status"),
+                Mergeability::NotMergeable,
+                None,
+            ),
+            (None, Some("dirty"), Mergeability::Unknown, None),
+            (None, None, Mergeability::Unknown, None),
+        ] {
+            for draft in [Some(true), Some(false), None] {
+                let mut value = fixture();
+                value["mergeable"] = json!(mergeable);
+                value["mergeable_state"] = json!(state);
+                value["draft"] = json!(draft);
+                let request = convert(value);
+                assert_eq!(
+                    (request.mergeability, request.has_conflicts, request.draft),
+                    (expected.clone(), conflicts, draft)
+                );
+            }
+        }
+        for (field, invalid) in [
+            ("mergeable", json!("false")),
+            ("mergeable_state", json!(false)),
+        ] {
+            let mut value = fixture();
+            value[field] = invalid;
+            assert!(serde_json::from_value::<GitHubPullRequest>(value).is_err());
+        }
     }
 }
