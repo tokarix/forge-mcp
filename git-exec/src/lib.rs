@@ -12,6 +12,9 @@ use base64::Engine;
 use tempfile::TempDir;
 use thiserror::Error;
 
+mod reword;
+pub use reword::{CommitMapping, RewordOperation, validate_reword_message};
+
 #[derive(Debug, Error)]
 pub enum GitExecError {
     #[error("git command failed: {command}\nstderr: {stderr}")]
