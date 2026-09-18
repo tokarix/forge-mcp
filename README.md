@@ -660,6 +660,69 @@ For GitHub.com, `base_url = "https://github.com"` automatically selects
 `https://api.github.com`. For GitHub Enterprise Server, forge-mcp derives
 `<base_url>/api/v3`; set `api_url` explicitly for a nonstandard API endpoint.
 
+### Reword commit messages
+
+Use `rebase_branch` with an exclusive list of `reword` operations to change
+messages while preserving every commit's tree, patch order and author metadata:
+
+```json
+{
+  "forge": "adlevio",
+  "owner": "tokarix",
+  "repo": "example",
+  "base_branch": "main",
+  "branch": "agent/codex/example",
+  "operations": [
+    {"type": "reword", "commit": "2222222222222222222222222222222222222222", "message": "Explain the change\n\nInclude the reason for this change.\n"}
+  ]
+}
+```
+
+For REST, POST the same body without `forge`, `owner` and `repo` to
+`/api/v1/repos/{forge}/{owner}/{repo}/rebase`. The IDs below are illustrative:
+
+```json
+{
+  "branch": "agent/codex/example",
+  "commit_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "old_commit_sha": "3333333333333333333333333333333333333333",
+  "commit_mapping": [
+    {"old_commit_sha": "1111111111111111111111111111111111111111", "new_commit_sha": "1111111111111111111111111111111111111111"},
+    {"old_commit_sha": "2222222222222222222222222222222222222222", "new_commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+    {"old_commit_sha": "3333333333333333333333333333333333333333", "new_commit_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
+  ]
+}
+```
+
+Targets must be distinct exact full object IDs in `merge-base..original-head`.
+Abbreviations, refs, revision expressions, the merge base and out-of-range IDs
+are rejected. Both SHA-1 and SHA-256 repositories are supported. Request order
+selects replacement messages and never reorders commits. Do not mix reword with
+`fixup`, `drop` or `rebase_onto`; merges and unsupported commit metadata are
+rejected before replay. Empty commits remain in the series.
+
+Each submitted message must be nonblank, contain no NUL, and be at most 65,536
+UTF-8 bytes. The limit applies before normalization: supplied trailing newlines
+are retained; exactly one LF is appended if the message has none. All other
+whitespace, multiline bodies, trailers, comment-looking lines and shell
+characters are data, preserved without trimming or shell evaluation.
+
+The complete mapping follows original commit order, including unchanged entries
+before the first target. Targets and descendants may receive new IDs. Their
+original signatures are removed because the signed payload changes; no new
+signing policy is introduced. Author names, emails, dates and timezones remain
+unchanged. Recreated commits use the existing global committer configuration
+or legacy authenticated-user/agent fallback, with current committer dates.
+Legacy rebase modes omit `old_commit_sha` and `commit_mapping`.
+
+Repository authorization, the nonempty agent branch prefix, provider branch
+protections and the MCP read-only guard still apply. The gateway verifies the
+complete series and final tree, records an intended transition audit without
+replacement messages, then publishes once using the original head as a lease.
+Validation, replay, verification or audit failures prevent publication. A lease
+failure preserves the concurrent remote tip. The branch and existing PR remain
+attached; success and mapping are returned only after publication succeeds.
+
 Real-Forgejo tests use an all-or-nothing disposable-provider contract:
 
 ```text
@@ -672,6 +735,12 @@ FORGEJO_TEST_BASE_URL=http://localhost:3000 \
 FORGEJO_TEST_USERNAME=forge-mcp-ci \
 FORGEJO_TEST_PASSWORD=disposable-password \
 cargo test -p forge --test forgejo_issue_dependencies -- --ignored --nocapture
+
+FORGEJO_TEST_BASE_URL=http://forgejo:3000 \
+FORGEJO_TEST_USERNAME=forge-mcp-ci \
+FORGEJO_TEST_PASSWORD=disposable-password \
+CARGO_TARGET_DIR=/tmp/target \
+cargo test -p server --test forgejo_reword -- --ignored --nocapture
 
 FORGEJO_TEST_BASE_URL=http://localhost:3000 \
 FORGEJO_TEST_USERNAME=forge-mcp-ci \
@@ -687,6 +756,11 @@ Tests consume the configured service but never start Forgejo or a container
 runtime themselves. The label-webhook test additionally needs a listener address
 and a callback base URL that the CI-owned Forgejo service can route back to; the
 ordinary local Rust gates do not require either value.
+The reword test runs in the dedicated CI lane, which installs Git and supplies
+the disposable service and credentials. It checks PR continuity, ordered trees,
+messages and author metadata, and protected-branch push rejection. Explicitly
+running an ignored provider test with missing configuration or an unreachable
+service fails; agents do not start a local provider to run it.
 
 Woodpecker is the service-backed integration authority. The separate
 `checks` workflow runs the normal Rust gates and lints both workflow files with

@@ -115,6 +115,24 @@ When a reviewer requests changes on a PR:
 
 **Never ask the user to run git commands manually.** The tools above cover the full workflow: committing, rebasing, and force-pushing are all handled server-side.
 
+### Rewording messages
+
+Use `rebase_branch` with `{"type":"reword","commit":"<full-id>","message":"Subject\n\nBody.\n"}`
+to replace a commit message. Submit only distinct reword targets in one request;
+do not combine them with fixup, drop or rebase_onto. Use exact full object IDs
+from the linear merge-base..original-head range, never abbreviated IDs or refs.
+Messages must be nonblank, NUL-free and at most 65,536 submitted UTF-8 bytes.
+Trailing newlines are retained; one LF is appended if absent. Other message
+bytes are preserved as data. Normal project commit-message formatting still
+applies to the messages you supply.
+
+The response includes the original head and a complete ordered old/new mapping.
+Earlier commits retain their IDs; targets and descendants may change IDs and
+lose old signatures. Trees, commit order and author identity/date are preserved;
+the existing server committer policy applies. Publication uses one lease-guarded
+push and retains the existing branch and PR. A failed lease requires reading
+the current branch again before preparing another request.
+
 ## Common Mistakes
 
 | Mistake | Fix |
