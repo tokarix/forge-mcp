@@ -19,6 +19,7 @@ unimplemented = { level = "deny", priority = 1 }
 unwrap_used = { level = "deny", priority = 1 }
 
 [workspace.package]
+rust-version = "1.88"
 edition = "2024"
 version = "0.1.0"
 license = "Apache-2.0"
