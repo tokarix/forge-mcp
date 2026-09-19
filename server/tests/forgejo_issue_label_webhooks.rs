@@ -14,7 +14,7 @@ use orchestrator::{ReadOrchestrator, WriteOrchestrator};
 use reqwest::{Method, Url};
 use rmcp::{
     ClientHandler, ServiceExt,
-    model::{CallToolRequestParams, ClientInfo},
+    model::{CallToolRequestParams, ClientConfig},
     service::{RoleClient, RunningService},
 };
 use serde::{Deserialize, de::DeserializeOwned};
@@ -53,8 +53,8 @@ struct LabelResponse {
 struct TestClient;
 
 impl ClientHandler for TestClient {
-    fn get_info(&self) -> ClientInfo {
-        ClientInfo::default()
+    fn get_info(&self) -> ClientConfig {
+        ClientConfig::default()
     }
 }
 
@@ -168,7 +168,7 @@ async fn poll_once(client: &RunningService<RoleClient, TestClient>) -> Result<Ve
     let text = result
         .content
         .first()
-        .and_then(|content| content.raw.as_text())
+        .and_then(|content| content.as_text())
         .map(|content| content.text.as_str())
         .ok_or_else(|| "poll_events did not return text content".to_string())?;
     serde_json::from_str(text).map_err(|error| format!("invalid poll_events JSON: {error}"))

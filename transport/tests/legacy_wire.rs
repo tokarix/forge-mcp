@@ -221,14 +221,223 @@ async fn eof_before_initialization_is_bounded() {
 }
 
 #[tokio::test]
+async fn partial_input_eof_and_malformed_frame_recovery() {
+    let mut wire = Wire::new(config("http://fixture.invalid"));
+    wire.io
+        .get_mut()
+        .write_all(b"{\"jsonrpc\":")
+        .await
+        .expect("partial frame");
+    wire.finish(false).await;
+
+    let mut wire = Wire::new(config("http://fixture.invalid"));
+    wire.initialize("2025-06-18").await;
+    wire.io
+        .get_mut()
+        .write_all(b"not json\n")
+        .await
+        .expect("malformed frame");
+    // rmcp 3.4 ignores an unparseable frame and accepts the next valid one.
+    let response = wire.request("tools/list", json!({})).await;
+    assert!(response["result"]["tools"].is_array());
+    wire.finish(true).await;
+}
+
+#[tokio::test]
+async fn unsupported_and_malformed_initialization() {
+    let mut wire = Wire::new(config("http://fixture.invalid"));
+    let init = wire.initialize("unknown-old-revision").await;
+    assert_eq!(init["result"]["protocolVersion"], "2025-06-18");
+    wire.finish(true).await;
+    let mut wire = Wire::new(config("http://fixture.invalid"));
+    wire.send(
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":42}}),
+    )
+    .await;
+    wire.finish(false).await;
+}
+
+#[tokio::test]
+async fn forwarder_stops_during_idle_headers_or_body() {
+    for send_headers in [false, true] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("fixture listener");
+        let url = format!("http://{}", listener.local_addr().expect("fixture address"));
+        let mut wire = Wire::new(config(&url));
+        wire.initialize("2025-06-18").await;
+        let (socket, _) = tokio::time::timeout(DEADLINE, listener.accept())
+            .await
+            .expect("forwarder did not connect")
+            .expect("accept");
+        let mut socket = BufReader::new(socket);
+        loop {
+            let mut line = String::new();
+            tokio::time::timeout(DEADLINE, socket.read_line(&mut line))
+                .await
+                .expect("request timeout")
+                .expect("request headers");
+            if line == "\r\n" {
+                break;
+            }
+        }
+        if send_headers {
+            socket.get_mut().write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n").await.expect("SSE headers");
+        }
+        wire.finish(true).await;
+        let mut line = String::new();
+        assert_eq!(
+            tokio::time::timeout(DEADLINE, socket.read_line(&mut line))
+                .await
+                .expect("forwarder retained idle HTTP connection after peer closed")
+                .expect("HTTP EOF"),
+            0
+        );
+    }
+}
+
+#[tokio::test]
+async fn cancellation_keeps_session_usable() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/repos/fixture/o/r/issues/7"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(Duration::from_secs(30))
+                .set_body_json(json!({})),
+        )
+        .mount(&server)
+        .await;
+    let mut wire = Wire::new(config(&server.uri()));
+    wire.initialize("2025-06-18").await;
+    wire.send(json!({"jsonrpc":"2.0","id":99,"method":"tools/call","params":{"name":"get_issue","arguments":{"forge":"fixture","owner":"o","repo":"r","index":7}}})).await;
+    tokio::time::timeout(DEADLINE, async {
+        loop {
+            if server
+                .received_requests()
+                .await
+                .expect("requests")
+                .iter()
+                .any(|request| request.url.path().ends_with("/issues/7"))
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("call did not start");
+    wire.send(json!({"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":99,"reason":"fixture cancellation"}})).await;
+    assert!(wire.request("tools/list", json!({})).await["result"]["tools"].is_array());
+    wire.finish(true).await;
+}
+
+#[tokio::test]
+async fn gateway_forwarders_keep_identity_and_resume_once() {
+    let servers = [MockServer::start().await, MockServer::start().await];
+    let mut settings = config(&servers[0].uri());
+    settings.channel_startup_spike = true;
+    settings.gateways.clear();
+    for (i, server) in servers.iter().enumerate() {
+        let token = format!("synthetic-token-{i}");
+        settings.gateways.push(GatewayConfig {
+            name: format!("fixture-{i}"),
+            token: token.clone(),
+            url: server.uri(),
+        });
+        let event = json!({"kind":"issue","content":format!("fixture-{i}"),"meta":{"forge_alias":format!("fixture-{i}"),"owner":"o","repo":"r","event_kind":"issue","action":"opened","issue":7,"delivery_id":format!("delivery-{i}")}});
+        Mock::given(method("GET"))
+            .and(path("/api/v1/agent/events"))
+            .and(header("authorization", format!("Bearer {token}")))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(format!("id: delivery-{i}\ndata: {event}\n\n")),
+            )
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/agent/events"))
+            .and(header("authorization", format!("Bearer {token}")))
+            .and(header("last-event-id", format!("delivery-{i}")))
+            .respond_with(ResponseTemplate::new(503))
+            .expect(1)
+            .mount(server)
+            .await;
+    }
+    let mut wire = Wire::new(settings);
+    wire.initialize("2025-06-18").await;
+    wire.send(json!({"jsonrpc":"2.0","method":"notifications/initialized"}))
+        .await;
+    let mut deliveries = Vec::new();
+    for _ in 0..3 {
+        let frame = wire.receive().await;
+        assert_eq!(frame["method"], "notifications/claude/channel");
+        deliveries.push(
+            frame["params"]["meta"]["delivery_id"]
+                .as_str()
+                .expect("delivery")
+                .to_owned(),
+        );
+    }
+    deliveries.sort();
+    assert_eq!(deliveries, ["delivery-0", "delivery-1", "startup-spike"]);
+    tokio::time::timeout(DEADLINE, async {
+        loop {
+            if servers[0]
+                .received_requests()
+                .await
+                .expect("requests")
+                .len()
+                >= 2
+                && servers[1]
+                    .received_requests()
+                    .await
+                    .expect("requests")
+                    .len()
+                    >= 2
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("forwarders did not reconnect");
+    wire.finish(true).await;
+    // Both forwarders are in their retry backoff when the peer closes.
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    let mut subscribers = Vec::new();
+    for server in &servers {
+        let requests = server.received_requests().await.expect("requests");
+        assert_eq!(requests.len(), 2, "duplicate forwarder or retry after EOF");
+        let ids: Vec<_> = requests
+            .iter()
+            .map(|request| {
+                request
+                    .url
+                    .query_pairs()
+                    .find(|(key, _)| key == "subscriber_id")
+                    .expect("subscriber id")
+                    .1
+                    .into_owned()
+            })
+            .collect();
+        assert_eq!(ids[0], ids[1], "subscriber identity must survive reconnect");
+        subscribers.push(ids[0].clone());
+    }
+    assert_ne!(subscribers[0], subscribers[1]);
+}
+
+#[tokio::test]
 async fn baseline_optional_arguments_and_write_body() {
     let server = MockServer::start().await;
     Mock::given(method("PATCH"))
         .and(path("/api/v1/repos/fixture/o/r/issues/1"))
         .and(header("authorization", "Bearer synthetic-token"))
-        .and(wiremock::matchers::body_json(
-            json!({"title":"fixture"}),
-        ))
+        .and(wiremock::matchers::body_json(json!({"title":"fixture"})))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"number":1})))
         .expect(2)
         .mount(&server)

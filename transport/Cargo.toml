@@ -11,7 +11,7 @@ workspace = true
 clap = { version = "4", features = ["derive", "env"] }
 domain = { path = "../domain" }
 reqwest = { version = "0.13.2", default-features = false, features = ["json", "rustls-no-provider"] }
-rmcp = { version = "1.2.0", features = ["transport-io"] }
+rmcp = { version = "3.4.0", features = ["transport-io"] }
 rustls = { version = "0.23.37", default-features = false, features = ["ring", "std", "tls12"] }
 schemars = "1.2.1"
 serde = { version = "1.0.228", features = ["derive"] }
@@ -24,5 +24,5 @@ webpki-roots = "1.0.6"
 
 [dev-dependencies]
 tokio = { version = "1.53.1", features = ["process"] }
-rmcp = { version = "1.2.0", features = ["client", "transport-io"] }
+rmcp = { version = "3.4.0", features = ["client", "transport-io"] }
 wiremock = "0.6"

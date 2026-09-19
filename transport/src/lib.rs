@@ -11,9 +11,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rmcp::{
     ErrorData as McpError, ServerHandler, ServiceExt,
-    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
+    handler::server::{common::schema_for_type, router::tool::ToolRouter, wrapper::Parameters},
     model::{
-        CustomNotification, Implementation, ServerCapabilities, ServerInfo, ServerNotification,
+        CustomNotification, Implementation, ServerCapabilities, ServerConfig, ServerNotification,
     },
     service::{NotificationContext, RoleServer},
     tool, tool_handler, tool_router,
@@ -1431,10 +1431,13 @@ async fn sleep_with_peer_check(peer: &rmcp::service::Peer<RoleServer>, duration:
     }
 }
 
+// Keep the full 1.3 input schemas, including root titles. The 3.4 macro
+// default uses schema_for_input, which strips those titles and descriptions.
 #[tool_router]
 impl McpShim {
     /// Mark an issue as depending on another issue (blocked-by relationship).
     #[tool(
+        input_schema = schema_for_type::<AddIssueDependencyTool>(),
         name = "add_issue_dependency",
         description = "Mark an issue as depending on another issue. The issue at `index` will be blocked by the issue at `dependency`."
     )]
@@ -1478,6 +1481,7 @@ impl McpShim {
 
     /// Add a label to an issue, creating the label if it does not exist.
     #[tool(
+        input_schema = schema_for_type::<AddIssueLabelTool>(),
         name = "add_issue_label",
         description = "Add a label to an issue. Creates the label on the repository if it does not already exist."
     )]
@@ -1507,7 +1511,11 @@ impl McpShim {
     }
 
     /// Assign an issue to a user.
-    #[tool(name = "assign_issue", description = "Assign an issue to a user.")]
+    #[tool(
+        input_schema = schema_for_type::<AssignIssueTool>(),
+        name = "assign_issue",
+        description = "Assign an issue to a user."
+    )]
     async fn assign_issue(
         &self,
         Parameters(request): Parameters<AssignIssueTool>,
@@ -1533,6 +1541,7 @@ impl McpShim {
 
     /// Close a change request (pull request) on the forge.
     #[tool(
+        input_schema = schema_for_type::<CloseChangeRequestTool>(),
         name = "close_change_request",
         description = "Close a change request (pull request) on the forge. Only works for PRs whose head branch matches your configured branch prefix."
     )]
@@ -1559,7 +1568,7 @@ impl McpShim {
     }
 
     /// Close an issue.
-    #[tool(name = "close_issue", description = "Close an issue.")]
+    #[tool(input_schema = schema_for_type::<CloseIssueTool>(), name = "close_issue", description = "Close an issue.")]
     async fn close_issue(
         &self,
         Parameters(request): Parameters<CloseIssueTool>,
@@ -1585,6 +1594,7 @@ impl McpShim {
 
     /// Post a comment on an issue.
     #[tool(
+        input_schema = schema_for_type::<CommentOnIssueTool>(),
         name = "comment_on_issue",
         description = "Post a comment on an issue. For the body, pass plain Markdown text with real newlines; do NOT pre-escape paragraph breaks as literal `\\n` sequences."
     )]
@@ -1613,6 +1623,7 @@ impl McpShim {
 
     /// Create a new issue after checking for an existing open issue.
     #[tool(
+        input_schema = schema_for_type::<CreateIssueTool>(),
         name = "create_issue",
         description = "Create a new issue. Check for an existing open issue first to avoid duplicates. For the body, pass plain Markdown text with real newlines; do NOT pre-escape paragraph breaks as literal `\\n` sequences."
     )]
@@ -1640,6 +1651,7 @@ impl McpShim {
 
     /// Post a general comment on a change request (pull request).
     #[tool(
+        input_schema = schema_for_type::<CommentOnChangeRequestTool>(),
         name = "comment_on_change_request",
         description = "Post a general comment on a change request (pull request). This is not a formal review — use submit_change_request_review for that. For the body, pass plain Markdown text with real newlines; do NOT pre-escape paragraph breaks as literal `\\n` sequences."
     )]
@@ -1671,6 +1683,7 @@ impl McpShim {
 
     /// Apply a git-format patch to a new branch and push it.
     #[tool(
+        input_schema = schema_for_type::<CommitPatchTool>(),
         name = "commit_patch",
         description = "Apply a git-format patch to a new branch and push it. This is the REQUIRED way to push code (raw `git push` is strictly blocked). Patch must come from git itself (for example `git diff --no-ext-diff --binary` or `git show`) and start with `diff --git`; traditional unified diffs are rejected. New files must use git headers like `new file mode`, `--- /dev/null`, and `+++ b/<path>`. The server validates the patch and applies it in a clean clone of the base branch — do NOT run `git apply --check` locally (it will fail because your worktree already contains the changes)."
     )]
@@ -1722,6 +1735,7 @@ impl McpShim {
 
     /// Get the backward-compatible mixed discussion and review feed.
     #[tool(
+        input_schema = schema_for_type::<GetChangeRequestCommentsTool>(),
         name = "get_change_request_comments",
         description = "Get the backward-compatible mixed chronological feed of general discussion and formal reviews. Use get_change_request_discussion_comments or get_change_request_reviews for isolated reads; inline review comments are excluded. Provider pagination limits apply."
     )]
@@ -1749,6 +1763,7 @@ impl McpShim {
 
     /// Read discussion comments only.
     #[tool(
+        input_schema = schema_for_type::<GetChangeRequestDiscussionCommentsTool>(),
         name = "get_change_request_discussion_comments",
         description = "Get general PR discussion comments only, excluding formal reviews and inline review comments. GitLab returns non-system merge request notes only. Use get_change_request_comments for the backward-compatible mixed feed."
     )]
@@ -1776,6 +1791,7 @@ impl McpShim {
 
     /// Read reviews only.
     #[tool(
+        input_schema = schema_for_type::<GetChangeRequestReviewsTool>(),
         name = "get_change_request_reviews",
         description = "Get submitted top-level formal reviews only, excluding discussion and inline review comments. GitLab returns current approvals only, with no review ID, timestamp, body or commit reference; it cannot identify REQUEST_CHANGES events. Use get_change_request_comments for the backward-compatible mixed feed."
     )]
@@ -1803,6 +1819,7 @@ impl McpShim {
 
     /// Get the unified diff for a change request, written to a local file.
     #[tool(
+        input_schema = schema_for_type::<GetChangeRequestDiffTool>(),
         name = "get_change_request_diff",
         description = "Get the unified diff (patch) for a change request (pull request). The diff is written to a temporary file to avoid truncation of large patches. Returns JSON with `diff_file` (path to the patch file), `index`, and `size_bytes`. Use a file-reading tool to access the full diff content."
     )]
@@ -1855,6 +1872,7 @@ impl McpShim {
 
     /// Get a single change request by index.
     #[tool(
+        input_schema = schema_for_type::<GetChangeRequestTool>(),
         name = "get_change_request",
         description = "Get a single change request (pull request) by index. Returns nullable authoritative draft, mergeability, nullable has_conflicts, and labels. NotMergeable is not conflict evidence; re-read get before readiness decisions."
     )]
@@ -1881,6 +1899,7 @@ impl McpShim {
 
     /// Get the combined CI/check status for a change request's current head.
     #[tool(
+        input_schema = schema_for_type::<GetChangeRequestChecksTool>(),
         name = "get_change_request_checks",
         description = "Get the combined CI/check status for a change request (pull request). Returns the aggregate state (success, pending, failure, error) and per-check details for the current PR head SHA."
     )]
@@ -1908,6 +1927,7 @@ impl McpShim {
 
     /// Get the detailed CI/check status for a change request's current head.
     #[tool(
+        input_schema = schema_for_type::<GetChangeRequestCiDetailsTool>(),
         name = "get_change_request_ci_details",
         description = "Get the detailed CI/check status for a change request (pull request). Returns the aggregate state (success, pending, failure, error) and detailed per-check information for the current PR head SHA."
     )]
@@ -1934,7 +1954,7 @@ impl McpShim {
     }
 
     /// Get a single issue by index.
-    #[tool(name = "get_issue", description = "Get a single issue by index.")]
+    #[tool(input_schema = schema_for_type::<GetIssueTool>(), name = "get_issue", description = "Get a single issue by index.")]
     async fn get_issue(
         &self,
         Parameters(request): Parameters<GetIssueTool>,
@@ -1958,6 +1978,7 @@ impl McpShim {
 
     /// Get all comments for an issue.
     #[tool(
+        input_schema = schema_for_type::<GetIssueCommentsTool>(),
         name = "get_issue_comments",
         description = "Get all comments for an issue."
     )]
@@ -1985,6 +2006,7 @@ impl McpShim {
 
     /// Get the dependency relationships for an issue.
     #[tool(
+        input_schema = schema_for_type::<GetIssueDependenciesTool>(),
         name = "get_issue_dependencies",
         description = "Get the dependency relationships for an issue. Returns issues that this issue depends on (blocks it) and issues that it blocks. For Forgejo, depends_on_read_contract: \"exhaustive-v1\" together with opaque_depends_on_count: 0 signals that every direct depends_on row returned by the provider is present."
     )]
@@ -2012,6 +2034,7 @@ impl McpShim {
 
     /// List change requests for a repository.
     #[tool(
+        input_schema = schema_for_type::<ListChangeRequestsTool>(),
         name = "list_change_requests",
         description = "List change requests (pull requests) for a repository. Returns nullable authoritative draft, mergeability, nullable has_conflicts, and labels for each request. Sparse metadata remains unknown; re-read get before readiness decisions."
     )]
@@ -2040,6 +2063,7 @@ impl McpShim {
 
     /// Get details about a specific branch, including whether it exists.
     #[tool(
+        input_schema = schema_for_type::<GetBranchTool>(),
         name = "get_branch",
         description = "Get branch details by name. Returns branch information with an explicit `exists` flag. Returns `exists: false` only for a confirmed missing branch; repository, auth, or upstream errors remain errors."
     )]
@@ -2067,6 +2091,7 @@ impl McpShim {
 
     /// List branches in a repository, optionally filtered by prefix.
     #[tool(
+        input_schema = schema_for_type::<ListBranchesTool>(),
         name = "list_branches",
         description = "List branches in a repository. Accepts an optional `prefix` to filter branch names and a `limit` to cap results (default ~20, max ~100). Results may be truncated if the pagination budget is exceeded."
     )]
@@ -2101,6 +2126,7 @@ impl McpShim {
     /// the provider pagination safety envelope. Exceeding a safety budget
     /// fails the whole call.
     #[tool(
+        input_schema = schema_for_type::<ListIssuesTool>(),
         name = "list_issues",
         description = "List an exhaustive, deduplicated issue snapshot within the provider pagination safety envelope; budget failures reject the whole call."
     )]
@@ -2129,6 +2155,7 @@ impl McpShim {
 
     /// List repositories on a forge, optionally filtered by owner and/or query.
     #[tool(
+        input_schema = schema_for_type::<ListRepositoriesTool>(),
         name = "list_repositories",
         description = "List repositories available on a forge instance. Use `owner` to restrict results to a specific organization or user namespace, and `query` to search by name."
     )]
@@ -2149,6 +2176,7 @@ impl McpShim {
 
     /// Open a change request (pull request) on the forge.
     #[tool(
+        input_schema = schema_for_type::<OpenChangeRequestTool>(),
         name = "open_change_request",
         description = "Open a change request (pull request) on the forge.\n\
             Before calling this tool, check if a PR already exists for your branch \
@@ -2186,6 +2214,7 @@ impl McpShim {
 
     /// Rewrite a branch with explicit operations or update its base.
     #[tool(
+        input_schema = schema_for_type::<RebaseBranchTool>(),
         name = "rebase_branch",
         description = "Rewrite a branch with explicit operations or update its base. Use `rebase_onto` only to replay the existing branch commits onto the latest `base_branch` tip. It preserves the branch's commits as separate commits and does not squash, fix up, drop, rename, or reorder them. For review-driven commit hygiene, use explicit `fixup` and/or `drop` operations with full commit SHAs. Use exclusive reword-only operations to replace messages for distinct exact full IDs in merge-base..original-head, preserving commit order and trees. Messages must be nonblank, NUL-free and at most 65536 UTF-8 bytes; retain supplied trailing newlines or append one LF if absent. Reword returns old_commit_sha and the complete ordered commit_mapping. Targets and descendants may change IDs and lose signatures; authors and author dates are preserved, with the existing server committer policy and current committer dates. This is the REQUIRED way to rewrite history and force-push (raw `git push` is strictly blocked). Performs a full clone, validates operations, runs the rebase, and force-pushes with lease. Only works on branches matching your configured branch prefix."
     )]
@@ -2246,6 +2275,7 @@ impl McpShim {
 
     /// Cancel a scheduled merge using the caller's gateway identity.
     #[tool(
+        input_schema = schema_for_type::<GetChangeRequestTool>(),
         name = "cancel_auto_merge",
         description = "Cancel scheduled auto-merge for a PR (Forgejo only). Authenticated bodyless DELETE; no head precondition. Only upstream 204 confirms cancellation. Every upstream 404 is uncertainty (502), including never-scheduled and repeated cancellation, even after a successful PR read. Read access need not grant cancellation rights. Does not undo completed merges or prevent future independent schedules."
     )]
@@ -2274,6 +2304,7 @@ impl McpShim {
 
     /// Schedule a pull request for automatic merge when all checks pass.
     #[tool(
+        input_schema = schema_for_type::<ScheduleAutoMergeTool>(),
         name = "schedule_auto_merge",
         description = "Schedule a pull request for automatic merge when all branch protection requirements are met. Requires the expected head SHA to prevent scheduling on a stale PR. Known drafts return validation deferral; this does not cancel existing schedules. The merge style is optional; when omitted, the repository default is used when allowed, followed by the scheduler fallback order."
     )]
@@ -2325,6 +2356,7 @@ impl McpShim {
 
     /// Read a single UTF-8 text file from a repository.
     #[tool(
+        input_schema = schema_for_type::<ReadRepositoryFileTool>(),
         name = "read_repository_file",
         description = "Read a single UTF-8 text file from a repository."
     )]
@@ -2364,6 +2396,7 @@ impl McpShim {
 
     /// Remove a dependency relationship from an issue.
     #[tool(
+        input_schema = schema_for_type::<RemoveIssueDependencyTool>(),
         name = "remove_issue_dependency",
         description = "Remove a dependency relationship from an issue. The issue at `index` will no longer be blocked by the issue at `dependency`."
     )]
@@ -2409,6 +2442,7 @@ impl McpShim {
 
     /// Remove a label from an issue.
     #[tool(
+        input_schema = schema_for_type::<RemoveIssueLabelTool>(),
         name = "remove_issue_label",
         description = "Remove a label from an issue."
     )]
@@ -2438,6 +2472,7 @@ impl McpShim {
 
     /// Submit a formal review on a change request (pull request).
     #[tool(
+        input_schema = schema_for_type::<SubmitChangeRequestReviewTool>(),
         name = "submit_change_request_review",
         description = "Submit a formal review on a change request (pull request). Event must be APPROVED, REQUEST_CHANGES, or COMMENT. For the body, pass plain Markdown text with real newlines; do NOT pre-escape paragraph breaks as literal `\\n` sequences."
     )]
@@ -2469,6 +2504,7 @@ impl McpShim {
 
     /// Update a change request's title and/or body.
     #[tool(
+        input_schema = schema_for_type::<UpdateChangeRequestTool>(),
         name = "update_change_request",
         description = "Update a change request (pull request) title and/or body. Provide at least one of title or body. For the body, pass plain Markdown text with real newlines; do NOT pre-escape paragraph breaks as literal `\\n` sequences."
     )]
@@ -2507,6 +2543,7 @@ impl McpShim {
 
     /// Update an issue's title and/or body.
     #[tool(
+        input_schema = schema_for_type::<UpdateIssueTool>(),
         name = "update_issue",
         description = "Update an issue's title and/or body. Provide at least one of title or body. For the body, pass plain Markdown text with real newlines; do NOT pre-escape paragraph breaks as literal `\\n` sequences."
     )]
@@ -2693,8 +2730,39 @@ impl McpShim {
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for McpShim {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(self.channel_capabilities())
+    fn supported_protocol_versions(
+        &self,
+    ) -> std::borrow::Cow<'static, [rmcp::model::ProtocolVersion]> {
+        std::borrow::Cow::Borrowed(rmcp::model::ProtocolVersion::known_up_to(
+            &rmcp::model::ProtocolVersion::V_2025_06_18,
+        ))
+    }
+
+    async fn call_tool(
+        &self,
+        request: rmcp::model::CallToolRequestParams,
+        context: rmcp::service::RequestContext<RoleServer>,
+    ) -> Result<rmcp::model::CallToolResponse, McpError> {
+        // rmcp 3.x's router converts parameter extraction errors into tool
+        // results. Invoke the route directly to retain our JSON-RPC error
+        // contract, without reclassifying legitimate isError tool results.
+        if !self.tool_router.has_route(&request.name) {
+            return Err(McpError::invalid_params("tool not found", None));
+        }
+        let route = self
+            .tool_router
+            .map
+            .get(&request.name)
+            .ok_or_else(|| McpError::invalid_params("tool not found", None))?;
+        (route.call)(rmcp::handler::server::tool::ToolCallContext::new(
+            self, request, context,
+        ))
+        .await
+    }
+
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(self.channel_capabilities())
+            .with_protocol_version(rmcp::model::ProtocolVersion::V_2025_06_18)
             .with_instructions(self.instructions())
             .with_server_info(Implementation::new(
                 self.config.server_name.clone(),
@@ -2729,15 +2797,18 @@ impl ServerHandler for McpShim {
                 "event forwarder started",
             );
             tokio::spawn(async move {
-                Self::run_event_forwarder(
-                    client,
-                    gw,
-                    startup_spike,
-                    event_buffer,
-                    subscriber_id,
-                    peer,
-                )
-                .await;
+                // Also cancel a pending HTTP connection/header read when the
+                // MCP peer closes, not only an established SSE body or backoff.
+                tokio::select! {
+                    () = async {
+                        while !peer.is_transport_closed() {
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                        }
+                    } => {},
+                    () = Self::run_event_forwarder(
+                        client, gw, startup_spike, event_buffer, subscriber_id, peer.clone(),
+                    ) => {},
+                }
             });
         }
     }
@@ -2768,11 +2839,60 @@ mod tests {
 
     use rmcp::{
         ClientHandler, ServiceExt,
-        model::{CallToolRequestParams, ClientInfo, CustomNotification},
+        model::{CallToolRequestParams, ClientConfig, CustomNotification},
     };
     use tokio::sync::{Mutex, Notify};
 
     use super::*;
+
+    #[tokio::test]
+    async fn compatibility_dispatch_preserves_tool_errors_and_disabled_routes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use rmcp::handler::server::router::tool::ToolRoute;
+        use rmcp::model::{CallToolResult, ContentBlock, Tool};
+
+        let mut shim = McpShim::new(test_config("http://fixture.invalid"));
+        let schema = serde_json::json!({"type":"object","properties":{}})
+            .as_object()
+            .expect("schema")
+            .clone();
+        shim.tool_router.add_route(ToolRoute::new(
+            Tool::new("fixture_tool_error", "test only", schema),
+            || async { CallToolResult::error(vec![ContentBlock::text("legitimate tool failure")]) },
+        ));
+        shim.tool_router.disable_route("get_issue");
+        let (server, client) = tokio::io::duplex(65536);
+        let task = tokio::spawn(async move {
+            shim.serve(server)
+                .await
+                .expect("initialize server")
+                .waiting()
+                .await
+        });
+        let client = ClientConfig::default()
+            .with_protocol_version(rmcp::model::ProtocolVersion::V_2025_06_18)
+            .serve(client)
+            .await?;
+        let result = client
+            .call_tool(CallToolRequestParams::new("fixture_tool_error"))
+            .await?;
+        assert_eq!(result.is_error, Some(true));
+        assert_eq!(
+            result.content[0].as_text().expect("text").text,
+            "legitimate tool failure"
+        );
+        assert!(result.structured_content.is_none());
+        let error = client
+            .call_tool(CallToolRequestParams::new("get_issue"))
+            .await
+            .expect_err("disabled tool");
+        assert!(error.to_string().contains("tool not found"));
+        let catalog = client.list_all_tools().await?;
+        assert!(!catalog.iter().any(|tool| tool.name == "get_issue"));
+        drop(client);
+        tokio::time::timeout(Duration::from_secs(5), task).await???;
+        Ok(())
+    }
 
     #[test]
     fn deserialize_add_issue_label_tool() {
@@ -2826,8 +2946,8 @@ mod tests {
     struct DummyClientHandler;
 
     impl ClientHandler for DummyClientHandler {
-        fn get_info(&self) -> ClientInfo {
-            ClientInfo::default()
+        fn get_info(&self) -> ClientConfig {
+            ClientConfig::default()
         }
     }
 
@@ -2840,8 +2960,8 @@ mod tests {
     type CapturedNotification = (String, Option<serde_json::Value>);
 
     impl ClientHandler for ChannelCaptureClient {
-        fn get_info(&self) -> ClientInfo {
-            ClientInfo::default()
+        fn get_info(&self) -> ClientConfig {
+            ClientConfig::default()
         }
 
         async fn on_custom_notification(
@@ -4322,7 +4442,7 @@ mod tests {
         let text = result
             .content
             .first()
-            .and_then(|c| c.raw.as_text())
+            .and_then(|c| c.as_text())
             .map(|t| t.text.clone())
             .expect("text result");
         assert_eq!(text, "hello world");
@@ -4375,7 +4495,7 @@ mod tests {
         let text = result
             .content
             .first()
-            .and_then(|c| c.raw.as_text())
+            .and_then(|c| c.as_text())
             .map(|t| t.text.clone())
             .expect("text result");
         assert!(text.contains("agent/fix"));
@@ -4451,7 +4571,7 @@ mod tests {
         let text = result
             .content
             .first()
-            .and_then(|c| c.raw.as_text())
+            .and_then(|c| c.as_text())
             .map(|t| t.text.clone())
             .expect("text result");
         assert!(text.contains('{'));
@@ -4557,7 +4677,7 @@ mod tests {
         let text = result
             .content
             .first()
-            .and_then(|c| c.raw.as_text())
+            .and_then(|c| c.as_text())
             .map(|t| t.text.clone())
             .expect("text result");
         assert!(text.contains('{'));
@@ -4629,7 +4749,7 @@ mod tests {
         let text = result
             .content
             .first()
-            .and_then(|c| c.raw.as_text())
+            .and_then(|c| c.as_text())
             .map(|t| t.text.clone())
             .expect("text result");
         assert!(text.contains("looks good"));
@@ -4689,7 +4809,7 @@ mod tests {
         let text = result
             .content
             .first()
-            .and_then(|c| c.raw.as_text())
+            .and_then(|c| c.as_text())
             .map(|t| t.text.clone())
             .expect("text result");
         let forwarded: serde_json::Value = serde_json::from_str(&text)?;
@@ -4754,7 +4874,7 @@ mod tests {
         let text = result
             .content
             .first()
-            .and_then(|c| c.raw.as_text())
+            .and_then(|c| c.as_text())
             .map(|t| t.text.clone())
             .expect("text result");
         let forwarded: serde_json::Value = serde_json::from_str(&text)?;
@@ -4903,7 +5023,7 @@ mod tests {
         let text = result
             .content
             .first()
-            .and_then(|c| c.raw.as_text())
+            .and_then(|c| c.as_text())
             .map(|t| t.text.clone())
             .expect("text result");
         assert!(text.contains("Bug"));
@@ -4946,7 +5066,7 @@ mod tests {
         let text = result
             .content
             .first()
-            .and_then(|c| c.raw.as_text())
+            .and_then(|c| c.as_text())
             .map(|t| t.text.clone())
             .expect("text result");
         assert!(text.contains("Fix login"));
@@ -4990,7 +5110,7 @@ mod tests {
         let text = result
             .content
             .first()
-            .and_then(|c| c.raw.as_text())
+            .and_then(|c| c.as_text())
             .map(|t| t.text.clone())
             .expect("text result");
         assert!(text.contains("noted"));
@@ -5041,7 +5161,7 @@ mod tests {
         let text = result
             .content
             .first()
-            .and_then(|c| c.raw.as_text())
+            .and_then(|c| c.as_text())
             .map(|t| t.text.clone())
             .expect("text result");
         assert!(text.contains("Bug report"));
@@ -5093,7 +5213,7 @@ mod tests {
         let text = result
             .content
             .first()
-            .and_then(|c| c.raw.as_text())
+            .and_then(|c| c.as_text())
             .map(|t| t.text.clone())
             .expect("text content");
         let events: Vec<serde_json::Value> = serde_json::from_str(&text)?;
@@ -5109,7 +5229,7 @@ mod tests {
         let text = result
             .content
             .first()
-            .and_then(|c| c.raw.as_text())
+            .and_then(|c| c.as_text())
             .map(|t| t.text.clone())
             .expect("text content");
         assert_eq!(text, "[]");
@@ -5162,7 +5282,7 @@ mod tests {
         let text = result
             .content
             .first()
-            .and_then(|c| c.raw.as_text())
+            .and_then(|c| c.as_text())
             .map(|t| t.text.clone())
             .expect("text content");
         let events: Vec<serde_json::Value> = serde_json::from_str(&text)?;
@@ -5233,7 +5353,7 @@ mod tests {
             let text = result
                 .content
                 .first()
-                .and_then(|c| c.raw.as_text())
+                .and_then(|c| c.as_text())
                 .map(|t| t.text.clone())
                 .expect("text content");
             let events: Vec<serde_json::Value> = serde_json::from_str(&text)?;
@@ -5300,7 +5420,7 @@ mod tests {
                 let text = result
                     .content
                     .first()
-                    .and_then(|content| content.raw.as_text())
+                    .and_then(|content| content.as_text())
                     .map(|text| text.text.clone())
                     .expect("text content");
                 let events: Vec<serde_json::Value> = serde_json::from_str(&text)?;
@@ -5338,7 +5458,7 @@ mod tests {
             let text = drained
                 .content
                 .first()
-                .and_then(|content| content.raw.as_text())
+                .and_then(|content| content.as_text())
                 .map(|text| text.text.clone())
                 .expect("text content");
             assert_eq!(text, "[]");
@@ -5394,7 +5514,7 @@ mod tests {
         let text = result
             .content
             .first()
-            .and_then(|c| c.raw.as_text())
+            .and_then(|c| c.as_text())
             .map(|t| t.text.clone())
             .expect("text content");
         let events: Vec<serde_json::Value> = serde_json::from_str(&text)?;
@@ -5495,7 +5615,7 @@ mod tests {
                         let text = result
                             .content
                             .first()
-                            .and_then(|c| c.raw.as_text())
+                            .and_then(|c| c.as_text())
                             .expect("text");
                         let events: Vec<serde_json::Value> = serde_json::from_str(&text.text)?;
                         if !events.is_empty() {
@@ -5513,7 +5633,7 @@ mod tests {
                     result
                         .content
                         .first()
-                        .and_then(|c| c.raw.as_text())
+                        .and_then(|c| c.as_text())
                         .expect("text")
                         .text,
                     "[]"
@@ -5587,7 +5707,7 @@ mod tests {
                         let text = result
                             .content
                             .first()
-                            .and_then(|c| c.raw.as_text())
+                            .and_then(|c| c.as_text())
                             .expect("text");
                         let events: Vec<serde_json::Value> = serde_json::from_str(&text.text)?;
                         if !events.is_empty() {
@@ -5605,7 +5725,7 @@ mod tests {
                     result
                         .content
                         .first()
-                        .and_then(|c| c.raw.as_text())
+                        .and_then(|c| c.as_text())
                         .expect("text")
                         .text,
                     "[]"
@@ -5670,7 +5790,7 @@ mod tests {
                         let text = result
                             .content
                             .first()
-                            .and_then(|c| c.raw.as_text())
+                            .and_then(|c| c.as_text())
                             .expect("text");
                         let events: Vec<serde_json::Value> = serde_json::from_str(&text.text)?;
                         if !events.is_empty() {
@@ -5688,7 +5808,7 @@ mod tests {
                     result
                         .content
                         .first()
-                        .and_then(|c| c.raw.as_text())
+                        .and_then(|c| c.as_text())
                         .expect("text")
                         .text,
                     "[]"
@@ -5754,7 +5874,7 @@ mod tests {
                         let text = result
                             .content
                             .first()
-                            .and_then(|c| c.raw.as_text())
+                            .and_then(|c| c.as_text())
                             .expect("text");
                         let events: Vec<serde_json::Value> = serde_json::from_str(&text.text)?;
                         if !events.is_empty() {
@@ -5772,7 +5892,7 @@ mod tests {
                     result
                         .content
                         .first()
-                        .and_then(|c| c.raw.as_text())
+                        .and_then(|c| c.as_text())
                         .expect("text")
                         .text,
                     "[]"
@@ -5846,7 +5966,7 @@ mod tests {
                         let text = result
                             .content
                             .first()
-                            .and_then(|c| c.raw.as_text())
+                            .and_then(|c| c.as_text())
                             .expect("text");
                         let events: Vec<serde_json::Value> = serde_json::from_str(&text.text)?;
                         if !events.is_empty() {
@@ -5864,7 +5984,7 @@ mod tests {
                     result
                         .content
                         .first()
-                        .and_then(|c| c.raw.as_text())
+                        .and_then(|c| c.as_text())
                         .expect("text")
                         .text,
                     "[]"
@@ -5922,7 +6042,7 @@ mod tests {
         let text = result
             .content
             .first()
-            .and_then(|c| c.raw.as_text())
+            .and_then(|c| c.as_text())
             .map(|t| t.text.clone())
             .expect("text content");
         let events: Vec<serde_json::Value> = serde_json::from_str(&text)?;
@@ -5979,7 +6099,7 @@ mod tests {
         let text = result
             .content
             .first()
-            .and_then(|c| c.raw.as_text())
+            .and_then(|c| c.as_text())
             .map(|t| t.text.clone())
             .expect("text result");
         assert!(text.contains("Updated title"));
@@ -6030,7 +6150,7 @@ mod tests {
         let text = result
             .content
             .first()
-            .and_then(|c| c.raw.as_text())
+            .and_then(|c| c.as_text())
             .map(|t| t.text.clone())
             .expect("text result");
         let parsed: serde_json::Value = serde_json::from_str(&text)?;
@@ -6096,7 +6216,7 @@ mod tests {
         let text = result
             .content
             .first()
-            .and_then(|c| c.raw.as_text())
+            .and_then(|c| c.as_text())
             .map(|t| t.text.clone())
             .expect("text result");
         let parsed: serde_json::Value = serde_json::from_str(&text)?;
@@ -6199,7 +6319,7 @@ mod tests {
         let text = result
             .content
             .first()
-            .and_then(|c| c.raw.as_text())
+            .and_then(|c| c.as_text())
             .map(|t| t.text.clone())
             .expect("text result");
         assert!(text.contains("Alpha issue"));
@@ -6217,7 +6337,7 @@ mod tests {
         let text = result
             .content
             .first()
-            .and_then(|c| c.raw.as_text())
+            .and_then(|c| c.as_text())
             .map(|t| t.text.clone())
             .expect("text result");
         assert!(text.contains("Beta issue"));
@@ -6311,7 +6431,7 @@ mod tests {
         let text = result
             .content
             .first()
-            .and_then(|c| c.raw.as_text())
+            .and_then(|c| c.as_text())
             .map(|t| t.text.clone())
             .expect("text result");
         assert!(text.contains("Alpha issue"));
@@ -6332,7 +6452,7 @@ mod tests {
         let text = result
             .content
             .first()
-            .and_then(|c| c.raw.as_text())
+            .and_then(|c| c.as_text())
             .map(|t| t.text.clone())
             .expect("text result");
         assert!(text.contains("Beta issue"));
@@ -6425,7 +6545,7 @@ mod tests {
         let text = result
             .content
             .first()
-            .and_then(|c| c.raw.as_text())
+            .and_then(|c| c.as_text())
             .map(|t| t.text.clone())
             .expect("text result");
         assert!(text.contains("Alpha issue"));
@@ -6445,7 +6565,7 @@ mod tests {
         let text = result
             .content
             .first()
-            .and_then(|c| c.raw.as_text())
+            .and_then(|c| c.as_text())
             .map(|t| t.text.clone())
             .expect("text result");
         assert!(text.contains("Beta issue"));
@@ -6636,7 +6756,7 @@ mod tests {
         let text = result
             .content
             .first()
-            .and_then(|c| c.raw.as_text())
+            .and_then(|c| c.as_text())
             .map(|t| t.text.clone())
             .expect("text result");
         assert!(text.contains("Alpha issue"));
@@ -6667,7 +6787,7 @@ mod tests {
         let text = result
             .content
             .first()
-            .and_then(|c| c.raw.as_text())
+            .and_then(|c| c.as_text())
             .map(|t| t.text.clone())
             .expect("text result");
         assert!(text.contains("Beta issue"));
@@ -6718,7 +6838,7 @@ mod tests {
         let text = result
             .content
             .first()
-            .and_then(|c| c.raw.as_text())
+            .and_then(|c| c.as_text())
             .map(|t| t.text.clone())
             .expect("text result");
         let parsed: serde_json::Value = serde_json::from_str(&text)?;
@@ -6803,7 +6923,7 @@ mod tests {
         let text = result
             .content
             .first()
-            .and_then(|c| c.raw.as_text())
+            .and_then(|c| c.as_text())
             .map(|t| t.text.clone())
             .expect("text result");
         let parsed: serde_json::Value = serde_json::from_str(&text)?;
@@ -6882,7 +7002,7 @@ mod tests {
         let text = result
             .content
             .first()
-            .and_then(|c| c.raw.as_text())
+            .and_then(|c| c.as_text())
             .map(|t| t.text.clone())
             .expect("text result");
         assert!(text.contains("Healthy issue"));
@@ -6953,7 +7073,7 @@ mod tests {
         let text = result
             .content
             .first()
-            .and_then(|c| c.raw.as_text())
+            .and_then(|c| c.as_text())
             .map(|t| t.text.clone())
             .expect("text result");
         let parsed: serde_json::Value = serde_json::from_str(&text)?;
@@ -7022,7 +7142,7 @@ mod tests {
         let text = result
             .content
             .first()
-            .and_then(|c| c.raw.as_text())
+            .and_then(|c| c.as_text())
             .map(|t| t.text.clone())
             .expect("text result");
         let parsed: serde_json::Value = serde_json::from_str(&text)?;
@@ -7095,7 +7215,7 @@ mod tests {
         let text = result
             .content
             .first()
-            .and_then(|c| c.raw.as_text())
+            .and_then(|c| c.as_text())
             .map(|t| t.text.clone())
             .expect("text result");
         let parsed: serde_json::Value = serde_json::from_str(&text)?;
