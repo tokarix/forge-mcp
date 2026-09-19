@@ -23,5 +23,6 @@ tracing = "0.1"
 webpki-roots = "1.0.6"
 
 [dev-dependencies]
+tokio = { version = "1.53.1", features = ["process"] }
 rmcp = { version = "1.2.0", features = ["client", "transport-io"] }
 wiremock = "0.6"

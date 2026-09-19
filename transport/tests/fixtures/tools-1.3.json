@@ -1,0 +1,1501 @@
+{
+  "id": 2,
+  "jsonrpc": "2.0",
+  "result": {
+    "tools": [
+      {
+        "description": "Mark an issue as depending on another issue. The issue at `index` will be blocked by the issue at `dependency`.",
+        "inputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "dependency": {
+              "description": "Index of the issue that this issue depends on (the blocking issue).",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "dependency_owner": {
+              "description": "Override owner for the dependency issue (cross-repository dependency).\nMust be provided together with `dependency_repo` or both omitted.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "dependency_repo": {
+              "description": "Override repository for the dependency issue (cross-repository dependency).\nMust be provided together with `dependency_owner` or both omitted.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "forge": {
+              "description": "Forge alias -- use `forge_info` to discover available aliases.",
+              "type": "string"
+            },
+            "index": {
+              "description": "Issue index number.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "owner": {
+              "description": "Repository owner or organization.",
+              "type": "string"
+            },
+            "repo": {
+              "description": "Repository name.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "dependency",
+            "forge",
+            "index",
+            "owner",
+            "repo"
+          ],
+          "title": "AddIssueDependencyTool",
+          "type": "object"
+        },
+        "name": "add_issue_dependency"
+      },
+      {
+        "description": "Add a label to an issue. Creates the label on the repository if it does not already exist.",
+        "inputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "forge": {
+              "description": "Forge alias -- use `forge_info` to discover available aliases.",
+              "type": "string"
+            },
+            "index": {
+              "description": "Issue index number.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "label": {
+              "description": "Label name to add. The label will be created on the repository if it\ndoes not already exist.",
+              "type": "string"
+            },
+            "owner": {
+              "description": "Repository owner or organization.",
+              "type": "string"
+            },
+            "repo": {
+              "description": "Repository name.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "forge",
+            "index",
+            "label",
+            "owner",
+            "repo"
+          ],
+          "title": "AddIssueLabelTool",
+          "type": "object"
+        },
+        "name": "add_issue_label"
+      },
+      {
+        "description": "Assign an issue to a user.",
+        "inputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "assignee": {
+              "description": "User to assign the issue to.",
+              "type": "string"
+            },
+            "forge": {
+              "description": "Forge alias -- use `forge_info` to discover available aliases.",
+              "type": "string"
+            },
+            "index": {
+              "description": "Issue index number.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "owner": {
+              "description": "Repository owner or organization.",
+              "type": "string"
+            },
+            "repo": {
+              "description": "Repository name.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "assignee",
+            "forge",
+            "index",
+            "owner",
+            "repo"
+          ],
+          "title": "AssignIssueTool",
+          "type": "object"
+        },
+        "name": "assign_issue"
+      },
+      {
+        "description": "Cancel scheduled auto-merge for a PR (Forgejo only). Authenticated bodyless DELETE; no head precondition. Only upstream 204 confirms cancellation. Every upstream 404 is uncertainty (502), including never-scheduled and repeated cancellation, even after a successful PR read. Read access need not grant cancellation rights. Does not undo completed merges or prevent future independent schedules.",
+        "inputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "forge": {
+              "description": "Forge alias -- use `forge_info` to discover available aliases.",
+              "type": "string"
+            },
+            "index": {
+              "description": "Change request index number.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "owner": {
+              "description": "Repository owner or organization.",
+              "type": "string"
+            },
+            "repo": {
+              "description": "Repository name.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "forge",
+            "index",
+            "owner",
+            "repo"
+          ],
+          "title": "GetChangeRequestTool",
+          "type": "object"
+        },
+        "name": "cancel_auto_merge"
+      },
+      {
+        "description": "Close a change request (pull request) on the forge. Only works for PRs whose head branch matches your configured branch prefix.",
+        "inputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "forge": {
+              "description": "Forge alias -- use `forge_info` to discover available aliases.",
+              "type": "string"
+            },
+            "index": {
+              "description": "Change request index number.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "owner": {
+              "description": "Repository owner or organization.",
+              "type": "string"
+            },
+            "repo": {
+              "description": "Repository name.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "forge",
+            "index",
+            "owner",
+            "repo"
+          ],
+          "title": "CloseChangeRequestTool",
+          "type": "object"
+        },
+        "name": "close_change_request"
+      },
+      {
+        "description": "Close an issue.",
+        "inputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "forge": {
+              "description": "Forge alias -- use `forge_info` to discover available aliases.",
+              "type": "string"
+            },
+            "index": {
+              "description": "Issue index number.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "message": {
+              "description": "Closing comment message.",
+              "type": "string"
+            },
+            "owner": {
+              "description": "Repository owner or organization.",
+              "type": "string"
+            },
+            "repo": {
+              "description": "Repository name.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "forge",
+            "index",
+            "message",
+            "owner",
+            "repo"
+          ],
+          "title": "CloseIssueTool",
+          "type": "object"
+        },
+        "name": "close_issue"
+      },
+      {
+        "description": "Post a general comment on a change request (pull request). This is not a formal review — use submit_change_request_review for that. For the body, pass plain Markdown text with real newlines; do NOT pre-escape paragraph breaks as literal `\\n` sequences.",
+        "inputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "body": {
+              "description": "Comment text.",
+              "type": "string"
+            },
+            "forge": {
+              "description": "Forge alias -- use `forge_info` to discover available aliases.",
+              "type": "string"
+            },
+            "index": {
+              "description": "Change request index number.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "owner": {
+              "description": "Repository owner or organization.",
+              "type": "string"
+            },
+            "repo": {
+              "description": "Repository name.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "body",
+            "forge",
+            "index",
+            "owner",
+            "repo"
+          ],
+          "title": "CommentOnChangeRequestTool",
+          "type": "object"
+        },
+        "name": "comment_on_change_request"
+      },
+      {
+        "description": "Post a comment on an issue. For the body, pass plain Markdown text with real newlines; do NOT pre-escape paragraph breaks as literal `\\n` sequences.",
+        "inputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "body": {
+              "description": "Comment body text.",
+              "type": "string"
+            },
+            "forge": {
+              "description": "Forge alias -- use `forge_info` to discover available aliases.",
+              "type": "string"
+            },
+            "index": {
+              "description": "Issue index number.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "owner": {
+              "description": "Repository owner or organization.",
+              "type": "string"
+            },
+            "repo": {
+              "description": "Repository name.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "body",
+            "forge",
+            "index",
+            "owner",
+            "repo"
+          ],
+          "title": "CommentOnIssueTool",
+          "type": "object"
+        },
+        "name": "comment_on_issue"
+      },
+      {
+        "description": "Apply a git-format patch to a new branch and push it. This is the REQUIRED way to push code (raw `git push` is strictly blocked). Patch must come from git itself (for example `git diff --no-ext-diff --binary` or `git show`) and start with `diff --git`; traditional unified diffs are rejected. New files must use git headers like `new file mode`, `--- /dev/null`, and `+++ b/<path>`. The server validates the patch and applies it in a clean clone of the base branch — do NOT run `git apply --check` locally (it will fail because your worktree already contains the changes).",
+        "inputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "author_email": {
+              "description": "Optional commit author email. If omitted, the shim will try to use the\nlocal git author identity.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "author_name": {
+              "description": "Optional commit author name. If omitted, the shim will try to use the\nlocal git author identity.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "base_branch": {
+              "description": "Base branch to create from (e.g. \"main\").",
+              "type": "string"
+            },
+            "commit_message": {
+              "description": "Commit message.",
+              "type": "string"
+            },
+            "existing_branch": {
+              "default": false,
+              "description": "Set to true to push to an existing branch instead of creating a new one.\nRequires a configured `branch_prefix` in the agent's policy.",
+              "type": "boolean"
+            },
+            "forge": {
+              "description": "Forge alias -- use `forge_info` to discover available aliases.",
+              "type": "string"
+            },
+            "new_branch": {
+              "description": "New branch name (must start with \"agent/\").",
+              "type": "string"
+            },
+            "owner": {
+              "description": "Repository owner or organization.",
+              "type": "string"
+            },
+            "patch": {
+              "description": "Git-format patch to apply. Must be produced by `git diff` or `git show`\nand begin with `diff --git`; traditional unified diffs are rejected.\nThe patch must be generated from a repository with the correct history\n(e.g., your workspace clone or worktree). DO NOT generate patches from a newly\n`git init`ed directory or a fake repository, as they will be rejected.\nProvide either this or `patch_file`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "patch_file": {
+              "description": "Path to a file containing a git-format patch. Use this instead of\n`patch` for large diffs that may exceed tool parameter limits.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "repo": {
+              "description": "Repository name.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "base_branch",
+            "commit_message",
+            "forge",
+            "new_branch",
+            "owner",
+            "repo"
+          ],
+          "title": "CommitPatchTool",
+          "type": "object"
+        },
+        "name": "commit_patch"
+      },
+      {
+        "description": "Create a new issue. Check for an existing open issue first to avoid duplicates. For the body, pass plain Markdown text with real newlines; do NOT pre-escape paragraph breaks as literal `\\n` sequences.",
+        "inputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "body": {
+              "description": "Issue body text.",
+              "type": "string"
+            },
+            "forge": {
+              "description": "Forge alias -- use `forge_info` to discover available aliases.",
+              "type": "string"
+            },
+            "owner": {
+              "description": "Repository owner or organization.",
+              "type": "string"
+            },
+            "repo": {
+              "description": "Repository name.",
+              "type": "string"
+            },
+            "title": {
+              "description": "Issue title. Check for an existing open issue first to avoid duplicates.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "body",
+            "forge",
+            "owner",
+            "repo",
+            "title"
+          ],
+          "title": "CreateIssueTool",
+          "type": "object"
+        },
+        "name": "create_issue"
+      },
+      {
+        "description": "Discover dynamic facts like available forge instances, gateway URLs, git URL templates, branch prefixes, and authentication details. Call this FIRST to learn which forges you can access and to map forge aliases to the correct gateway in multi-gateway mode. IMPORTANT: forge-mcp strictly blocks `git push`. You MUST use the `commit_patch` and `rebase_branch` tools for all write operations.",
+        "inputSchema": {
+          "properties": {},
+          "type": "object"
+        },
+        "name": "forge_info"
+      },
+      {
+        "description": "Get branch details by name. Returns branch information with an explicit `exists` flag. Returns `exists: false` only for a confirmed missing branch; repository, auth, or upstream errors remain errors.",
+        "inputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "branch": {
+              "description": "Branch name to look up.",
+              "type": "string"
+            },
+            "forge": {
+              "description": "Forge alias -- use `forge_info` to discover available aliases.",
+              "type": "string"
+            },
+            "owner": {
+              "description": "Repository owner or organization.",
+              "type": "string"
+            },
+            "repo": {
+              "description": "Repository name.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "branch",
+            "forge",
+            "owner",
+            "repo"
+          ],
+          "title": "GetBranchTool",
+          "type": "object"
+        },
+        "name": "get_branch"
+      },
+      {
+        "description": "Get a single change request (pull request) by index. Returns nullable authoritative draft, mergeability, nullable has_conflicts, and labels. NotMergeable is not conflict evidence; re-read get before readiness decisions.",
+        "inputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "forge": {
+              "description": "Forge alias -- use `forge_info` to discover available aliases.",
+              "type": "string"
+            },
+            "index": {
+              "description": "Change request index number.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "owner": {
+              "description": "Repository owner or organization.",
+              "type": "string"
+            },
+            "repo": {
+              "description": "Repository name.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "forge",
+            "index",
+            "owner",
+            "repo"
+          ],
+          "title": "GetChangeRequestTool",
+          "type": "object"
+        },
+        "name": "get_change_request"
+      },
+      {
+        "description": "Get the combined CI/check status for a change request (pull request). Returns the aggregate state (success, pending, failure, error) and per-check details for the current PR head SHA.",
+        "inputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "forge": {
+              "description": "Forge alias -- use `forge_info` to discover available aliases.",
+              "type": "string"
+            },
+            "index": {
+              "description": "Change request (pull request) index number.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "owner": {
+              "description": "Repository owner or organization.",
+              "type": "string"
+            },
+            "repo": {
+              "description": "Repository name.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "forge",
+            "index",
+            "owner",
+            "repo"
+          ],
+          "title": "GetChangeRequestChecksTool",
+          "type": "object"
+        },
+        "name": "get_change_request_checks"
+      },
+      {
+        "description": "Get the detailed CI/check status for a change request (pull request). Returns the aggregate state (success, pending, failure, error) and detailed per-check information for the current PR head SHA.",
+        "inputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "forge": {
+              "description": "Forge alias -- use `forge_info` to discover available aliases.",
+              "type": "string"
+            },
+            "index": {
+              "description": "Change request (pull request) index number.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "owner": {
+              "description": "Repository owner or organization.",
+              "type": "string"
+            },
+            "repo": {
+              "description": "Repository name.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "forge",
+            "index",
+            "owner",
+            "repo"
+          ],
+          "title": "GetChangeRequestCiDetailsTool",
+          "type": "object"
+        },
+        "name": "get_change_request_ci_details"
+      },
+      {
+        "description": "Get the backward-compatible mixed chronological feed of general discussion and formal reviews. Use get_change_request_discussion_comments or get_change_request_reviews for isolated reads; inline review comments are excluded. Provider pagination limits apply.",
+        "inputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "forge": {
+              "description": "Forge alias -- use `forge_info` to discover available aliases.",
+              "type": "string"
+            },
+            "index": {
+              "description": "Change request index number.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "owner": {
+              "description": "Repository owner or organization.",
+              "type": "string"
+            },
+            "repo": {
+              "description": "Repository name.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "forge",
+            "index",
+            "owner",
+            "repo"
+          ],
+          "title": "GetChangeRequestCommentsTool",
+          "type": "object"
+        },
+        "name": "get_change_request_comments"
+      },
+      {
+        "description": "Get the unified diff (patch) for a change request (pull request). The diff is written to a temporary file to avoid truncation of large patches. Returns JSON with `diff_file` (path to the patch file), `index`, and `size_bytes`. Use a file-reading tool to access the full diff content.",
+        "inputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "forge": {
+              "description": "Forge alias -- use `forge_info` to discover available aliases.",
+              "type": "string"
+            },
+            "index": {
+              "description": "Change request index number.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "owner": {
+              "description": "Repository owner or organization.",
+              "type": "string"
+            },
+            "repo": {
+              "description": "Repository name.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "forge",
+            "index",
+            "owner",
+            "repo"
+          ],
+          "title": "GetChangeRequestDiffTool",
+          "type": "object"
+        },
+        "name": "get_change_request_diff"
+      },
+      {
+        "description": "Get general PR discussion comments only, excluding formal reviews and inline review comments. GitLab returns non-system merge request notes only. Use get_change_request_comments for the backward-compatible mixed feed.",
+        "inputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "forge": {
+              "description": "Forge alias -- use `forge_info` to discover available aliases.",
+              "type": "string"
+            },
+            "index": {
+              "description": "Change request index number.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "owner": {
+              "description": "Repository owner or organization.",
+              "type": "string"
+            },
+            "repo": {
+              "description": "Repository name.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "forge",
+            "index",
+            "owner",
+            "repo"
+          ],
+          "title": "GetChangeRequestDiscussionCommentsTool",
+          "type": "object"
+        },
+        "name": "get_change_request_discussion_comments"
+      },
+      {
+        "description": "Get submitted top-level formal reviews only, excluding discussion and inline review comments. GitLab returns current approvals only, with no review ID, timestamp, body or commit reference; it cannot identify REQUEST_CHANGES events. Use get_change_request_comments for the backward-compatible mixed feed.",
+        "inputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "forge": {
+              "description": "Forge alias -- use `forge_info` to discover available aliases.",
+              "type": "string"
+            },
+            "index": {
+              "description": "Change request index number.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "owner": {
+              "description": "Repository owner or organization.",
+              "type": "string"
+            },
+            "repo": {
+              "description": "Repository name.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "forge",
+            "index",
+            "owner",
+            "repo"
+          ],
+          "title": "GetChangeRequestReviewsTool",
+          "type": "object"
+        },
+        "name": "get_change_request_reviews"
+      },
+      {
+        "description": "Get a single issue by index.",
+        "inputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "forge": {
+              "description": "Forge alias -- use `forge_info` to discover available aliases.",
+              "type": "string"
+            },
+            "index": {
+              "description": "Issue index number.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "owner": {
+              "description": "Repository owner or organization.",
+              "type": "string"
+            },
+            "repo": {
+              "description": "Repository name.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "forge",
+            "index",
+            "owner",
+            "repo"
+          ],
+          "title": "GetIssueTool",
+          "type": "object"
+        },
+        "name": "get_issue"
+      },
+      {
+        "description": "Get all comments for an issue.",
+        "inputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "forge": {
+              "description": "Forge alias -- use `forge_info` to discover available aliases.",
+              "type": "string"
+            },
+            "index": {
+              "description": "Issue index number.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "owner": {
+              "description": "Repository owner or organization.",
+              "type": "string"
+            },
+            "repo": {
+              "description": "Repository name.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "forge",
+            "index",
+            "owner",
+            "repo"
+          ],
+          "title": "GetIssueCommentsTool",
+          "type": "object"
+        },
+        "name": "get_issue_comments"
+      },
+      {
+        "description": "Get the dependency relationships for an issue. Returns issues that this issue depends on (blocks it) and issues that it blocks. For Forgejo, depends_on_read_contract: \"exhaustive-v1\" together with opaque_depends_on_count: 0 signals that every direct depends_on row returned by the provider is present.",
+        "inputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "forge": {
+              "description": "Forge alias -- use `forge_info` to discover available aliases.",
+              "type": "string"
+            },
+            "index": {
+              "description": "Issue index number.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "owner": {
+              "description": "Repository owner or organization.",
+              "type": "string"
+            },
+            "repo": {
+              "description": "Repository name.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "forge",
+            "index",
+            "owner",
+            "repo"
+          ],
+          "title": "GetIssueDependenciesTool",
+          "type": "object"
+        },
+        "name": "get_issue_dependencies"
+      },
+      {
+        "description": "List branches in a repository. Accepts an optional `prefix` to filter branch names and a `limit` to cap results (default ~20, max ~100). Results may be truncated if the pagination budget is exceeded.",
+        "inputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "forge": {
+              "description": "Forge alias -- use `forge_info` to discover available aliases.",
+              "type": "string"
+            },
+            "limit": {
+              "description": "Maximum number of branches to return.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "owner": {
+              "description": "Repository owner or organization.",
+              "type": "string"
+            },
+            "prefix": {
+              "description": "Optional prefix to filter branches by name.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "repo": {
+              "description": "Repository name.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "forge",
+            "owner",
+            "repo"
+          ],
+          "title": "ListBranchesTool",
+          "type": "object"
+        },
+        "name": "list_branches"
+      },
+      {
+        "description": "List change requests (pull requests) for a repository. Returns nullable authoritative draft, mergeability, nullable has_conflicts, and labels for each request. Sparse metadata remains unknown; re-read get before readiness decisions.",
+        "inputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "forge": {
+              "description": "Forge alias -- use `forge_info` to discover available aliases.",
+              "type": "string"
+            },
+            "owner": {
+              "description": "Repository owner or organization.",
+              "type": "string"
+            },
+            "repo": {
+              "description": "Repository name.",
+              "type": "string"
+            },
+            "state": {
+              "description": "Optional state filter: open, closed, merged.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "forge",
+            "owner",
+            "repo"
+          ],
+          "title": "ListChangeRequestsTool",
+          "type": "object"
+        },
+        "name": "list_change_requests"
+      },
+      {
+        "description": "List an exhaustive, deduplicated issue snapshot within the provider pagination safety envelope; budget failures reject the whole call.",
+        "inputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "forge": {
+              "description": "Forge alias -- use `forge_info` to discover available aliases.",
+              "type": "string"
+            },
+            "owner": {
+              "description": "Repository owner or organization.",
+              "type": "string"
+            },
+            "repo": {
+              "description": "Repository name.",
+              "type": "string"
+            },
+            "state": {
+              "description": "Optional state filter: open, closed.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "forge",
+            "owner",
+            "repo"
+          ],
+          "title": "ListIssuesTool",
+          "type": "object"
+        },
+        "name": "list_issues"
+      },
+      {
+        "description": "List repositories available on a forge instance. Use `owner` to restrict results to a specific organization or user namespace, and `query` to search by name.",
+        "inputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "forge": {
+              "description": "Forge alias -- use `forge_info` to discover available aliases.",
+              "type": "string"
+            },
+            "owner": {
+              "description": "Optional owner or organization filter. Required when the agent's\naccess is scoped to a specific owner (e.g. `alias/owner/*`).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "query": {
+              "description": "Optional search query to filter repositories by name.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "forge"
+          ],
+          "title": "ListRepositoriesTool",
+          "type": "object"
+        },
+        "name": "list_repositories"
+      },
+      {
+        "description": "Open a change request (pull request) on the forge.\nBefore calling this tool, check if a PR already exists for your branch using list_change_requests. If one exists, do NOT open a new PR — push fixes to the existing branch using commit_patch with existing_branch: true.\nFor the body, pass plain Markdown text with real newlines; do NOT pre-escape paragraph breaks as literal `\\n` sequences.",
+        "inputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "base_branch": {
+              "description": "Base branch for the change request.",
+              "type": "string"
+            },
+            "body": {
+              "description": "Description body.",
+              "type": "string"
+            },
+            "forge": {
+              "description": "Forge alias -- use `forge_info` to discover available aliases.",
+              "type": "string"
+            },
+            "head_branch": {
+              "description": "Head branch with the changes.",
+              "type": "string"
+            },
+            "owner": {
+              "description": "Repository owner or organization.",
+              "type": "string"
+            },
+            "repo": {
+              "description": "Repository name.",
+              "type": "string"
+            },
+            "title": {
+              "description": "Title of the change request.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "base_branch",
+            "body",
+            "forge",
+            "head_branch",
+            "owner",
+            "repo",
+            "title"
+          ],
+          "title": "OpenChangeRequestTool",
+          "type": "object"
+        },
+        "name": "open_change_request"
+      },
+      {
+        "description": "Poll for pending normalized change request and issue webhook events. Returns buffered events since last poll. Call periodically to receive forge notifications. Inline review comment/thread events are refresh hints: refetch authoritative feedback and unresolved-thread state before mutations; resolution never changes a formal verdict. Keep periodic polling as fallback. Issue actions `opened`, `closed`, `reopened`, `edited`, and `labels_changed` are refresh hints; refetch authoritative issue state with `get_issue` before acting.",
+        "inputSchema": {
+          "properties": {},
+          "type": "object"
+        },
+        "name": "poll_events"
+      },
+      {
+        "description": "Read a single UTF-8 text file from a repository.",
+        "inputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "forge": {
+              "description": "Forge alias -- use `forge_info` to discover available aliases.",
+              "type": "string"
+            },
+            "git_ref": {
+              "description": "Optional git ref such as a branch, tag, or commit SHA.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "owner": {
+              "description": "Repository owner or organization.",
+              "type": "string"
+            },
+            "path": {
+              "description": "Repository-relative file path.",
+              "type": "string"
+            },
+            "repo": {
+              "description": "Repository name.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "forge",
+            "owner",
+            "path",
+            "repo"
+          ],
+          "title": "ReadRepositoryFileTool",
+          "type": "object"
+        },
+        "name": "read_repository_file"
+      },
+      {
+        "description": "Rewrite a branch with explicit operations or update its base. Use `rebase_onto` only to replay the existing branch commits onto the latest `base_branch` tip. It preserves the branch's commits as separate commits and does not squash, fix up, drop, rename, or reorder them. For review-driven commit hygiene, use explicit `fixup` and/or `drop` operations with full commit SHAs. Use exclusive reword-only operations to replace messages for distinct exact full IDs in merge-base..original-head, preserving commit order and trees. Messages must be nonblank, NUL-free and at most 65536 UTF-8 bytes; retain supplied trailing newlines or append one LF if absent. Reword returns old_commit_sha and the complete ordered commit_mapping. Targets and descendants may change IDs and lose signatures; authors and author dates are preserved, with the existing server committer policy and current committer dates. This is the REQUIRED way to rewrite history and force-push (raw `git push` is strictly blocked). Performs a full clone, validates operations, runs the rebase, and force-pushes with lease. Only works on branches matching your configured branch prefix.",
+        "inputSchema": {
+          "$defs": {
+            "RebaseBranchOperationTool": {
+              "oneOf": [
+                {
+                  "properties": {
+                    "commit": {
+                      "description": "Exact full object ID within merge-base..original-head.",
+                      "type": "string"
+                    },
+                    "message": {
+                      "description": "Replacement message: nonblank, no NUL, at most 65536 UTF-8 bytes.\nRetains trailing newlines, or appends one LF if absent.",
+                      "type": "string"
+                    },
+                    "type": {
+                      "const": "reword",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "commit",
+                    "message"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "properties": {
+                    "commit": {
+                      "description": "Full SHA of the commit to remove.",
+                      "type": "string"
+                    },
+                    "type": {
+                      "const": "drop",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "commit"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "description": "Correct operation for folding a later fixup or cleanup commit into an\nearlier original commit. Select both commits by their explicit full SHAs.",
+                  "properties": {
+                    "commit": {
+                      "description": "Full SHA of the commit to squash.",
+                      "type": "string"
+                    },
+                    "into": {
+                      "description": "Full SHA of the commit to squash into.",
+                      "type": "string"
+                    },
+                    "type": {
+                      "const": "fixup",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "commit",
+                    "into"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "description": "Update only the branch base by replaying all branch commits onto the\nlatest base branch head. Preserves every branch commit separately, must\nbe the sole operation, and is not for squash, fixup, or history cleanup.",
+                  "properties": {
+                    "type": {
+                      "const": "rebase_onto",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "type"
+                  ],
+                  "type": "object"
+                }
+              ]
+            }
+          },
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "base_branch": {
+              "description": "Base branch to compute merge-base against (e.g. \"main\").",
+              "type": "string"
+            },
+            "branch": {
+              "description": "Branch to rebase (must match your configured branch prefix).",
+              "type": "string"
+            },
+            "forge": {
+              "description": "Forge alias -- use `forge_info` to discover available aliases.",
+              "type": "string"
+            },
+            "operations": {
+              "description": "List of rebase operations as JSON objects. Each object must have a\n`\"type\"` field. Use `rebase_onto` only to update the branch base; it\npreserves every branch commit separately and must be the sole operation.\nFor squash/fixup cleanup, `{\"type\":\"rebase_onto\"}` is wrong; use\n`{\"type\":\"fixup\",\"commit\":\"<fix_sha>\",\"into\":\"<original_sha>\"}`.\nSupported operations also include `{\"type\":\"drop\",\"commit\":\"<sha>\"}`.\nMessage-only mode accepts one or more distinct rewords, exclusively:\n`{\"type\":\"reword\",\"commit\":\"<full-id>\",\"message\":\"Subject\\n\"}`.\nTargets must be exact full IDs in merge-base..original-head. Request\norder does not change commit order. Messages must be nonblank, NUL-free,\nand at most 65536 UTF-8 bytes. Trailing newlines are retained; one LF is\nappended if absent. Returns `old_commit_sha` and a complete ordered\n`commit_mapping`. Targets and descendants may change IDs and lose old\nsignatures; earlier IDs, trees, authors and author dates are preserved.\nUses the server's existing committer policy and current committer dates.",
+              "items": {
+                "$ref": "#/$defs/RebaseBranchOperationTool"
+              },
+              "type": "array"
+            },
+            "owner": {
+              "description": "Repository owner or organization.",
+              "type": "string"
+            },
+            "repo": {
+              "description": "Repository name.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "base_branch",
+            "branch",
+            "forge",
+            "operations",
+            "owner",
+            "repo"
+          ],
+          "title": "RebaseBranchTool",
+          "type": "object"
+        },
+        "name": "rebase_branch"
+      },
+      {
+        "description": "Remove a dependency relationship from an issue. The issue at `index` will no longer be blocked by the issue at `dependency`.",
+        "inputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "dependency": {
+              "description": "Index of the dependency issue to remove.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "dependency_owner": {
+              "description": "Override owner for the dependency issue (cross-repository dependency).\nMust be provided together with `dependency_repo` or both omitted.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "dependency_repo": {
+              "description": "Override repository for the dependency issue (cross-repository dependency).\nMust be provided together with `dependency_owner` or both omitted.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "forge": {
+              "description": "Forge alias -- use `forge_info` to discover available aliases.",
+              "type": "string"
+            },
+            "index": {
+              "description": "Issue index number.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "owner": {
+              "description": "Repository owner or organization.",
+              "type": "string"
+            },
+            "repo": {
+              "description": "Repository name.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "dependency",
+            "forge",
+            "index",
+            "owner",
+            "repo"
+          ],
+          "title": "RemoveIssueDependencyTool",
+          "type": "object"
+        },
+        "name": "remove_issue_dependency"
+      },
+      {
+        "description": "Remove a label from an issue.",
+        "inputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "forge": {
+              "description": "Forge alias -- use `forge_info` to discover available aliases.",
+              "type": "string"
+            },
+            "index": {
+              "description": "Issue index number.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "label": {
+              "description": "Label name to remove.",
+              "type": "string"
+            },
+            "owner": {
+              "description": "Repository owner or organization.",
+              "type": "string"
+            },
+            "repo": {
+              "description": "Repository name.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "forge",
+            "index",
+            "label",
+            "owner",
+            "repo"
+          ],
+          "title": "RemoveIssueLabelTool",
+          "type": "object"
+        },
+        "name": "remove_issue_label"
+      },
+      {
+        "description": "Schedule a pull request for automatic merge when all branch protection requirements are met. Requires the expected head SHA to prevent scheduling on a stale PR. Known drafts return validation deferral; this does not cancel existing schedules. The merge style is optional; when omitted, the repository default is used when allowed, followed by the scheduler fallback order.",
+        "inputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "delete_branch_after_merge": {
+              "description": "Optional override for whether to delete the source branch after merge.\nIf omitted, the repository's default behavior is used.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "expected_head_sha": {
+              "description": "Expected head commit SHA -- prevents scheduling on a stale PR.",
+              "type": "string"
+            },
+            "forge": {
+              "description": "Forge alias -- use `forge_info` to discover available aliases.",
+              "type": "string"
+            },
+            "index": {
+              "description": "Change request index number.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "merge_style": {
+              "description": "Optional canonical merge style: rebase, rebase-merge, merge, squash,\nor fast-forward-only. Omit to use the allowed repository default, then\nthe scheduler fallback order.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "owner": {
+              "description": "Repository owner or organization.",
+              "type": "string"
+            },
+            "repo": {
+              "description": "Repository name.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "expected_head_sha",
+            "forge",
+            "index",
+            "owner",
+            "repo"
+          ],
+          "title": "ScheduleAutoMergeTool",
+          "type": "object"
+        },
+        "name": "schedule_auto_merge"
+      },
+      {
+        "description": "Submit a formal review on a change request (pull request). Event must be APPROVED, REQUEST_CHANGES, or COMMENT. For the body, pass plain Markdown text with real newlines; do NOT pre-escape paragraph breaks as literal `\\n` sequences.",
+        "inputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "body": {
+              "description": "Review body text.",
+              "type": "string"
+            },
+            "event": {
+              "description": "Review event: `APPROVED`, `REQUEST_CHANGES`, or `COMMENT`.",
+              "type": "string"
+            },
+            "forge": {
+              "description": "Forge alias -- use `forge_info` to discover available aliases.",
+              "type": "string"
+            },
+            "index": {
+              "description": "Change request index number.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "owner": {
+              "description": "Repository owner or organization.",
+              "type": "string"
+            },
+            "repo": {
+              "description": "Repository name.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "body",
+            "event",
+            "forge",
+            "index",
+            "owner",
+            "repo"
+          ],
+          "title": "SubmitChangeRequestReviewTool",
+          "type": "object"
+        },
+        "name": "submit_change_request_review"
+      },
+      {
+        "description": "Update a change request (pull request) title and/or body. Provide at least one of title or body. For the body, pass plain Markdown text with real newlines; do NOT pre-escape paragraph breaks as literal `\\n` sequences.",
+        "inputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "body": {
+              "description": "New PR body/description. Omit to leave unchanged.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "forge": {
+              "description": "Forge alias -- use `forge_info` to discover available aliases.",
+              "type": "string"
+            },
+            "index": {
+              "description": "Change request index number.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "owner": {
+              "description": "Repository owner or organization.",
+              "type": "string"
+            },
+            "repo": {
+              "description": "Repository name.",
+              "type": "string"
+            },
+            "title": {
+              "description": "New PR title. Omit to leave unchanged.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "forge",
+            "index",
+            "owner",
+            "repo"
+          ],
+          "title": "UpdateChangeRequestTool",
+          "type": "object"
+        },
+        "name": "update_change_request"
+      },
+      {
+        "description": "Update an issue's title and/or body. Provide at least one of title or body. For the body, pass plain Markdown text with real newlines; do NOT pre-escape paragraph breaks as literal `\\n` sequences.",
+        "inputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "body": {
+              "description": "New issue body/description. Omit to leave unchanged.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "forge": {
+              "description": "Forge alias -- use `forge_info` to discover available aliases.",
+              "type": "string"
+            },
+            "index": {
+              "description": "Issue index number.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "owner": {
+              "description": "Repository owner or organization.",
+              "type": "string"
+            },
+            "repo": {
+              "description": "Repository name.",
+              "type": "string"
+            },
+            "title": {
+              "description": "New issue title. Omit to leave unchanged.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "forge",
+            "index",
+            "owner",
+            "repo"
+          ],
+          "title": "UpdateIssueTool",
+          "type": "object"
+        },
+        "name": "update_issue"
+      }
+    ]
+  }
+}
