@@ -965,6 +965,45 @@ shapes or excessive length; unmatched requests use `unmatched`. Route/operation
 fields use the existing 128-character diagnostic bound. Query strings, full URLs,
 headers, credentials and bodies are never included in these fields.
 
+For GET contents, request middleware is the sole primary failure reporter:
+expected typed upstream not-found produces one INFO event; other failures
+produce one WARN event. Adapter and handler warnings are suppressed only for
+this operation. The event includes `error_kind`, `gateway_status`, and numeric
+`upstream_status` when a response was received (including 200 for invalid file
+payloads). An absent upstream status means unknown, not an inferred 404.
+`credential_source="unselected"` distinguishes early failures from a selected
+credential or a known lack of credentials. Successful request logging is unchanged.
+
+Dedicated `requested_path`, `requested_ref`, `ref_source`, `path_visibility`, and
+`ref_visibility` fields supplement the existing wildcard/query redaction;
+`target` remains a numeric issue/PR identifier or empty. Detailed file context
+is considered only after successful gateway authentication and repository
+authorization. Missing ref means `ref_source="default"`; explicit `HEAD` or
+`main` means `explicit`. The actual default branch is never inferred. Before
+extraction/authorization, the source is `unavailable` and visibility is
+`unauthorized_or_unparsed`.
+
+Disclosure is disabled by default, including for ordinary filenames. Configure
+`[[server.file_read_diagnostics.repositories]]` with exact `forge`, `owner`,
+`repo`, `paths`, and `refs` approvals (see `forge-mcp.example.toml`). Each field
+is independently allowlisted; there are no wildcard or caller-controlled
+approvals. Operators must approve only known non-sensitive values and protect
+this configuration and log access. This is not automatic detection of arbitrary
+secrets. Unapproved values stay `[redacted]` with `not_approved`; invalid values
+use `invalid`, known credential matches use `credential`, and an omitted ref
+uses `default`. Approved values use `approved`.
+
+Startup rejects invalid or duplicate repository entries and excessive lists:
+at most 64 repositories and 128 values per field per repository. Each path/ref
+must be 1–256 UTF-8 bytes and use only ASCII letters, digits, `-`, `_`, `.`, `/`.
+Absolute paths, empty or dot-traversal components, controls, Unicode and percent
+escapes are ineligible. Values are compared against the extractor's canonical
+once-decoded text, never recursively decoded or truncated. Known configured
+gateway credentials and the effective upstream credential are blocked even if
+accidentally approved. Invalid or unmatched fields are entirely redacted;
+no unkeyed hashes, raw URIs, provider bodies, redirects or file contents are logged.
+Older configuration files require no new options.
+
 ### Draft and mergeability contract
 
 Change-request REST and MCP list/get responses, and create/update/close responses,

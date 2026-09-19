@@ -12,6 +12,8 @@ pub struct ServerConfig {
 #[derive(Clone, Deserialize)]
 pub struct ListenConfig {
     #[serde(default)]
+    pub file_read_diagnostics: FileReadDiagnosticsConfig,
+    #[serde(default)]
     pub commit_author_email: Option<String>,
     #[serde(default)]
     pub commit_author_name: Option<String>,
@@ -23,6 +25,7 @@ pub struct ListenConfig {
 impl std::fmt::Debug for ListenConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ListenConfig")
+            .field("file_read_diagnostics", &"[REDACTED]")
             .field(
                 "commit_author_email",
                 &self.commit_author_email.as_ref().map(|_| "[REDACTED]"),
@@ -47,6 +50,76 @@ impl ListenConfig {
                 email: email.trim().to_string(),
             })
     }
+}
+
+/// Exact repository-scoped disclosure approvals. Disabled by default.
+#[derive(Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileReadDiagnosticsConfig {
+    #[serde(default)]
+    pub repositories: Vec<FileReadDiagnosticRepository>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileReadDiagnosticRepository {
+    pub forge: String,
+    pub owner: String,
+    pub repo: String,
+    #[serde(default)]
+    pub paths: Vec<String>,
+    #[serde(default)]
+    pub refs: Vec<String>,
+}
+
+impl FileReadDiagnosticsConfig {
+    /// Validate bounded configuration without echoing sensitive entries.
+    ///
+    /// # Errors
+    /// Returns a fixed description if any entry is unsafe or excessive.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.repositories.len() > 64 {
+            return Err("too many file diagnostic repositories (maximum 64)".into());
+        }
+        let mut seen = std::collections::HashSet::new();
+        for entry in &self.repositories {
+            if ![&entry.forge, &entry.owner, &entry.repo].iter().all(|s| {
+                !s.is_empty()
+                    && s.len() <= 128
+                    && s.as_str() != "."
+                    && s.as_str() != ".."
+                    && s.bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+            }) || !seen.insert((&entry.forge, &entry.owner, &entry.repo))
+            {
+                return Err("invalid or duplicate file diagnostic repository".into());
+            }
+            if entry.paths.len() > 128 || entry.refs.len() > 128 {
+                return Err("too many file diagnostic values (maximum 128 per field)".into());
+            }
+            if entry
+                .paths
+                .iter()
+                .chain(&entry.refs)
+                .any(|s| !safe_file_diagnostic_value(s))
+            {
+                return Err("invalid file diagnostic value".into());
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Conservative ASCII values only; no recursive decoding or truncation.
+pub(crate) fn safe_file_diagnostic_value(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-_./".contains(&b))
+        && value
+            .split('/')
+            .all(|part| !part.is_empty() && part != "." && part != "..")
 }
 
 #[derive(Clone, Deserialize)]
@@ -412,6 +485,7 @@ fn validate_commit_author(server: &ListenConfig) -> Result<(), String> {
 pub fn validate_config(config: &ServerConfig) -> Result<(), String> {
     const SUPPORTED_FORGE_TYPES: &[&str] = &["forgejo", "github", "gitlab"];
     validate_commit_author(&config.server)?;
+    config.server.file_read_diagnostics.validate()?;
 
     let mut seen_aliases = std::collections::HashSet::new();
     let mut forge_types = std::collections::HashMap::new();
@@ -606,12 +680,87 @@ token = "claude-bot-forgejo-token"
             agents: Vec::new(),
             forges: Vec::new(),
             server: ListenConfig {
+                file_read_diagnostics: FileReadDiagnosticsConfig::default(),
                 commit_author_email: email.map(str::to_string),
                 commit_author_name: name.map(str::to_string),
                 enable_docs: false,
                 listen: "127.0.0.1:8443".to_string(),
             },
         }
+    }
+
+    #[test]
+    fn file_diagnostics_are_default_off_bounded_and_fail_closed() {
+        let listen: ListenConfig = toml::from_str("listen = '127.0.0.1:8443'").expect("old config");
+        assert!(listen.file_read_diagnostics.repositories.is_empty());
+        let valid = FileReadDiagnosticRepository {
+            forge: "forge".into(),
+            owner: "org".into(),
+            repo: "repo".into(),
+            paths: vec!["src/nested/module.rs".into()],
+            refs: vec!["main".into(), "HEAD".into()],
+        };
+        assert!(
+            FileReadDiagnosticsConfig {
+                repositories: vec![valid.clone()]
+            }
+            .validate()
+            .is_ok()
+        );
+        for value in [
+            String::new(),
+            "/absolute".into(),
+            "a//b".into(),
+            "a/./b".into(),
+            "a/../b".into(),
+            "a%2Fb".into(),
+            "a%252Fb".into(),
+            "a\nb".into(),
+            "a\rb".into(),
+            "a\u{1b}b".into(),
+            "界".into(),
+            "a b".into(),
+            "*".into(),
+            "x".repeat(257),
+        ] {
+            for is_path in [true, false] {
+                let mut entry = valid.clone();
+                if is_path {
+                    entry.paths = vec![value.clone()];
+                } else {
+                    entry.refs = vec![value.clone()];
+                }
+                let result = FileReadDiagnosticsConfig {
+                    repositories: vec![entry],
+                }
+                .validate();
+                assert_eq!(result, Err("invalid file diagnostic value".into()));
+            }
+        }
+        assert!(safe_file_diagnostic_value(&"x".repeat(256)));
+        let mut entry = valid.clone();
+        entry.paths = vec!["x".into(); 129];
+        assert!(
+            FileReadDiagnosticsConfig {
+                repositories: vec![entry]
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            FileReadDiagnosticsConfig {
+                repositories: vec![valid.clone(); 65]
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            FileReadDiagnosticsConfig {
+                repositories: vec![valid.clone(), valid]
+            }
+            .validate()
+            .is_err()
+        );
     }
 
     #[test]

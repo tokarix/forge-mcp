@@ -12,7 +12,7 @@ pub mod handlers;
 pub mod http_client;
 pub mod registry;
 
-mod diagnostics;
+pub mod diagnostics;
 
 use axum::{Router, routing::delete, routing::get, routing::post};
 use handlers::AppState;
@@ -117,8 +117,21 @@ fn add_docs_routes(router: Router<AppState>) -> Router<AppState> {
 
 /// Builds the axum router with all API routes.
 /// When `enable_docs` is true, serves Scalar UI at `/api/v1/docs`.
-#[allow(clippy::too_many_lines)]
 pub fn build_router(state: AppState, enable_docs: bool) -> Router {
+    build_router_with_diagnostics(
+        state,
+        enable_docs,
+        diagnostics::FileReadDiagnosticPolicy::default(),
+    )
+}
+
+/// Builds the router with a validated administrator disclosure policy.
+#[allow(clippy::too_many_lines)]
+pub fn build_router_with_diagnostics(
+    state: AppState,
+    enable_docs: bool,
+    policy: diagnostics::FileReadDiagnosticPolicy,
+) -> Router {
     let mut router = Router::new()
         .route("/api/v1/agent/info", get(handlers::agent_info))
         .route("/api/v1/agent/events", get(handlers::agent_events))
@@ -231,6 +244,7 @@ pub fn build_router(state: AppState, enable_docs: bool) -> Router {
     }
 
     router
+        .layer(axum::Extension(std::sync::Arc::new(policy)))
         .layer(axum::middleware::from_fn(diagnostics::request_context))
         .with_state(state)
 }

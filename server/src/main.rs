@@ -13,7 +13,7 @@ use forge::{ForgejoAdapter, ForgejoConfig};
 use orchestrator::{ReadOrchestrator, WriteOrchestrator};
 use server::{
     auth::AgentRegistry,
-    build_router,
+    build_router_with_diagnostics,
     config::{ForgeConfig, ServerConfig, parse_config, validate_config},
     events::EventBus,
     handlers::AppState,
@@ -208,11 +208,17 @@ async fn configured_agent_github_apps(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
+    use tracing_subscriber::prelude::*;
+    tracing_subscriber::registry()
+        .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
+        .with(tracing_subscriber::fmt::layer().with_filter(
+            tracing_subscriber::filter::dynamic_filter_fn(|metadata, _| {
+                server::diagnostics::request_log_filter(metadata)
+            }),
+        ))
         .init();
 
     let config_path = std::env::args()
@@ -269,7 +275,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         forge_registry,
     };
 
-    let app = build_router(state, config.server.enable_docs);
+    let policy = server::diagnostics::FileReadDiagnosticPolicy::new(
+        config.server.file_read_diagnostics.clone(),
+    )?;
+    let app = build_router_with_diagnostics(state, config.server.enable_docs, policy);
 
     let listener = tokio::net::TcpListener::bind(&config.server.listen).await?;
     tracing::info!("forge-mcp ready");

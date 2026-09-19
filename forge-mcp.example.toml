@@ -9,6 +9,20 @@ listen = "0.0.0.0:8443"
 # commit_author_name = "forge-mcp"
 # commit_author_email = "forge-mcp@example.com"
 
+# File target diagnostics are redacted by default. Exact disclosure requires
+# administrator approval of each path/ref for a specific repository. Protect
+# this configuration and log access as sensitive. No wildcard approvals.
+# Up to 64 repositories, 128 paths and 128 refs per repository; each target
+# must be 1..256 ASCII bytes using letters, digits, -, _, ., / with no empty,
+# absolute, . or .. components. Percent escapes and controls are disallowed.
+# [[server.file_read_diagnostics.repositories]]
+# forge = "myforge"
+# owner = "org"
+# repo = "repo"
+# paths = ["src/nested/module.rs"]
+# refs = ["main", "0123456789abcdef0123456789abcdef01234567"]
+
+
 # Each [[forges]] entry defines a forge instance the gateway can proxy to.
 # alias:         short name used in URLs and allowed_repos patterns (lowercase, hyphens ok)
 # type:          forge software type ("forgejo", "github", or "gitlab")
@@ -17,7 +31,6 @@ listen = "0.0.0.0:8443"
 # token:         API token for the upstream forge (optional for public instances)
 # git_auth_user: username for git smart HTTP Basic auth (default: "", for Forgejo;
 #                defaults to "x-access-token" for GitHub)
-
 [[forges]]
 alias = "internal"
 type = "forgejo"

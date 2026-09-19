@@ -10,6 +10,83 @@ use std::{
 };
 use tracing::Instrument;
 
+const CONTENTS_ROUTE: &str = "/api/v1/repos/{forge}/{owner}/{repo}/contents/{*path}";
+tokio::task_local! { static FILE_READ: bool; }
+
+pub(crate) fn is_file_read() -> bool {
+    FILE_READ.try_with(|value| *value).unwrap_or(false)
+}
+
+/// Keep contents diagnostics under server control, including dependency logs
+/// forwarded by the log bridge (HTTP clients may otherwise log raw URLs).
+/// Other operations retain their existing dependency logging policy.
+#[must_use]
+pub fn request_log_filter(metadata: &tracing::Metadata<'_>) -> bool {
+    !is_file_read()
+        || ["server", "forge", "orchestrator", "domain", "audit"]
+            .iter()
+            .any(|target| {
+                metadata.target() == *target
+                    || metadata
+                        .target()
+                        .strip_prefix(target)
+                        .is_some_and(|rest| rest.starts_with("::"))
+            })
+}
+
+/// Immutable, validated, server-owned diagnostic disclosure policy.
+#[derive(Clone, Default)]
+pub struct FileReadDiagnosticPolicy(crate::config::FileReadDiagnosticsConfig);
+
+impl FileReadDiagnosticPolicy {
+    /// # Errors
+    /// Rejects invalid or excessive allowlists without echoing their values.
+    pub fn new(config: crate::config::FileReadDiagnosticsConfig) -> Result<Self, String> {
+        config.validate()?;
+        Ok(Self(config))
+    }
+
+    pub(crate) fn record(
+        &self,
+        path: &crate::api::ContentsPath,
+        reference: Option<&str>,
+        is_secret: impl Fn(&str) -> bool,
+    ) {
+        let entry = self.0.repositories.iter().find(|entry| {
+            entry.forge == path.forge && entry.owner == path.owner && entry.repo == path.repo
+        });
+        let disclose = |value: &str, approved: Option<&Vec<String>>| {
+            if !crate::config::safe_file_diagnostic_value(value) {
+                (REDACTED.to_owned(), "invalid")
+            } else if is_secret(value) {
+                (REDACTED.to_owned(), "credential")
+            } else if approved.is_some_and(|values| values.iter().any(|s| s == value)) {
+                (value.to_owned(), "approved")
+            } else {
+                (REDACTED.to_owned(), "not_approved")
+            }
+        };
+        let (requested_path, path_visibility) = disclose(&path.path, entry.map(|e| &e.paths));
+        let (requested_ref, ref_visibility) = reference
+            .map_or((REDACTED.to_owned(), "default"), |value| {
+                disclose(value, entry.map(|e| &e.refs))
+            });
+        let span = tracing::Span::current();
+        span.record("requested_path", requested_path.as_str());
+        span.record("requested_ref", requested_ref.as_str());
+        span.record("path_visibility", path_visibility);
+        span.record("ref_visibility", ref_visibility);
+        span.record(
+            "ref_source",
+            if reference.is_some() {
+                "explicit"
+            } else {
+                "default"
+            },
+        );
+    }
+}
+
 static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
 
 pub(crate) fn bounded(value: &str) -> String {
@@ -91,6 +168,7 @@ pub(crate) async fn request_context(request: Request, next: Next) -> Response {
         .get::<MatchedPath>()
         .map_or("unmatched", MatchedPath::as_str)
         .to_owned();
+    let file_read = parts.method == axum::http::Method::GET && operation == CONTENTS_ROUTE;
     let (path, params) = safe_context(&operation, parts.uri.path());
     let route = bounded(&operation);
     // Compatibility alias: operation continues to mean the matched template.
@@ -99,16 +177,57 @@ pub(crate) async fn request_context(request: Request, next: Next) -> Response {
     let span = tracing::info_span!("request", %request_id, %operation, route = route.as_str(), path = path.as_str(),
         method = %parts.method, forge = field("forge"), owner = field("owner"), repo = field("repo"),
         target = field("index"), agent_id = tracing::field::Empty, session_id = tracing::field::Empty,
-        credential_source = tracing::field::Empty, upstream_username = tracing::field::Empty);
-    async move {
-        let response = next.run(Request::from_parts(parts, body)).await;
-        if response.status().is_client_error() || response.status().is_server_error() {
-            tracing::warn!(status = response.status().as_u16(), "request failed");
-        }
-        response
-    }
-    .instrument(span)
-    .await
+        credential_source = "unselected", upstream_username = tracing::field::Empty,
+        requested_path = REDACTED, requested_ref = REDACTED, ref_source = "unavailable",
+        path_visibility = "unauthorized_or_unparsed", ref_visibility = "unauthorized_or_unparsed");
+    FILE_READ
+        .scope(
+            file_read,
+            async move {
+                let response = next.run(Request::from_parts(parts, body)).await;
+                if response.status().is_client_error() || response.status().is_server_error() {
+                    if file_read {
+                        let metadata = response.extensions().get::<domain::FileReadError>();
+                        let status = response.status().as_u16();
+                        let error_kind = metadata.map_or_else(
+                            || match status {
+                                401 => "authentication",
+                                403 => "authorization",
+                                400 | 422 => "validation",
+                                500 => "local_failure",
+                                _ => "request_failure",
+                            },
+                            |error| error.kind.as_str(),
+                        );
+                        let upstream_status = metadata.and_then(|error| error.upstream_status);
+                        if metadata
+                            .is_some_and(|error| error.kind == domain::FileReadErrorKind::NotFound)
+                        {
+                            tracing::info!(
+                                status,
+                                gateway_status = status,
+                                error_kind,
+                                upstream_status,
+                                "file read failed"
+                            );
+                        } else {
+                            tracing::warn!(
+                                status,
+                                gateway_status = status,
+                                error_kind,
+                                upstream_status,
+                                "file read failed"
+                            );
+                        }
+                    } else {
+                        tracing::warn!(status = response.status().as_u16(), "request failed");
+                    }
+                }
+                response
+            }
+            .instrument(span),
+        )
+        .await
 }
 
 #[cfg(test)]
@@ -133,12 +252,17 @@ pub(crate) mod tests {
             String::from_utf8(self.0.lock().expect("capture lock").clone()).expect("utf8")
         }
         pub(crate) fn subscriber(&self) -> impl tracing::Subscriber + Send + Sync + use<> {
-            tracing_subscriber::fmt()
-                .without_time()
-                .with_ansi(false)
-                .with_max_level(tracing::Level::DEBUG)
-                .with_writer(self.clone())
-                .finish()
+            use tracing_subscriber::prelude::*;
+            tracing_subscriber::registry().with(
+                tracing_subscriber::fmt::layer()
+                    .without_time()
+                    .with_ansi(false)
+                    .with_writer(self.clone())
+                    .with_filter(tracing_subscriber::filter::dynamic_filter_fn(
+                        |metadata, _| request_log_filter(metadata),
+                    ))
+                    .with_filter(tracing_subscriber::filter::LevelFilter::DEBUG),
+            )
         }
     }
     impl std::io::Write for Capture {
@@ -158,6 +282,34 @@ pub(crate) mod tests {
         fn make_writer(&'a self) -> Self {
             self.clone()
         }
+    }
+
+    #[tokio::test]
+    async fn dependency_log_filter_is_rechecked_for_each_operation() {
+        fn dependency_event(value: &str) {
+            tracing::debug!(target: "reqwest::connect", value, "dependency connection");
+        }
+        let capture = Capture::default();
+        async {
+            dependency_event("outside-before");
+            FILE_READ
+                .scope(true, async {
+                    dependency_event("inside-secret");
+                })
+                .await;
+            dependency_event("outside-after");
+            FILE_READ
+                .scope(true, async {
+                    dependency_event("inside-again-secret");
+                })
+                .await;
+        }
+        .with_subscriber(capture.subscriber())
+        .await;
+        let logs = capture.logs();
+        assert!(logs.contains("outside-before"), "{logs}");
+        assert!(logs.contains("outside-after"), "{logs}");
+        assert!(!logs.contains("secret"), "{logs}");
     }
 
     #[tokio::test]

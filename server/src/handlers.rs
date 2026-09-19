@@ -60,7 +60,9 @@ fn resolve_forge<'a>(
     alias: &str,
 ) -> Result<&'a crate::registry::ForgeInstance, (StatusCode, Json<ErrorBody>)> {
     registry.get(alias).ok_or_else(|| {
-        tracing::warn!(reason = "unknown_forge", "forge resolution failed");
+        if !crate::diagnostics::is_file_read() {
+            tracing::warn!(reason = "unknown_forge", "forge resolution failed");
+        }
         (
             StatusCode::NOT_FOUND,
             Json(ErrorBody {
@@ -75,7 +77,9 @@ fn resolve_authenticated_agent<'a>(
     registry: &'a AgentRegistry,
 ) -> Result<&'a crate::auth::ResolvedAgent, (StatusCode, Json<ErrorBody>)> {
     let token = extract_bearer_token(headers).ok_or_else(|| {
-        tracing::warn!(reason = "missing_authorization", "authentication failed");
+        if !crate::diagnostics::is_file_read() {
+            tracing::warn!(reason = "missing_authorization", "authentication failed");
+        }
         (
             StatusCode::UNAUTHORIZED,
             Json(ErrorBody {
@@ -85,7 +89,9 @@ fn resolve_authenticated_agent<'a>(
     })?;
 
     let agent = registry.resolve(token).ok_or_else(|| {
-        tracing::warn!(reason = "invalid_token", "authentication failed");
+        if !crate::diagnostics::is_file_read() {
+            tracing::warn!(reason = "invalid_token", "authentication failed");
+        }
         (
             StatusCode::UNAUTHORIZED,
             Json(ErrorBody {
@@ -122,7 +128,9 @@ fn map_service_error(err: ServiceError) -> (StatusCode, Json<ErrorBody>) {
         ServiceError::Upstream(_) => "upstream",
         ServiceError::FileRead(error) => error.kind.as_str(),
     };
-    tracing::warn!(error_kind, "repository operation failed");
+    if !crate::diagnostics::is_file_read() {
+        tracing::warn!(error_kind, "repository operation failed");
+    }
     let (status, message) = match &err {
         ServiceError::Audit(_) | ServiceError::GitExec(_) => {
             (StatusCode::INTERNAL_SERVER_ERROR, err.to_string())
@@ -175,7 +183,9 @@ fn resolve_agent<'a>(
         .policy_config
         .is_repo_allowed(forge_alias, owner, repo)
     {
-        tracing::warn!(reason = "repository_denied", "authorization failed");
+        if !crate::diagnostics::is_file_read() {
+            tracing::warn!(reason = "repository_denied", "authorization failed");
+        }
         return Err((
             StatusCode::FORBIDDEN,
             Json(ErrorBody {
@@ -486,6 +496,7 @@ fn spawn_review_auto_merge(
 /// GET /api/v1/repos/{forge}/{owner}/{repo}/contents/{path}
 pub async fn get_contents(
     State(state): State<AppState>,
+    axum::Extension(policy): axum::Extension<Arc<crate::diagnostics::FileReadDiagnosticPolicy>>,
     Path(path): Path<ContentsPath>,
     Query(query): Query<ContentsQuery>,
     headers: HeaderMap,
@@ -502,6 +513,18 @@ pub async fn get_contents(
     .map_err(IntoResponse::into_response)?;
 
     let credential = resolve_credential(agent, &path.forge, forge);
+
+    policy.record(&path, query.git_ref.as_deref(), |value| {
+        state.agent_registry.contains_credential(value)
+            || credential
+                .token
+                .as_ref()
+                .is_some_and(|token| !token.is_empty() && value.contains(token))
+            || forge
+                .token
+                .as_ref()
+                .is_some_and(|token| !token.is_empty() && value.contains(token))
+    });
 
     let result = forge
         .read_service
@@ -4785,6 +4808,482 @@ mod tests {
         client.cancel().await.expect("cancel");
         shim.await.expect("shim stopped");
         gateway.abort();
+    }
+
+    fn file_diagnostic_policy() -> crate::diagnostics::FileReadDiagnosticPolicy {
+        crate::diagnostics::FileReadDiagnosticPolicy::new(
+            crate::config::FileReadDiagnosticsConfig {
+                repositories: vec![crate::config::FileReadDiagnosticRepository {
+                    forge: "test-forge".into(),
+                    owner: "org".into(),
+                    repo: "repo".into(),
+                    paths: vec![
+                        "src/nested/module.rs".into(),
+                        "test-token".into(),
+                        "caller-secret-marker".into(),
+                        "default-secret-marker".into(),
+                    ],
+                    refs: vec![
+                        "main".into(),
+                        "HEAD".into(),
+                        "0123456789abcdef0123456789abcdef01234567".into(),
+                        "test-token".into(),
+                    ],
+                }],
+            },
+        )
+        .expect("policy")
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn file_diagnostics_are_private_and_have_one_primary_event() {
+        use tracing::instrument::WithSubscriber;
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+        const CHILD: &str = "FORGE_MCP_FILE_DIAGNOSTICS_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().expect("exe"))
+                .args([
+                    "--exact",
+                    "handlers::tests::file_diagnostics_are_private_and_have_one_primary_event",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .status()
+                .expect("isolated test");
+            assert!(status.success());
+            return;
+        }
+        // Exercise the same log-to-tracing bridge installed by the executable.
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer(std::io::sink)
+            .try_init();
+        let capture = crate::diagnostics::tests::Capture::default();
+        let dispatch = tracing::Dispatch::new(capture.subscriber());
+        let mock = MockServer::start().await;
+        for provider in ["forgejo", "github", "gitlab"] {
+            let app = crate::build_router_with_diagnostics(
+                file_state(
+                    &mock.uri(),
+                    provider,
+                    Arc::new(audit::InMemoryAuditSink::new()),
+                    true,
+                ),
+                false,
+                file_diagnostic_policy(),
+            );
+            for (upstream, expected, kind) in [
+                (404, 404, "not_found"),
+                (401, 401, "permission"),
+                (403, 403, "permission"),
+                (503, 502, "upstream"),
+                (200, 502, "invalid_payload"),
+            ] {
+                mock.reset().await;
+                Mock::given(method("GET"))
+                    .respond_with(
+                        ResponseTemplate::new(upstream)
+                            .set_body_string("provider-body-secret-marker"),
+                    )
+                    .expect(1)
+                    .mount(&mock)
+                    .await;
+                let start = capture.logs().len();
+                let response = app
+                    .clone()
+                    .oneshot(file_request(
+                        "src/nested/module.rs",
+                        Some("main"),
+                        Some("Bearer test-token"),
+                        "repo",
+                    ))
+                    .with_subscriber(dispatch.clone())
+                    .await
+                    .expect("response");
+                assert_eq!(response.status().as_u16(), expected);
+                let all = capture.logs();
+                let logs = &all[start..];
+                assert_eq!(logs.matches("file read failed").count(), 1, "{logs}");
+                assert_eq!(
+                    logs.matches(" WARN ").count(),
+                    usize::from(upstream != 404),
+                    "{logs}"
+                );
+                assert_eq!(
+                    logs.matches(" INFO ").count(),
+                    usize::from(upstream == 404),
+                    "{logs}"
+                );
+                for field in [
+                    "request_id=",
+                    "operation=",
+                    "route=",
+                    "forge=",
+                    "owner=",
+                    "repo=",
+                    "agent_id=",
+                    "session_id=",
+                    "credential_source=",
+                    "agent_forge_identity",
+                    "requested_path=\"src/nested/module.rs\"",
+                    "requested_ref=\"main\"",
+                    "ref_source=\"explicit\"",
+                    "path_visibility=\"approved\"",
+                    "ref_visibility=\"approved\"",
+                    "target=\"\"",
+                ] {
+                    assert!(logs.contains(field), "missing {field}: {logs}");
+                }
+                assert!(logs.contains(&format!("error_kind=\"{kind}\"")), "{logs}");
+                assert!(
+                    logs.contains(&format!("upstream_status={upstream}")),
+                    "{logs}"
+                );
+                assert!(
+                    logs.contains(&format!("gateway_status={expected}")),
+                    "{logs}"
+                );
+                assert!(!logs.contains("secret-marker"), "{logs}");
+                assert!(!logs.contains("http://"), "{logs}");
+            }
+        }
+        mock.reset().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("provider-body-secret-marker"))
+            .mount(&mock)
+            .await;
+        let app = crate::build_router_with_diagnostics(
+            file_state(
+                &mock.uri(),
+                "forgejo",
+                Arc::new(audit::InMemoryAuditSink::new()),
+                true,
+            ),
+            false,
+            file_diagnostic_policy(),
+        );
+        let overlong = "x".repeat(257);
+        for (path, reference, expected_path, expected_ref, source) in [
+            (
+                "src/nested/module.rs",
+                None,
+                "src/nested/module.rs",
+                "[redacted]",
+                "default",
+            ),
+            (
+                "src/nested/module.rs",
+                Some("HEAD"),
+                "src/nested/module.rs",
+                "HEAD",
+                "explicit",
+            ),
+            (
+                "src/nested/module.rs",
+                Some("0123456789abcdef0123456789abcdef01234567"),
+                "src/nested/module.rs",
+                "0123456789abcdef0123456789abcdef01234567",
+                "explicit",
+            ),
+            (
+                "src/%6Eested/module.rs",
+                Some("%6Dain"),
+                "src/nested/module.rs",
+                "main",
+                "explicit",
+            ),
+            (
+                "unapproved-secret-file",
+                Some("main"),
+                "[redacted]",
+                "main",
+                "explicit",
+            ),
+            (
+                "src/nested/module.rs",
+                Some("unapproved-secret-ref"),
+                "src/nested/module.rs",
+                "[redacted]",
+                "explicit",
+            ),
+            (
+                "control%0Asecret",
+                Some("control%0Asecret"),
+                "[redacted]",
+                "[redacted]",
+                "explicit",
+            ),
+            (
+                "control%250Asecret",
+                Some("control%250Asecret"),
+                "[redacted]",
+                "[redacted]",
+                "explicit",
+            ),
+            (
+                "%E7%95%8C",
+                Some("%E7%95%8C"),
+                "[redacted]",
+                "[redacted]",
+                "explicit",
+            ),
+            (
+                overlong.as_str(),
+                Some(overlong.as_str()),
+                "[redacted]",
+                "[redacted]",
+                "explicit",
+            ),
+            (
+                "test-token",
+                Some("test-token"),
+                "[redacted]",
+                "[redacted]",
+                "explicit",
+            ),
+            (
+                "caller-secret-marker",
+                Some("main"),
+                "[redacted]",
+                "main",
+                "explicit",
+            ),
+            (
+                "default-secret-marker",
+                Some("main"),
+                "[redacted]",
+                "main",
+                "explicit",
+            ),
+        ] {
+            let start = capture.logs().len();
+            let mut request = file_request(path, reference, Some("Bearer test-token"), "repo");
+            request
+                .headers_mut()
+                .insert("x-secret", "header-secret-marker".parse().expect("header"));
+            let response = app
+                .clone()
+                .oneshot(request)
+                .with_subscriber(dispatch.clone())
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+            let all = capture.logs();
+            let logs = &all[start..];
+            assert_eq!(logs.matches("file read failed").count(), 1, "{logs}");
+            assert!(!logs.contains(" WARN "), "{logs}");
+            for (field, value) in [
+                ("requested_path", expected_path),
+                ("requested_ref", expected_ref),
+                ("ref_source", source),
+            ] {
+                assert!(logs.contains(&format!("{field}=\"{value}\"")), "{logs}");
+            }
+            for secret in [
+                "secret-marker",
+                "unapproved-secret",
+                "control",
+                "test-token",
+                overlong.as_str(),
+                "%0A",
+                "%250A",
+                "界",
+                "http://",
+            ] {
+                assert!(!logs.contains(secret), "{logs}");
+            }
+        }
+        for (path, reference, token, repo, status, kind) in [
+            (
+                "src/nested/module.rs",
+                Some("main"),
+                None,
+                "repo",
+                401,
+                "authentication",
+            ),
+            (
+                "src/nested/module.rs",
+                Some("main"),
+                Some("Bearer wrong-secret-marker"),
+                "repo",
+                401,
+                "authentication",
+            ),
+            (
+                "src/nested/module.rs",
+                Some("main"),
+                Some("Bearer test-token"),
+                "denied",
+                403,
+                "authorization",
+            ),
+            (
+                "%FF",
+                None,
+                Some("Bearer test-token"),
+                "repo",
+                400,
+                "validation",
+            ),
+            (
+                "src/nested/module.rs",
+                Some("main&ref=main"),
+                Some("Bearer test-token"),
+                "repo",
+                400,
+                "validation",
+            ),
+        ] {
+            let requests = mock.received_requests().await.expect("requests").len();
+            let start = capture.logs().len();
+            let response = app
+                .clone()
+                .oneshot(file_request(path, reference, token, repo))
+                .with_subscriber(dispatch.clone())
+                .await
+                .expect("response");
+            assert_eq!(response.status().as_u16(), status);
+            let all = capture.logs();
+            let logs = &all[start..];
+            assert_eq!(logs.matches(" WARN ").count(), 1, "{logs}");
+            assert_eq!(logs.matches("file read failed").count(), 1, "{logs}");
+            assert!(logs.contains(&format!("error_kind=\"{kind}\"")), "{logs}");
+            assert!(logs.contains("credential_source=\"unselected\""), "{logs}");
+            assert!(!logs.contains("upstream_status="), "{logs}");
+            assert!(!logs.contains("src/nested/module.rs"), "{logs}");
+            assert!(!logs.contains("secret-marker"), "{logs}");
+            assert_eq!(
+                mock.received_requests().await.expect("requests").len(),
+                requests
+            );
+        }
+        // Default construction has no disclosure, even for otherwise approved targets.
+        let default_app = crate::build_router(
+            file_state(
+                &mock.uri(),
+                "forgejo",
+                Arc::new(audit::InMemoryAuditSink::new()),
+                false,
+            ),
+            false,
+        );
+        let start = capture.logs().len();
+        default_app
+            .oneshot(file_request(
+                "src/nested/module.rs",
+                Some("main&secret=query-secret-marker"),
+                Some("Bearer test-token"),
+                "repo",
+            ))
+            .with_subscriber(dispatch.clone())
+            .await
+            .expect("response");
+        let all = capture.logs();
+        let logs = &all[start..];
+        assert!(!logs.contains("src/nested/module.rs"));
+        assert!(!logs.contains("query-secret-marker"));
+        assert!(logs.contains("forge_default"));
+        // Concurrent requests keep the approved/default context on their own span.
+        let start = capture.logs().len();
+        let a = app.clone().oneshot(file_request(
+            "src/nested/module.rs",
+            Some("HEAD"),
+            Some("Bearer test-token"),
+            "repo",
+        ));
+        let b = app.clone().oneshot(file_request(
+            "unapproved-secret-file",
+            None,
+            Some("Bearer test-token"),
+            "repo",
+        ));
+        async {
+            let (a, b) = tokio::join!(a, b);
+            assert!(a.is_ok() && b.is_ok());
+        }
+        .with_subscriber(dispatch.clone())
+        .await;
+        let all = capture.logs();
+        let logs = &all[start..];
+        let lines: Vec<_> = logs
+            .lines()
+            .filter(|line| line.contains("file read failed"))
+            .collect();
+        assert_eq!(lines.len(), 2);
+        for line in lines {
+            if line.contains("requested_path=\"src/nested/module.rs\"") {
+                assert!(line.contains("requested_ref=\"HEAD\""));
+            } else {
+                assert!(line.contains("ref_source=\"default\""));
+                assert!(!line.contains("HEAD"));
+            }
+        }
+        assert!(!logs.contains("unapproved-secret-file"));
+        for provider in ["forgejo", "github", "gitlab"] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+            let url = format!("http://{}", listener.local_addr().expect("address"));
+            drop(listener);
+            let offline = crate::build_router(
+                file_state(
+                    &url,
+                    provider,
+                    Arc::new(audit::InMemoryAuditSink::new()),
+                    true,
+                ),
+                false,
+            );
+            let start = capture.logs().len();
+            let response = offline
+                .oneshot(file_request(
+                    "unapproved-secret-file",
+                    Some("unapproved-secret-ref"),
+                    Some("Bearer test-token"),
+                    "repo",
+                ))
+                .with_subscriber(dispatch.clone())
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+            let error = response
+                .extensions()
+                .get::<domain::FileReadError>()
+                .expect("metadata");
+            assert_eq!(error.kind, domain::FileReadErrorKind::Transport);
+            assert_eq!(error.upstream_status, None);
+            let all = capture.logs();
+            let logs = &all[start..];
+            assert_eq!(logs.matches(" WARN ").count(), 1, "{logs}");
+            assert!(logs.contains("error_kind=\"transport\""), "{logs}");
+            for forbidden in [
+                "upstream_status=",
+                "unapproved-secret",
+                "secret-marker",
+                "http://",
+            ] {
+                assert!(!logs.contains(forbidden), "{logs}");
+            }
+        }
+        // A separate read still follows the generic Upstream -> 502 contract.
+        let start = capture.logs().len();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/repos/test-forge/org/repo/issues/42")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .with_subscriber(dispatch)
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let all = capture.logs();
+        let logs = &all[start..];
+        assert!(logs.contains("repository operation failed"));
+        assert!(logs.contains("request failed"));
+        assert!(!logs.contains("file read failed"));
     }
 
     fn cancel_request(alias: &str, repo: &str, bearer: Option<&str>) -> Request<Body> {

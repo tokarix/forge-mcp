@@ -69,6 +69,18 @@ impl std::fmt::Debug for AgentRegistry {
 }
 
 impl AgentRegistry {
+    pub(crate) fn contains_credential(&self, value: &str) -> bool {
+        self.agents
+            .keys()
+            .any(|token| !token.is_empty() && value.contains(token))
+            || self.agents.values().any(|agent| {
+                agent
+                    .forge_identities
+                    .values()
+                    .any(|identity| !identity.token.is_empty() && value.contains(&identity.token))
+            })
+    }
+
     /// Creates a registry from a list of agent configs.
     #[must_use]
     pub fn from_configs(configs: &[crate::config::AgentConfig]) -> Self {
