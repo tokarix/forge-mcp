@@ -2331,6 +2331,65 @@ pub(crate) fn gitlab_labels_changed(changes: &serde_json::Value) -> bool {
 mod tests {
 
     #[tokio::test]
+    async fn repository_file_preserves_base64_contract() {
+        use crate::ForgeAdapter;
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+        let mock = MockServer::start().await;
+        let adapter = test_adapter(&mock.uri());
+        let repo = test_repo();
+        for (encoded, expected) in [
+            ("", Some("")),
+            ("Zg==", Some("f")),
+            ("Zm8=", Some("fo")),
+            ("Zm9v", Some("foo")),
+            ("Zm9v\nYg==\n", Some("foob")),
+            (" Zg==\r\n\t", None),
+            ("Zg", None),
+            ("Zg=", None),
+            ("Zg===", None),
+            ("Zh==", None), // Nonzero trailing bits must remain invalid.
+            ("!!!!", None),
+            ("_w==", None), // URL-safe alphabet is not accepted.
+            ("/w==", None), // Valid base64, invalid UTF-8.
+        ] {
+            mock.reset().await;
+            Mock::given(method("GET"))
+                .and(path(
+                    "/api/v4/projects/group%2Fsubgroup%2Frepo/repository/files/file.txt",
+                ))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "encoding": "base64", "path": "file.txt", "file_path": "file.txt",
+                    "content": encoded
+                })))
+                .expect(1)
+                .mount(&mock)
+                .await;
+            let result = adapter
+                .read_repository_file(
+                    &repo,
+                    "file.txt",
+                    Some("main"),
+                    &domain::ForgeCredential { token: None },
+                )
+                .await;
+            if let Some(expected) = expected {
+                let file = result.expect("valid content");
+                assert_eq!(file.content, expected, "{encoded:?}");
+                assert_eq!(file.path, "file.txt");
+                assert_eq!(file.git_ref.as_deref(), Some("main"));
+            } else {
+                assert!(
+                    matches!(result, Err(crate::ForgeError::InvalidPayload(_))),
+                    "{encoded:?}: {result:?}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn draft_contract_is_shared_by_all_response_paths() {
         use crate::ForgeAdapter;
         use wiremock::{

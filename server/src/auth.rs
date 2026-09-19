@@ -194,6 +194,35 @@ mod tests {
     }
 
     #[test]
+    fn basic_auth_preserves_decoding_contract() {
+        for (encoded, expected) in [
+            ("dTpw", Some("p")),
+            ("dTpwYQ==", Some("pa")),
+            ("dTpwYWI=", Some("pab")),
+            (" \tdTpwYQ== \t", Some("pa")),
+            ("OnBh", Some("pa")),
+            ("dTpwOmE=", Some("p:a")),
+            ("dTpwYQ", None),    // Missing padding.
+            ("dTpwYQ=", None),   // Incomplete padding.
+            ("dTpwYQ===", None), // Excess padding.
+            ("dTpwYR==", None),  // Nonzero trailing bits.
+            ("dT pwYQ==", None), // Internal whitespace.
+            ("dTpwYQ--", None),  // URL-safe alphabet.
+            ("!!!!", None),
+            ("dXNlcg==", None), // No credential separator.
+            ("dTo=", None),     // Empty password.
+            ("dTr/", None),     // Invalid UTF-8.
+        ] {
+            let mut headers = axum::http::HeaderMap::new();
+            headers.insert(
+                "authorization",
+                format!("Basic {encoded}").parse().expect("valid header"),
+            );
+            assert_eq!(extract_token(&headers).as_deref(), expected, "{encoded:?}");
+        }
+    }
+
+    #[test]
     fn extract_token_returns_none_without_header() {
         let headers = axum::http::HeaderMap::new();
         assert!(extract_token(&headers).is_none());

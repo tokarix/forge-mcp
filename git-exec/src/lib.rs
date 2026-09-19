@@ -508,7 +508,7 @@ mod tests {
     #[test]
     fn auth_header_encodes_correctly() {
         let header = auth_header("test-token");
-        assert!(header.starts_with("Authorization: Basic "));
+        assert_eq!(header, "Authorization: Basic Zm9yZ2UtbWNwOnRlc3QtdG9rZW4=");
         let encoded = header
             .strip_prefix("Authorization: Basic ")
             .expect("strip prefix");

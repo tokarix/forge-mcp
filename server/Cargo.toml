@@ -10,7 +10,7 @@ workspace = true
 [dependencies]
 audit = { version = "0.1.0", path = "../audit" }
 axum = "0.8"
-base64 = "0.22"
+base64 = { version = "0.23.1", default-features = false, features = ["std"] }
 domain = { version = "0.1.0", path = "../domain", features = ["utoipa"] }
 forge = { version = "0.1.0", path = "../forge" }
 orchestrator = { version = "0.1.0", path = "../orchestrator" }

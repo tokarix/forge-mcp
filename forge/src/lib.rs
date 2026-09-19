@@ -3691,6 +3691,111 @@ fn validate_pull_request_numbers(
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::panic)]
 mod tests {
+    #[tokio::test]
+    async fn woodpecker_logs_preserve_base64_contract() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+        let mock = MockServer::start().await;
+        let adapter = test_adapter(&mock.uri());
+        let base = reqwest::Url::parse(&format!("{}/", mock.uri())).expect("mock URL");
+        let step = super::WoodpeckerStep {
+            id: 3,
+            name: "build".into(),
+            state: "failure".into(),
+        };
+        for (encoded, expected) in [
+            ("Zg==", Some("f")),
+            (" \tZg==\r\n", Some("f")),
+            ("/w==", Some("\u{fffd}")), // Logs retain lossy UTF-8 decoding.
+            ("Zg", None),
+            ("Zg=", None),
+            ("Zg===", None),
+            ("Zh==", None),
+            ("Z\ng==", None),
+            ("!!!!", None),
+        ] {
+            mock.reset().await;
+            Mock::given(method("GET"))
+                .and(path("/api/repos/1/logs/2/3"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(serde_json::json!([{ "data": encoded }])),
+                )
+                .expect(1)
+                .mount(&mock)
+                .await;
+            let result = adapter
+                .fetch_woodpecker_step_logs(&base, "1", "2", &step)
+                .await;
+            if let Some(expected) = expected {
+                assert_eq!(
+                    result.expect("valid log").expect("excerpt").lines,
+                    [expected]
+                );
+            } else {
+                assert!(result.is_err(), "{encoded:?}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn repository_file_preserves_base64_contract() {
+        use crate::ForgeAdapter;
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+        let mock = MockServer::start().await;
+        let adapter = test_adapter(&mock.uri());
+        let repo = test_repo();
+        for (encoded, expected) in [
+            ("", Some("")),
+            ("Zg==", Some("f")),
+            ("Zm8=", Some("fo")),
+            ("Zm9v", Some("foo")),
+            ("Zm9v\nYg==\n", Some("foob")),
+            (" Zg==\r\n\t", None),
+            ("Zg", None),
+            ("Zg=", None),
+            ("Zg===", None),
+            ("Zh==", None), // Nonzero trailing bits must remain invalid.
+            ("!!!!", None),
+            ("_w==", None), // URL-safe alphabet is not accepted.
+            ("/w==", None), // Valid base64, invalid UTF-8.
+        ] {
+            mock.reset().await;
+            Mock::given(method("GET"))
+                .and(path("/api/v1/repos/org/repo/contents/file.txt"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "encoding": "base64", "path": "file.txt", "file_path": "file.txt",
+                    "content": encoded
+                })))
+                .expect(1)
+                .mount(&mock)
+                .await;
+            let result = adapter
+                .read_repository_file(
+                    &repo,
+                    "file.txt",
+                    Some("main"),
+                    &domain::ForgeCredential { token: None },
+                )
+                .await;
+            if let Some(expected) = expected {
+                let file = result.expect("valid content");
+                assert_eq!(file.content, expected, "{encoded:?}");
+                assert_eq!(file.path, "file.txt");
+                assert_eq!(file.git_ref.as_deref(), Some("main"));
+            } else {
+                assert!(
+                    matches!(result, Err(crate::ForgeError::InvalidPayload(_))),
+                    "{encoded:?}: {result:?}"
+                );
+            }
+        }
+    }
 
     #[tokio::test]
     async fn draft_contract_is_shared_by_all_response_paths() {
