@@ -552,12 +552,18 @@ mod tests {
     const VALID_CONFIG: &str = r#"
 [server]
 listen = "0.0.0.0:8443"
+enable_docs = true
+commit_author_name = "  Test Author  "
+commit_author_email = "  author@example.test  "
 
 [[forges]]
 alias = "internal"
 type = "forgejo"
 base_url = "https://forge.example"
 token = "forgejo-api-token"
+git_auth_user = "test-bot"
+woodpecker_url = "https://ci.example"
+woodpecker_token = "synthetic-ci-token"
 
 [forges.webhook]
 secret = "distinctive-webhook-secret"
@@ -676,12 +682,30 @@ token = "claude-bot-forgejo-token"
     #[test]
     fn parses_valid_config() {
         let config = parse_config(VALID_CONFIG).expect("should parse");
+        validate_config(&config).expect("validate full config");
         assert_eq!(config.server.listen, "0.0.0.0:8443");
+        assert!(config.server.enable_docs);
+        assert_eq!(
+            config.server.commit_author(),
+            Some(domain::CommitAuthor {
+                name: "Test Author".to_string(),
+                email: "author@example.test".to_string(),
+            })
+        );
         assert_eq!(config.forges.len(), 2);
         assert_eq!(config.forges[0].alias, "internal");
         assert_eq!(config.forges[0].forge_type, "forgejo");
         assert_eq!(config.forges[0].base_url, "https://forge.example");
         assert_eq!(config.forges[0].token.as_deref(), Some("forgejo-api-token"));
+        assert_eq!(config.forges[0].git_auth_user, "test-bot");
+        assert_eq!(
+            config.forges[0].woodpecker_url.as_deref(),
+            Some("https://ci.example")
+        );
+        assert_eq!(
+            config.forges[0].woodpecker_token.as_deref(),
+            Some("synthetic-ci-token")
+        );
         assert_eq!(config.forges[1].alias, "client-a");
         assert_eq!(config.agents.len(), 2);
         // Verify forge_identity parsing
@@ -710,7 +734,70 @@ session_id = "s"
 [agents.policy]
 "#;
         let config = parse_config(toml_str).expect("should parse");
+        validate_config(&config).expect("validate default config");
+        assert!(!config.server.enable_docs);
+        assert!(config.server.commit_author_name.is_none());
+        assert!(config.server.commit_author_email.is_none());
         assert!(config.forges[0].token.is_none());
+        assert!(config.forges[0].api_url.is_none());
+        assert!(config.forges[0].git_auth_user.is_empty());
+        assert!(config.forges[0].github_app.is_none());
+        assert!(config.forges[0].woodpecker_url.is_none());
+        assert!(config.forges[0].woodpecker_token.is_none());
+        assert!(config.forges[0].webhook.is_none());
+        assert!(config.agents[0].forge_identity.is_empty());
+        assert!(config.agents[0].github_app.is_empty());
+        assert!(config.agents[0].policy.allowed_repos.is_empty());
+        assert!(config.agents[0].policy.branch_prefix.is_none());
+        assert!(config.agents[0].policy.protected_paths.is_empty());
+    }
+
+    #[test]
+    fn rejects_malformed_toml_with_source_location() {
+        let input = VALID_CONFIG.replace("[server]", "[server");
+        let error: toml::de::Error = parse_config(&input).expect_err("reject malformed table");
+        assert!(error.span().is_some());
+        assert!(error.to_string().contains("line"));
+    }
+
+    #[test]
+    fn rejects_duplicate_keys_and_tables() {
+        for (original, duplicate) in [
+            (
+                "enable_docs = true",
+                "enable_docs = true\nenable_docs = false",
+            ),
+            ("[server]", "[server]\n[server]"),
+            (
+                "branch_prefix = \"agent/codex/\"",
+                "branch_prefix = \"agent/codex/\"\nbranch_prefix = \"other/\"",
+            ),
+        ] {
+            let input = VALID_CONFIG.replace(original, duplicate);
+            let error = parse_config(&input).expect_err("reject duplicate definition");
+            assert!(error.span().is_some());
+        }
+    }
+
+    #[test]
+    fn rejects_wrong_field_types() {
+        for (original, invalid) in [
+            ("enable_docs = true", "enable_docs = \"true\""),
+            ("listen = \"0.0.0.0:8443\"", "listen = 8443"),
+            ("token = \"forgejo-api-token\"", "token = 42"),
+            (
+                "protected_paths = [\".forgejo/\", \".github/\"]",
+                "protected_paths = [42]",
+            ),
+            (
+                "secret = \"distinctive-webhook-secret\"",
+                "secret = \"synthetic-secret\"\nauto_merge = \"false\"",
+            ),
+        ] {
+            let input = VALID_CONFIG.replace(original, invalid);
+            let error = parse_config(&input).expect_err("reject wrong field type");
+            assert!(error.span().is_some());
+        }
     }
 
     #[test]
@@ -1687,6 +1774,7 @@ allowed_repos = ["github/org/repo"]
         assert!(!debug.contains("codex-bot-forgejo-token"));
         assert!(!debug.contains("claude-bot-forgejo-token"));
         assert!(!debug.contains("distinctive-webhook-secret"));
+        assert!(!debug.contains("synthetic-ci-token"));
         assert!(debug.contains("[REDACTED]"));
     }
 }
