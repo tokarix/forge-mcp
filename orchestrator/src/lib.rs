@@ -55,6 +55,40 @@ fn sanitize_commit_message(message: &str) -> String {
     lines.join("\n")
 }
 
+fn map_file_read_error(error: forge::ForgeError) -> ServiceError {
+    use domain::FileReadErrorKind as Kind;
+    use forge::ForgeError;
+    let (kind, upstream_status) = match error {
+        ForgeError::NotFound { status, .. } => (Kind::NotFound, Some(status.as_u16())),
+        ForgeError::UnexpectedStatus { status, .. } => (
+            if matches!(status.as_u16(), 401 | 403) {
+                Kind::Permission
+            } else {
+                Kind::Upstream
+            },
+            Some(status.as_u16()),
+        ),
+        ForgeError::Redirect { status, .. } => (Kind::Upstream, Some(status.as_u16())),
+        ForgeError::InvalidFilePayload { status } => (Kind::InvalidPayload, Some(status.as_u16())),
+        ForgeError::FileResponseTransport { status } => (Kind::Transport, Some(status.as_u16())),
+        ForgeError::Http(error) => (
+            if error.is_decode() {
+                Kind::InvalidPayload
+            } else {
+                Kind::Transport
+            },
+            error.status().map(|status| status.as_u16()),
+        ),
+        ForgeError::Authentication(_) => (Kind::Permission, None),
+        ForgeError::InvalidPayload(_) => (Kind::InvalidPayload, None),
+        ForgeError::Unsupported(_) | ForgeError::DependencyRequest(_) => (Kind::Upstream, None),
+    };
+    ServiceError::FileRead(domain::FileReadError {
+        kind,
+        upstream_status,
+    })
+}
+
 pub struct ReadOrchestrator<A, S>
 where
     A: ForgeAdapter,
@@ -306,7 +340,7 @@ where
                 credential,
             )
             .await
-            .map_err(|e| ServiceError::Upstream(e.to_string()))
+            .map_err(map_file_read_error)
     }
 
     async fn get_issue(
@@ -2624,6 +2658,46 @@ mod tests {
         }
     }
 
+    #[test]
+    #[allow(clippy::panic)]
+    fn file_error_classification_is_structural_and_bounded() {
+        use domain::FileReadErrorKind as Kind;
+        for (error, kind, status) in [
+            (
+                forge::ForgeError::NotFound {
+                    status: 404.try_into().expect("status"),
+                    message: "secret".into(),
+                },
+                Kind::NotFound,
+                Some(404),
+            ),
+            (
+                forge::ForgeError::InvalidPayload("404 secret".into()),
+                Kind::InvalidPayload,
+                None,
+            ),
+            (
+                forge::ForgeError::Authentication("secret".into()),
+                Kind::Permission,
+                None,
+            ),
+            (
+                forge::ForgeError::FileResponseTransport {
+                    status: 200.try_into().expect("status"),
+                },
+                Kind::Transport,
+                Some(200),
+            ),
+        ] {
+            let ServiceError::FileRead(error) = super::map_file_read_error(error) else {
+                panic!("file error")
+            };
+            assert_eq!(error.kind, kind);
+            assert_eq!(error.upstream_status, status);
+            assert!(!error.to_string().contains("secret"));
+        }
+    }
+
     #[tokio::test]
     async fn reads_a_repository_file_and_records_audit() {
         let adapter = Arc::new(FakeForgeAdapter::default());
@@ -2683,7 +2757,7 @@ mod tests {
             .await
             .expect_err("forge failure should propagate");
 
-        assert!(matches!(err, ServiceError::Upstream(_)));
+        assert!(matches!(err, ServiceError::FileRead(_)));
         // Audit was recorded before the forge call
         assert_eq!(audit.records().expect("audit records").len(), 1);
     }

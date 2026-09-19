@@ -1506,25 +1506,37 @@ impl crate::ForgeAdapter for GitLabAdapter {
             // GitLab requires a ref parameter for the files API.
             request = request.query(&[("ref", "HEAD")]);
         }
-        let response = Self::check_response(request.send().await?).await?;
-        let payload: GitLabFileResponse = response.json().await?;
+        let response = crate::check_file_response(request.send().await?)?;
+        let status = response.status();
+        let body = response
+            .bytes()
+            .await
+            .map_err(|_| ForgeError::FileResponseTransport { status })?;
+        let payload: GitLabFileResponse =
+            serde_json::from_slice(&body).map_err(|_| ForgeError::InvalidFilePayload { status })?;
+        let decoded = async {
+            if payload.encoding != "base64" {
+                return Err(ForgeError::InvalidPayload(format!(
+                    "unsupported content encoding: {}",
+                    payload.encoding,
+                )));
+            }
 
-        if payload.encoding != "base64" {
-            return Err(ForgeError::InvalidPayload(format!(
-                "unsupported content encoding: {}",
-                payload.encoding,
-            )));
+            let cleaned = payload.content.replace('\n', "");
+            let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, cleaned)
+                .map_err(|e| ForgeError::InvalidPayload(format!("base64 decode failed: {e}")))?;
+            let content = String::from_utf8(bytes)
+                .map_err(|e| ForgeError::InvalidPayload(format!("utf8 decode failed: {e}")))?;
+
+            Ok::<_, ForgeError>((content, payload.file_path))
         }
-
-        let cleaned = payload.content.replace('\n', "");
-        let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, cleaned)
-            .map_err(|e| ForgeError::InvalidPayload(format!("base64 decode failed: {e}")))?;
-        let content = String::from_utf8(bytes)
-            .map_err(|e| ForgeError::InvalidPayload(format!("utf8 decode failed: {e}")))?;
+        .await
+        .map_err(|_| ForgeError::InvalidFilePayload { status })?;
+        let (content, response_path) = decoded;
 
         Ok(ReadRepositoryFileResponse {
             repository: repository.clone(),
-            path: payload.file_path,
+            path: response_path,
             git_ref: git_ref.map(ToOwned::to_owned),
             content,
         })
@@ -2331,6 +2343,92 @@ pub(crate) fn gitlab_labels_changed(changes: &serde_json::Value) -> bool {
 mod tests {
 
     #[tokio::test]
+    async fn file_interrupted_body_preserves_received_status() {
+        use crate::ForgeAdapter;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let url = format!("http://{}", listener.local_addr().expect("address"));
+        let provider = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut buffer = [0; 4096];
+            let received = socket.read(&mut buffer).await.expect("request");
+            assert!(received > 0);
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\nConnection: close\r\n\r\n{")
+                .await
+                .expect("response");
+            socket.shutdown().await.expect("close");
+        });
+        let result = test_adapter(&url)
+            .read_repository_file(
+                &test_repo(),
+                "file",
+                None,
+                &domain::ForgeCredential { token: None },
+            )
+            .await;
+        assert!(
+            matches!(
+                result,
+                Err(crate::ForgeError::FileResponseTransport {
+                    status: reqwest::StatusCode::OK
+                })
+            ),
+            "{result:?}"
+        );
+        provider.await.expect("provider");
+    }
+
+    #[tokio::test]
+    async fn file_transport_and_timeout_remain_http_errors() {
+        use crate::ForgeAdapter;
+        let mock = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_delay(std::time::Duration::from_millis(100)),
+            )
+            .expect(1)
+            .mount(&mock)
+            .await;
+        let mut adapter = test_adapter(&mock.uri());
+        adapter.client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(20))
+            .build()
+            .expect("client");
+        let error = adapter
+            .read_repository_file(
+                &test_repo(),
+                "file",
+                None,
+                &domain::ForgeCredential { token: None },
+            )
+            .await
+            .expect_err("timeout");
+        assert!(
+            matches!(error, crate::ForgeError::Http(ref e) if e.is_timeout() && e.status().is_none())
+        );
+        assert_eq!(mock.received_requests().await.expect("requests").len(), 1);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let url = format!("http://{}", listener.local_addr().expect("address"));
+        drop(listener);
+        let error = test_adapter(&url)
+            .read_repository_file(
+                &test_repo(),
+                "file",
+                None,
+                &domain::ForgeCredential { token: None },
+            )
+            .await
+            .expect_err("connection");
+        assert!(
+            matches!(error, crate::ForgeError::Http(ref e) if e.is_connect() && e.status().is_none())
+        );
+    }
+
+    #[tokio::test]
     async fn repository_file_preserves_base64_contract() {
         use crate::ForgeAdapter;
         use wiremock::{
@@ -2382,7 +2480,12 @@ mod tests {
                 assert_eq!(file.git_ref.as_deref(), Some("main"));
             } else {
                 assert!(
-                    matches!(result, Err(crate::ForgeError::InvalidPayload(_))),
+                    matches!(
+                        result,
+                        Err(crate::ForgeError::InvalidFilePayload {
+                            status: reqwest::StatusCode::OK
+                        })
+                    ),
                     "{encoded:?}: {result:?}"
                 );
             }

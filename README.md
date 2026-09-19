@@ -933,6 +933,18 @@ label or scheduling requests for these hints. Auto-merge remains restricted to
 newly enqueued submitted approvals. No webhook registration or CI branch-filter
 change is made by this feature.
 
+### Repository file reads
+
+`GET /api/v1/repos/{forge}/{owner}/{repo}/contents/{path}` preserves upstream
+404 as gateway 404 with the fixed explanation "repository resource unavailable
+at the requested path/ref". This does not distinguish an absent path, unknown
+ref, missing repository, or privacy-masked access. No existence probes or
+credential retries are performed. Explicit upstream 401/403 remain 401/403;
+other upstream failures, transport failures and malformed file responses return
+502. Successful UTF-8 content and omitted/explicit ref behavior are unchanged.
+MCP `read_repository_file` reports gateway 404 as invalid-params (-32602) and
+502 as internal-error (-32603); failures never become empty successful content.
+
 ### Request diagnostics
 
 Request spans distinguish `route` (the matched route template, or `unmatched`)

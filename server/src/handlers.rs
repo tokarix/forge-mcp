@@ -120,6 +120,7 @@ fn map_service_error(err: ServiceError) -> (StatusCode, Json<ErrorBody>) {
         ServiceError::PolicyDenied { .. } => "policy_denied",
         ServiceError::Validation(_) => "validation",
         ServiceError::Upstream(_) => "upstream",
+        ServiceError::FileRead(error) => error.kind.as_str(),
     };
     tracing::warn!(error_kind, "repository operation failed");
     let (status, message) = match &err {
@@ -129,9 +130,33 @@ fn map_service_error(err: ServiceError) -> (StatusCode, Json<ErrorBody>) {
         ServiceError::PolicyDenied { .. } | ServiceError::Validation(_) => {
             (StatusCode::BAD_REQUEST, err.to_string())
         }
-        ServiceError::Upstream(_) => (StatusCode::BAD_GATEWAY, err.to_string()),
+        ServiceError::Upstream(_) | ServiceError::FileRead(_) => {
+            (StatusCode::BAD_GATEWAY, err.to_string())
+        }
     };
     (status, Json(ErrorBody { error: message }))
+}
+
+fn map_file_read_error(err: ServiceError) -> axum::response::Response {
+    if let ServiceError::FileRead(error) = err {
+        let status = match (error.kind, error.upstream_status) {
+            (domain::FileReadErrorKind::NotFound, _) => StatusCode::NOT_FOUND,
+            (domain::FileReadErrorKind::Permission, Some(401)) => StatusCode::UNAUTHORIZED,
+            (domain::FileReadErrorKind::Permission, Some(403)) => StatusCode::FORBIDDEN,
+            _ => StatusCode::BAD_GATEWAY,
+        };
+        let mut response = (
+            status,
+            Json(ErrorBody {
+                error: error.to_string(),
+            }),
+        )
+            .into_response();
+        response.extensions_mut().insert(error);
+        response
+    } else {
+        map_service_error(err).into_response()
+    }
 }
 
 /// Resolves bearer token to agent identity or returns 401.
@@ -452,6 +477,9 @@ fn spawn_review_auto_merge(
     responses(
         (status = 200, description = "File contents", body = ContentsResult),
         (status = 401, description = "Unauthorized", body = ErrorBody),
+        (status = 403, description = "Access denied", body = ErrorBody),
+        (status = 404, description = "Repository resource unavailable at requested path/ref", body = ErrorBody),
+        (status = 502, description = "Upstream file read failed", body = ErrorBody),
     ),
     security(("bearer" = []))
 )]
@@ -462,14 +490,16 @@ pub async fn get_contents(
     Query(query): Query<ContentsQuery>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let forge = resolve_forge(&state.forge_registry, &path.forge)?;
+    let forge =
+        resolve_forge(&state.forge_registry, &path.forge).map_err(IntoResponse::into_response)?;
     let agent = resolve_agent(
         &headers,
         &state.agent_registry,
         &path.forge,
         &path.owner,
         &path.repo,
-    )?;
+    )
+    .map_err(IntoResponse::into_response)?;
 
     let credential = resolve_credential(agent, &path.forge, forge);
 
@@ -485,9 +515,9 @@ pub async fn get_contents(
             &credential,
         )
         .await
-        .map_err(map_service_error)?;
+        .map_err(map_file_read_error)?;
 
-    Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(ContentsResult {
+    Ok::<_, axum::response::Response>(Json(ContentsResult {
         content: result.content,
         git_ref: result.git_ref,
         path: result.path,
@@ -4364,6 +4394,397 @@ mod tests {
             instance,
         )])));
         state
+    }
+
+    fn file_state<S: audit::AuditSink + 'static>(
+        url: &str,
+        provider: &str,
+        audit: Arc<S>,
+        caller: bool,
+    ) -> AppState {
+        let mut state = cancellation_state(url, audit.clone(), caller);
+        let mut instance =
+            test_forge_instance("test-forge", url, Arc::new(FakeWriteService::new()));
+        let token = Some("default-secret-marker".into());
+        instance.token = token.clone();
+        match provider {
+            "github" => {
+                let adapter = Arc::new(
+                    forge::github::GitHubAdapter::new(forge::github::GitHubConfig {
+                        api_url: url.into(),
+                        token,
+                    })
+                    .expect("adapter"),
+                );
+                instance.adapter = adapter.clone();
+                instance.read_service =
+                    Arc::new(orchestrator::ReadOrchestrator::new(adapter, audit));
+            }
+            "gitlab" => {
+                let adapter = Arc::new(
+                    forge::gitlab::GitLabAdapter::new(forge::gitlab::GitLabConfig {
+                        base_url: url.into(),
+                        token,
+                    })
+                    .expect("adapter"),
+                );
+                instance.adapter = adapter.clone();
+                instance.read_service =
+                    Arc::new(orchestrator::ReadOrchestrator::new(adapter, audit));
+            }
+            _ => {
+                let adapter = Arc::new(
+                    forge::ForgejoAdapter::new(forge::ForgejoConfig {
+                        base_url: url.into(),
+                        token,
+                        woodpecker_url: None,
+                        woodpecker_token: None,
+                    })
+                    .expect("adapter"),
+                );
+                instance.adapter = adapter.clone();
+                instance.read_service =
+                    Arc::new(orchestrator::ReadOrchestrator::new(adapter, audit));
+            }
+        }
+        state.forge_registry = Arc::new(crate::registry::ForgeRegistry::new(HashMap::from([(
+            "test-forge".into(),
+            instance,
+        )])));
+        state
+    }
+
+    fn file_request(
+        path: &str,
+        reference: Option<&str>,
+        bearer: Option<&str>,
+        repo: &str,
+    ) -> Request<Body> {
+        let query = reference.map_or(String::new(), |r| format!("?ref={r}"));
+        let mut request = Request::builder().uri(format!(
+            "/api/v1/repos/test-forge/org/{repo}/contents/{path}{query}"
+        ));
+        if let Some(token) = bearer {
+            request = request.header("authorization", token);
+        }
+        request.body(Body::empty()).expect("request")
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn file_router_provider_contract() {
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+        for provider in ["forgejo", "github", "gitlab"] {
+            for caller in [false, true] {
+                for reference in [
+                    None,
+                    Some("HEAD"),
+                    Some("unknown-ref"),
+                    Some("topic%2Fbranch"),
+                ] {
+                    for (upstream, payload, expected, kind) in [
+                        (
+                            200,
+                            r#"{"path":"src/nested/module.rs","file_path":"src/nested/module.rs","encoding":"base64","content":"aGVsbG8="}"#,
+                            200,
+                            None,
+                        ),
+                        (
+                            404,
+                            r#"{"message":"provider-secret-marker"}"#,
+                            404,
+                            Some(domain::FileReadErrorKind::NotFound),
+                        ),
+                        (
+                            404,
+                            "malformed provider-secret-marker",
+                            404,
+                            Some(domain::FileReadErrorKind::NotFound),
+                        ),
+                        (
+                            401,
+                            "provider-secret-marker",
+                            401,
+                            Some(domain::FileReadErrorKind::Permission),
+                        ),
+                        (
+                            403,
+                            "provider-secret-marker",
+                            403,
+                            Some(domain::FileReadErrorKind::Permission),
+                        ),
+                        (
+                            500,
+                            "provider-secret-marker",
+                            502,
+                            Some(domain::FileReadErrorKind::Upstream),
+                        ),
+                        (
+                            503,
+                            "provider-secret-marker",
+                            502,
+                            Some(domain::FileReadErrorKind::Upstream),
+                        ),
+                        (
+                            302,
+                            "provider-secret-marker",
+                            502,
+                            Some(domain::FileReadErrorKind::Upstream),
+                        ),
+                        (
+                            200,
+                            "invalid-json-secret-marker",
+                            502,
+                            Some(domain::FileReadErrorKind::InvalidPayload),
+                        ),
+                        (
+                            200,
+                            r#"{"path":"x","file_path":"x","encoding":"base64"}"#,
+                            502,
+                            Some(domain::FileReadErrorKind::InvalidPayload),
+                        ),
+                        (
+                            200,
+                            r#"{"path":"x","file_path":"x","encoding":"base64","content":"!!!!"}"#,
+                            502,
+                            Some(domain::FileReadErrorKind::InvalidPayload),
+                        ),
+                        (
+                            200,
+                            r#"{"path":"x","file_path":"x","encoding":"base64","content":"/w=="}"#,
+                            502,
+                            Some(domain::FileReadErrorKind::InvalidPayload),
+                        ),
+                        (
+                            200,
+                            r#"{"path":"x","file_path":"x","encoding":"secret-marker","content":"aA=="}"#,
+                            502,
+                            Some(domain::FileReadErrorKind::InvalidPayload),
+                        ),
+                    ] {
+                        let mock = MockServer::start().await;
+                        let audit = Arc::new(audit::InMemoryAuditSink::new());
+                        Mock::given(method("GET"))
+                            .respond_with(ResponseTemplate::new(upstream).set_body_string(payload))
+                            .expect(1)
+                            .mount(&mock)
+                            .await;
+                        let response = crate::build_router(
+                            file_state(&mock.uri(), provider, audit.clone(), caller),
+                            false,
+                        )
+                        .oneshot(file_request(
+                            "src/nested/module.rs",
+                            reference,
+                            Some("Bearer test-token"),
+                            "repo",
+                        ))
+                        .await
+                        .expect("response");
+                        assert_eq!(
+                            response.status().as_u16(),
+                            expected,
+                            "{provider}: {payload}"
+                        );
+                        let metadata = response
+                            .extensions()
+                            .get::<domain::FileReadError>()
+                            .copied();
+                        assert_eq!(metadata.map(|e| e.kind), kind);
+                        if let Some(metadata) = metadata {
+                            assert_eq!(metadata.upstream_status, Some(upstream));
+                        }
+                        let body = axum::body::to_bytes(response.into_body(), 4096)
+                            .await
+                            .expect("body");
+                        let body = String::from_utf8(body.to_vec()).expect("utf8");
+                        assert!(!body.contains("secret-marker"));
+                        if expected == 404 {
+                            assert!(body.contains(
+                                "repository resource unavailable at the requested path/ref"
+                            ));
+                        }
+                        if expected == 200 {
+                            assert!(body.contains("hello"));
+                        }
+                        let records = audit.records().expect("audit");
+                        assert_eq!(records.len(), 1);
+                        assert_eq!(records[0].action, "read_repository_file");
+                        assert_eq!(records[0].target, "src/nested/module.rs");
+                        let requests = mock.received_requests().await.expect("requests");
+                        assert_eq!(requests.len(), 1);
+                        let request = &requests[0];
+                        let expected_path = match provider {
+                            "github" => "/repos/org/repo/contents/src/nested/module.rs",
+                            "gitlab" => {
+                                "/api/v4/projects/org%2Frepo/repository/files/src%2Fnested%2Fmodule.rs"
+                            }
+                            _ => "/api/v1/repos/org/repo/contents/src%2Fnested%2Fmodule.rs",
+                        };
+                        assert_eq!(request.url.path(), expected_path);
+                        let actual_ref = request
+                            .url
+                            .query_pairs()
+                            .find(|(key, _)| key == "ref")
+                            .map(|(_, value)| value.into_owned());
+                        let expected_ref = if reference == Some("topic%2Fbranch") {
+                            Some("topic/branch")
+                        } else {
+                            reference.or(if provider == "gitlab" {
+                                Some("HEAD")
+                            } else {
+                                None
+                            })
+                        };
+                        assert_eq!(actual_ref.as_deref(), expected_ref);
+                        let token = if caller {
+                            "caller-secret-marker"
+                        } else {
+                            "default-secret-marker"
+                        };
+                        if provider == "gitlab" {
+                            assert_eq!(request.headers["private-token"], token);
+                        } else {
+                            assert_eq!(request.headers["authorization"], format!("Bearer {token}"));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn file_early_failures_do_not_contact_provider() {
+        let mock = wiremock::MockServer::start().await;
+        let audit = Arc::new(audit::InMemoryAuditSink::new());
+        let app = crate::build_router(
+            file_state(&mock.uri(), "forgejo", audit.clone(), true),
+            false,
+        );
+        for (path, bearer, repo, status) in [
+            ("file", None, "repo", 401),
+            ("file", Some("Bearer invalid"), "repo", 401),
+            ("file", Some("Bearer test-token"), "denied", 403),
+            ("%2E%2E/file", Some("Bearer test-token"), "repo", 400),
+        ] {
+            assert_eq!(
+                app.clone()
+                    .oneshot(file_request(path, None, bearer, repo))
+                    .await
+                    .expect("response")
+                    .status()
+                    .as_u16(),
+                status
+            );
+        }
+        assert!(audit.records().expect("audit").is_empty());
+        let app = crate::build_router(
+            file_state(
+                &mock.uri(),
+                "forgejo",
+                Arc::new(CancellationFailingAudit),
+                true,
+            ),
+            false,
+        );
+        assert_eq!(
+            app.oneshot(file_request(
+                "file",
+                None,
+                Some("Bearer test-token"),
+                "repo"
+            ))
+            .await
+            .expect("response")
+            .status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert!(mock.received_requests().await.expect("requests").is_empty());
+    }
+
+    #[tokio::test]
+    #[allow(clippy::panic)]
+    async fn file_mcp_wire_contract() {
+        use rmcp::{ServiceExt, model::CallToolRequestParams};
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+        let mock = MockServer::start().await;
+        let app = crate::build_router(
+            file_state(
+                &mock.uri(),
+                "forgejo",
+                Arc::new(audit::InMemoryAuditSink::new()),
+                true,
+            ),
+            false,
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let url = format!("http://{}", listener.local_addr().expect("address"));
+        let gateway = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("gateway");
+        });
+        let config = transport::ShimConfig {
+            channel_startup_spike: false,
+            enable_channels: false,
+            read_only: false,
+            server_name: "test".into(),
+            server_version: "test".into(),
+            gateways: vec![transport::GatewayConfig {
+                name: "test".into(),
+                token: "test-token".into(),
+                url,
+            }],
+        };
+        let (server_io, client_io) = tokio::io::duplex(4096);
+        let shim = tokio::spawn(async move {
+            transport::McpShim::new(config)
+                .serve(server_io)
+                .await
+                .expect("shim")
+                .waiting()
+                .await
+                .expect("wait");
+        });
+        let client = ().serve(client_io).await.expect("client");
+        for (status, code) in [(200, None), (404, Some(-32602)), (503, Some(-32603))] {
+            mock.reset().await;
+            Mock::given(method("GET")).respond_with(ResponseTemplate::new(status).set_body_json(serde_json::json!({ "path": "file", "encoding": "base64", "content": "aGVsbG8=" }))).expect(1).mount(&mock).await;
+            let args =
+                serde_json::json!({"forge":"test-forge","owner":"org","repo":"repo","path":"file"})
+                    .as_object()
+                    .expect("args")
+                    .clone();
+            let result = client
+                .call_tool(CallToolRequestParams::new("read_repository_file").with_arguments(args))
+                .await;
+            if let Some(code) = code {
+                let rmcp::ServiceError::McpError(error) = result.expect_err("failure") else {
+                    panic!("expected MCP error")
+                };
+                assert_eq!(error.code.0, code);
+                if status == 404 {
+                    assert!(
+                        error
+                            .message
+                            .contains("repository resource unavailable at the requested path/ref")
+                    );
+                }
+            } else {
+                assert_eq!(
+                    result.expect("success").content[0]
+                        .raw
+                        .as_text()
+                        .expect("text")
+                        .text,
+                    "hello"
+                );
+            }
+            assert_eq!(mock.received_requests().await.expect("requests").len(), 1);
+        }
+        client.cancel().await.expect("cancel");
+        shim.await.expect("shim stopped");
+        gateway.abort();
     }
 
     fn cancel_request(alias: &str, repo: &str, bearer: Option<&str>) -> Request<Body> {

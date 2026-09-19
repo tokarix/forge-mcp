@@ -1331,8 +1331,56 @@ pub fn validate_repository_path(path: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Safe, operation-specific metadata for repository file failures.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FileReadErrorKind {
+    NotFound,
+    Permission,
+    Transport,
+    InvalidPayload,
+    Upstream,
+}
+
+impl FileReadErrorKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NotFound => "not_found",
+            Self::Permission => "permission",
+            Self::Transport => "transport",
+            Self::InvalidPayload => "invalid_payload",
+            Self::Upstream => "upstream",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+#[error("{}", self.description())]
+pub struct FileReadError {
+    pub kind: FileReadErrorKind,
+    /// The actual HTTP response status, if one was received.
+    pub upstream_status: Option<u16>,
+}
+
+impl FileReadError {
+    #[must_use]
+    pub const fn description(self) -> &'static str {
+        match self.kind {
+            FileReadErrorKind::NotFound => {
+                "repository resource unavailable at the requested path/ref"
+            }
+            FileReadErrorKind::Permission => "repository file access denied by upstream",
+            FileReadErrorKind::Transport => "repository file upstream transport failure",
+            FileReadErrorKind::InvalidPayload => "invalid repository file response",
+            FileReadErrorKind::Upstream => "repository file upstream failure",
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum ServiceError {
+    #[error(transparent)]
+    FileRead(FileReadError),
     #[error("audit failure: {0}")]
     Audit(String),
     #[error("git execution failed: {0}")]

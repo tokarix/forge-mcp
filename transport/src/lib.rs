@@ -4401,6 +4401,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn file_tool_preserves_path_encoding_and_ref_presence()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mock = wiremock::MockServer::start().await;
+        let (client, shim) = spawn_shim_and_client(test_config(&mock.uri())).await?;
+        for (path, encoded) in [
+            ("src/nested/module.rs", "src/nested/module.rs"),
+            ("dir/a?#% b.txt", "dir/a%3F%23%25%20b.txt"),
+            ("dir/%2F.txt", "dir/%252F.txt"),
+        ] {
+            for reference in [
+                None,
+                Some("HEAD"),
+                Some("main"),
+                Some("topic/branch?secret=value"),
+            ] {
+                mock.reset().await;
+                wiremock::Mock::given(wiremock::matchers::method("GET"))
+                    .and(wiremock::matchers::path_regex(
+                        "/api/v1/repos/.+/contents/.+",
+                    ))
+                    .respond_with(
+                        wiremock::ResponseTemplate::new(200)
+                            .set_body_json(serde_json::json!({"content":"hello"})),
+                    )
+                    .expect(1)
+                    .mount(&mock)
+                    .await;
+                let args = serde_json::json!({"forge":"test-forge","owner":"org","repo":"repo","path":path,"git_ref":reference}).as_object().expect("args").clone();
+                let result = client
+                    .call_tool(
+                        CallToolRequestParams::new("read_repository_file").with_arguments(args),
+                    )
+                    .await?;
+                assert_eq!(result.content[0].raw.as_text().expect("text").text, "hello");
+                let requests = mock.received_requests().await.expect("requests");
+                // Initialization starts gateway discovery/event requests. Only
+                // the contents operation belongs to this forwarding contract.
+                let requests: Vec<_> = requests
+                    .iter()
+                    .filter(|request| {
+                        !matches!(
+                            request.url.path(),
+                            "/api/v1/agent/info" | "/api/v1/agent/events"
+                        )
+                    })
+                    .collect();
+                assert_eq!(requests.len(), 1);
+                assert_eq!(
+                    requests[0].url.path(),
+                    format!("/api/v1/repos/test-forge/org/repo/contents/{encoded}")
+                );
+                let query: Vec<_> = requests[0].url.query_pairs().collect();
+                if let Some(reference) = reference {
+                    assert_eq!(query.len(), 1);
+                    assert_eq!(query[0].0, "ref");
+                    assert_eq!(query[0].1, reference);
+                } else {
+                    assert!(query.is_empty());
+                }
+            }
+        }
+        drop(client);
+        shim.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn read_repository_file_calls_gateway() -> Result<(), Box<dyn std::error::Error>> {
         let mock_server = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("GET"))
