@@ -1,0 +1,18 @@
+when:
+  - event: cron
+    cron: cargo-audit
+    branch: main
+
+steps:
+  cargo-audit:
+    image: rust:1.94-slim
+    environment:
+      CARGO_TARGET_DIR: /tmp/target
+    commands:
+      - cargo install cargo-audit --version 0.22.2 --locked --no-default-features
+      - cargo audit --version
+      # A new directory forces a fresh RustSec fetch, even on reused runners.
+      # Keep native advisory/error output and propagate every nonzero exit.
+      - audit_dir=$$(mktemp -d /tmp/cargo-audit.XXXXXX)
+      - cargo audit --file Cargo.lock --db "$${audit_dir}/advisory-db"
+      - echo "Cargo audit completed successfully."

@@ -807,7 +807,7 @@ running an ignored provider test with missing configuration or an unreachable
 service fails; agents do not start a local provider to run it.
 
 Woodpecker is the service-backed integration authority. The separate
-`checks` workflow runs the normal Rust gates and lints both workflow files with
+`checks` workflow runs the normal Rust gates and lints all workflow files with
 Woodpecker CLI 2.8.3. After it succeeds, `forgejo-integration` starts the pinned
 `codeberg.org/forgejo/forgejo:16.0.3-rootless` image as a detached `forgejo`
 step. This workflow places the checkout directly at the shared `/woodpecker`
@@ -824,6 +824,24 @@ token, and reports redacted, bounded diagnostics. Repositories and tokens are
 logically cleaned up, while the user, SQLite database, repositories, and all
 other state disappear with the workflow container. No production credential,
 persistent volume, privileged mode, or container socket is used.
+
+The independent `cargo-audit` workflow runs only for the named `cargo-audit`
+cron on `main`. It installs cargo-audit 0.22.2 with its locked tool dependencies
+and scans the committed `Cargo.lock` against freshly fetched RustSec data.
+It does not update application dependencies, build the application, or start
+provider services, and is outside the required PR checks.
+
+After merge, an operator with repository push access should open the repository
+in Woodpecker, go to **Settings → Cron**, and create a cron named `cargo-audit`
+with schedule `@daily` and branch `main` (see the
+[Woodpecker cron documentation](https://woodpecker-ci.org/docs/usage/cron)).
+Schedule activation and the first real scheduled run are operator follow-up.
+Inspect the resulting cron pipeline in the repository's Woodpecker pipeline
+list, then open the `cargo-audit` workflow and step logs. A completed scan with
+vulnerabilities prints advisory details and a vulnerability count and fails;
+scanner or advisory-fetch errors print their native error diagnostics and also
+fail. A failed fetch is not a clean scan. Successful scans end with
+`Cargo audit completed successfully.` Existing PR CI must pass before merge.
 
 Issues & PRs disabled. Development happens on an internal Forgejo instance.
 
