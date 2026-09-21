@@ -762,11 +762,13 @@ pub trait ForgeAdapter: Send + Sync {
         credential: &ForgeCredential,
     ) -> Result<domain::IssueDependencies, ForgeError>;
 
-    /// Lists change requests for a repository.
+    /// Lists requests using an explicit predicate; omission preserves defaults.
+    /// Forgejo exhausts provider continuation or fails the whole call within
+    /// safety budgets. Listings are not atomic snapshots. GitLab rejects All.
     async fn list_change_requests(
         &self,
         repository: &RepositoryRef,
-        state: Option<&ChangeRequestState>,
+        state: Option<&domain::ChangeRequestFilter>,
         credential: &ForgeCredential,
     ) -> Result<Vec<ChangeRequest>, ForgeError>;
 
@@ -1244,13 +1246,15 @@ impl ForgejoAdapter {
     async fn list_pulls_with_limits(
         &self,
         repository: &RepositoryRef,
-        state: Option<&ChangeRequestState>,
+        state: Option<&domain::ChangeRequestFilter>,
         credential: &ForgeCredential,
         limits: IssuePaginationLimits,
     ) -> Result<Vec<ChangeRequest>, ForgeError> {
+        let requested_state = state;
         let state = state.map(|state| match state {
-            ChangeRequestState::Open => "open",
-            ChangeRequestState::Closed | ChangeRequestState::Merged => "closed",
+            domain::ChangeRequestFilter::Open => "open",
+            domain::ChangeRequestFilter::All => "all",
+            domain::ChangeRequestFilter::Closed | domain::ChangeRequestFilter::Merged => "closed",
         });
         let limits = limits.validate()?;
         let deadline = Instant::now()
@@ -1329,6 +1333,10 @@ impl ForgejoAdapter {
             let _ = remaining_deadline(deadline)?;
             let next = validate_next_page(page, pull_next_page(&response.headers, &url)?)?;
             let Some(next) = next else {
+                if let Some(filter) = requested_state {
+                    pulls.retain(|pull| filter.matches(&pull.state));
+                }
+                let _ = remaining_deadline(deadline)?;
                 return Ok(pulls);
             };
             if empty_page {
@@ -2804,7 +2812,7 @@ impl ForgeAdapter for ForgejoAdapter {
     async fn list_change_requests(
         &self,
         repository: &RepositoryRef,
-        state: Option<&ChangeRequestState>,
+        state: Option<&domain::ChangeRequestFilter>,
         credential: &ForgeCredential,
     ) -> Result<Vec<ChangeRequest>, ForgeError> {
         self.list_pulls_with_limits(

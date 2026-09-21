@@ -67,7 +67,7 @@ async fn list(
     adapter
         .list_pulls_with_limits(
             &repo,
-            Some(&ChangeRequestState::Open),
+            Some(&domain::ChangeRequestFilter::Open),
             &ForgeCredential {
                 token: Some("scoped".into()),
             },
@@ -240,4 +240,89 @@ async fn repeated_continuation_on_later_page_and_empty_continuation_fail() {
         .await;
         assert!(list(&mock, limits()).await.is_err());
     }
+}
+
+#[tokio::test]
+async fn github_all_retains_all_lifecycle_states_and_gitlab_rejects_it() {
+    use domain::ChangeRequestFilter;
+    let mock = MockServer::start().await;
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let repo = RepositoryRef {
+        alias: "test".into(),
+        forge: domain::ForgeKind::GitHub,
+        host: mock.uri(),
+        owner: "org".into(),
+        name: "repo".into(),
+    };
+    let github = github::GitHubAdapter::new(github::GitHubConfig {
+        api_url: mock.uri(),
+        token: None,
+    })
+    .expect("adapter");
+    let mut open = pull(1, "target");
+    open["node_id"] = json!("one");
+    let mut closed = pull(2, "target");
+    closed["node_id"] = json!("two");
+    closed["state"] = json!("closed");
+    let mut merged = closed.clone();
+    merged["number"] = json!(3);
+    merged["merged_at"] = json!("2026-01-01T00:00:00Z");
+    for (filter, api, expected) in [
+        (Some(ChangeRequestFilter::All), "all", vec![1, 2, 3]),
+        (None, "all", vec![1, 2, 3]),
+        (Some(ChangeRequestFilter::Open), "open", vec![1]),
+        (Some(ChangeRequestFilter::Closed), "closed", vec![2]),
+        (Some(ChangeRequestFilter::Merged), "closed", vec![3]),
+    ] {
+        mock.reset().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/org/repo/pulls"))
+            .and(query_param("state", api))
+            .and(query_param("page", "1"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header(
+                        "Link",
+                        format!("<{}/repos/org/repo/pulls?page=2>; rel=\"next\"", mock.uri()),
+                    )
+                    .set_body_json(json!([open.clone(), closed.clone()])),
+            )
+            .expect(1)
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/org/repo/pulls"))
+            .and(query_param("state", api))
+            .and(query_param("page", "2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([merged.clone()])))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        let result = github
+            .list_change_requests(&repo, filter.as_ref(), &ForgeCredential { token: None })
+            .await
+            .expect("list");
+        assert_eq!(
+            result.iter().map(|pr| pr.index).collect::<Vec<_>>(),
+            expected
+        );
+        mock.verify().await;
+    }
+    mock.reset().await;
+    let gitlab = gitlab::GitLabAdapter::new(gitlab::GitLabConfig {
+        base_url: mock.uri(),
+        token: None,
+    })
+    .expect("adapter");
+    assert!(matches!(
+        gitlab
+            .list_change_requests(
+                &repo,
+                Some(&ChangeRequestFilter::All),
+                &ForgeCredential { token: None }
+            )
+            .await,
+        Err(ForgeError::Unsupported(_))
+    ));
+    assert!(mock.received_requests().await.expect("requests").is_empty());
 }

@@ -444,6 +444,26 @@ pub struct ListBranchesTool {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum PullStateFilter {
+    Open,
+    Closed,
+    Merged,
+    All,
+}
+
+impl PullStateFilter {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Closed => "closed",
+            Self::Merged => "merged",
+            Self::All => "all",
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct ListChangeRequestsTool {
     /// Forge alias -- use `forge_info` to discover available aliases.
     pub forge: String,
@@ -451,8 +471,9 @@ pub struct ListChangeRequestsTool {
     pub owner: String,
     /// Repository name.
     pub repo: String,
-    /// Optional state filter: open, closed, merged.
-    pub state: Option<String>,
+    /// Optional state filter: open, closed (unmerged), merged, all.
+    /// Omission preserves provider defaults. GitLab rejects all.
+    pub state: Option<PullStateFilter>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -2036,7 +2057,7 @@ impl McpShim {
     #[tool(
         input_schema = schema_for_type::<ListChangeRequestsTool>(),
         name = "list_change_requests",
-        description = "List change requests (pull requests) for a repository. Returns nullable authoritative draft, mergeability, nullable has_conflicts, and labels for each request. Sparse metadata remains unknown; re-read get before readiness decisions."
+        description = "List change requests (pull requests) as a JSON array. Filters: open, closed (unmerged), merged, all. Forgejo success exhausts pagination within safety budgets; any page/continuation/budget failure errors, never returns a prefix. GitLab does not support all. This is not an atomic snapshot: use fresh detail/head checks and admission fences; concurrent PR creation remains possible. Returns nullable authoritative draft, mergeability, nullable has_conflicts, and labels for each request. Sparse metadata remains unknown; re-read get before readiness decisions."
     )]
     async fn list_change_requests(
         &self,
@@ -2056,7 +2077,7 @@ impl McpShim {
             ],
         )?;
         if let Some(state) = &request.state {
-            url.query_pairs_mut().append_pair("state", state);
+            url.query_pairs_mut().append_pair("state", state.as_str());
         }
         self.gateway_get(url, &gw.token).await
     }

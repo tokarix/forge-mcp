@@ -747,7 +747,7 @@ mod tests {
         async fn list_change_requests(
             &self,
             _: &domain::RepositoryRef,
-            _: Option<&domain::ChangeRequestState>,
+            _: Option<&domain::ChangeRequestFilter>,
             _: &domain::ForgeCredential,
         ) -> Result<Vec<domain::ChangeRequest>, forge::ForgeError> {
             unimplemented!()

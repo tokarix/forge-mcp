@@ -2586,14 +2586,16 @@ impl crate::ForgeAdapter for GitHubAdapter {
     async fn list_change_requests(
         &self,
         repository: &RepositoryRef,
-        state: Option<&ChangeRequestState>,
+        state: Option<&domain::ChangeRequestFilter>,
         credential: &ForgeCredential,
     ) -> Result<Vec<ChangeRequest>, ForgeError> {
         let requested_state = state.cloned();
         let api_state = match state {
-            Some(ChangeRequestState::Open) => "open",
-            Some(ChangeRequestState::Closed | ChangeRequestState::Merged) => "closed",
-            None => "all",
+            Some(domain::ChangeRequestFilter::Open) => "open",
+            Some(domain::ChangeRequestFilter::Closed | domain::ChangeRequestFilter::Merged) => {
+                "closed"
+            }
+            Some(domain::ChangeRequestFilter::All) | None => "all",
         };
         let url = format!(
             "{}/repos/{}/pulls",
@@ -2608,7 +2610,7 @@ impl crate::ForgeAdapter for GitHubAdapter {
             .map(GitHubPullRequest::into_change_request)
             .collect();
         if let Some(requested_state) = requested_state {
-            result.retain(|pull| pull.state == requested_state);
+            result.retain(|pull| requested_state.matches(&pull.state));
         }
         Ok(result)
     }

@@ -1,5 +1,7 @@
 #[path = "support/cancellation.rs"]
 mod cancellation;
+#[path = "support/pull_listing.rs"]
+mod pull_listing;
 mod support;
 
 use domain::{ForgeCredential, ForgeKind, RepositoryRef};

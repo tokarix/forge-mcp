@@ -788,10 +788,11 @@ pub async fn get_pull_ci_details(
         ("forge" = String, Path, description = "Forge alias"),
         ("owner" = String, Path, description = "Repository owner"),
         ("repo" = String, Path, description = "Repository name"),
-        ("state" = Option<String>, Query, description = "State filter: open, closed, merged"),
+        ("state" = Option<String>, Query, description = "State filter: open, closed (unmerged), merged, all. Omission preserves provider defaults."),
     ),
     responses(
-        (status = 200, description = "List of change requests", body = Vec<domain::ChangeRequest>),
+        (status = 200, description = "JSON array; Forgejo exhausts pagination or errors. Not an atomic snapshot.", body = Vec<domain::ChangeRequest>),
+        (status = 400, description = "Unsupported state string", body = ErrorBody),
         (status = 401, description = "Unauthorized", body = ErrorBody),
     ),
     security(("bearer" = []))
@@ -814,11 +815,21 @@ pub async fn list_pulls(
 
     let credential = resolve_credential(agent, &path.forge, forge);
 
-    let state_filter = query.state.as_deref().map(|s| match s {
-        "closed" => domain::ChangeRequestState::Closed,
-        "merged" => domain::ChangeRequestState::Merged,
-        _ => domain::ChangeRequestState::Open,
-    });
+    let state_filter = match query.state.as_deref() {
+        None => None,
+        Some("open") => Some(domain::ChangeRequestFilter::Open),
+        Some("closed") => Some(domain::ChangeRequestFilter::Closed),
+        Some("merged") => Some(domain::ChangeRequestFilter::Merged),
+        Some("all") => Some(domain::ChangeRequestFilter::All),
+        Some(_) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorBody {
+                    error: "state must be one of: open, closed, merged, all".into(),
+                }),
+            ));
+        }
+    };
 
     let result = forge
         .read_service
@@ -3546,7 +3557,7 @@ mod tests {
         async fn list_change_requests(
             &self,
             _: &domain::RepositoryRef,
-            _: Option<&domain::ChangeRequestState>,
+            _: Option<&domain::ChangeRequestFilter>,
             _: &domain::ForgeCredential,
         ) -> Result<Vec<domain::ChangeRequest>, forge::ForgeError> {
             Err(forge::ForgeError::Unsupported(
@@ -6494,6 +6505,167 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).expect("parse JSON response");
         assert_eq!(json["branch"], "agent/fix");
         assert_eq!(json["commit_sha"], "abc123");
+    }
+
+    #[tokio::test]
+    async fn list_pulls_filters_through_real_service_and_adapter() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{header, method, path, query_param},
+        };
+        for (filter, upstream, expected) in [
+            (Some("all"), Some("all"), vec![1, 2, 3]),
+            (Some("open"), Some("open"), vec![1]),
+            (Some("closed"), Some("closed"), vec![2]),
+            (Some("merged"), Some("closed"), vec![3]),
+            (None, None, vec![1]),
+        ] {
+            let mock = MockServer::start().await;
+            let pull = |number, state, merged| {
+                serde_json::json!({
+                    "number": number, "state": state, "merged": merged, "title": "Fixture",
+                    "base": {"ref":"main", "sha":"base"}, "head":{"ref":"target", "sha":"head"},
+                    "html_url":"https://forge.invalid/pulls/1"
+                })
+            };
+            let (first, second) = match upstream {
+                Some("all") => (
+                    serde_json::json!([pull(1, "open", false), pull(2, "closed", false)]),
+                    serde_json::json!([pull(3, "closed", true)]),
+                ),
+                Some("closed") => (
+                    serde_json::json!([pull(2, "closed", false)]),
+                    serde_json::json!([pull(3, "closed", true)]),
+                ),
+                _ => (
+                    serde_json::json!([pull(1, "open", false)]),
+                    serde_json::json!([]),
+                ),
+            };
+            for (number, body) in [(1, first), (2, second)] {
+                let mut response = ResponseTemplate::new(200).set_body_json(body);
+                if number == 1 {
+                    let state_query =
+                        upstream.map_or(String::new(), |state| format!("&state={state}"));
+                    response = response.insert_header("Link", format!("<{}/api/v1/repos/org/repo/pulls?limit=100&page=2{state_query}>; rel=\"next\"", mock.uri()));
+                }
+                let mut fixture = Mock::given(method("GET"))
+                    .and(path("/api/v1/repos/org/repo/pulls"))
+                    .and(query_param("page", number.to_string()))
+                    .and(header("authorization", "Bearer caller-secret-marker"));
+                if let Some(upstream) = upstream {
+                    fixture = fixture.and(query_param("state", upstream));
+                }
+                fixture.respond_with(response).expect(1).mount(&mock).await;
+            }
+            let state = file_state(
+                &mock.uri(),
+                "forgejo",
+                Arc::new(audit::InMemoryAuditSink::new()),
+                true,
+            );
+            let suffix = filter.map_or(String::new(), |state| format!("?state={state}"));
+            let response = crate::build_router(state, false)
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/api/v1/repos/test-forge/org/repo/pulls{suffix}"))
+                        .header("authorization", "Bearer test-token")
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("body");
+            let body: serde_json::Value = serde_json::from_slice(&bytes).expect("array");
+            assert_eq!(
+                body.as_array()
+                    .expect("array")
+                    .iter()
+                    .map(|pr| pr["index"].as_u64().expect("index"))
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            if filter.is_none() {
+                for request in mock.received_requests().await.expect("requests") {
+                    assert!(!request.url.query_pairs().any(|(key, _)| key == "state"));
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn list_pulls_rejects_invalid_filters_before_service_call() {
+        let mock = wiremock::MockServer::start().await;
+        for filter in ["", "ALL", "invalid", "opened"] {
+            let state = file_state(
+                &mock.uri(),
+                "forgejo",
+                Arc::new(audit::InMemoryAuditSink::new()),
+                true,
+            );
+            let response = crate::build_router(state, false)
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/api/v1/repos/test-forge/org/repo/pulls?state={filter}"
+                        ))
+                        .header("authorization", "Bearer test-token")
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+        assert!(mock.received_requests().await.expect("requests").is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_pulls_downstream_failure_returns_error_instead_of_array() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path, query_param},
+        };
+        let mock = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/api/v1/repos/org/repo/pulls"))
+            .and(query_param("page", "1")).and(query_param("state", "all"))
+            .respond_with(ResponseTemplate::new(200)
+                .insert_header("Link", format!("<{}/api/v1/repos/org/repo/pulls?limit=100&page=2&state=all>; rel=\"next\"", mock.uri()))
+                .set_body_json(serde_json::json!([{"number":1,"state":"open","merged":false,"title":"Fixture",
+                    "base":{"ref":"main","sha":"base"},"head":{"ref":"target","sha":"head"},"html_url":"https://forge.invalid/1"}]))).expect(1).mount(&mock).await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/org/repo/pulls"))
+            .and(query_param("page", "2"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        let state = file_state(
+            &mock.uri(),
+            "forgejo",
+            Arc::new(audit::InMemoryAuditSink::new()),
+            true,
+        );
+        let response = crate::build_router(state, false)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/repos/test-forge/org/repo/pulls?state=all")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert!(response.status().is_server_error());
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("error JSON");
+        assert!(!body.is_array());
+        assert!(body.get("error").is_some());
     }
 
     #[tokio::test]

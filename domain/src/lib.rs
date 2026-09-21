@@ -221,6 +221,32 @@ pub enum ChangeRequestState {
     Merged,
 }
 
+/// Listing predicate, distinct from the lifecycle state of a single PR.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub enum ChangeRequestFilter {
+    #[default]
+    Open,
+    /// Closed without being merged.
+    Closed,
+    Merged,
+    /// Open, closed, and merged requests.
+    All,
+}
+
+impl ChangeRequestFilter {
+    #[must_use]
+    pub fn matches(&self, state: &ChangeRequestState) -> bool {
+        matches!(
+            (self, state),
+            (Self::All, _)
+                | (Self::Open, ChangeRequestState::Open)
+                | (Self::Closed, ChangeRequestState::Closed)
+                | (Self::Merged, ChangeRequestState::Merged)
+        )
+    }
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
@@ -1123,7 +1149,7 @@ pub struct GetIssueRequest {
 pub struct ListChangeRequestsRequest {
     pub agent: AgentIdentity,
     pub repository: RepositoryRef,
-    pub state: Option<ChangeRequestState>,
+    pub state: Option<ChangeRequestFilter>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

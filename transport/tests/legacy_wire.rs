@@ -140,8 +140,17 @@ async fn baseline_initialization_and_catalog() {
             .sort_by_key(|tool| tool["name"].as_str().expect("tool name").to_owned());
         // This fixture is recorded before the dependency upgrade. Never update it
         // from the upgraded serializer to make a compatibility failure pass.
-        let expected: Value = serde_json::from_str(include_str!("fixtures/tools-1.3.json"))
+        let mut expected: Value = serde_json::from_str(include_str!("fixtures/tools-1.3.json"))
             .expect("baseline catalog");
+        // Issue #255 intentionally extends this one tool; keep the recorded
+        // SDK baseline intact for every other tool. Its new contract is tested
+        // separately below through tools/list and tools/call.
+        for frame in [&mut catalog, &mut expected] {
+            frame["result"]["tools"]
+                .as_array_mut()
+                .expect("tools")
+                .retain(|tool| tool["name"] != "list_change_requests");
+        }
         assert_eq!(catalog, expected);
         for arguments in [None, Some(json!({}))] {
             let mut params = json!({"name":"poll_events"});
@@ -619,4 +628,75 @@ async fn stdio_binary_protocol_and_eof() {
         output.read_line(&mut remaining).await.expect("stdout EOF"),
         0
     );
+}
+
+#[tokio::test]
+async fn pull_listing_schema_and_all_forwarding() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/agent/info"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"forges":[{"alias":"fixture","type":"forgejo"}]})),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/repos/fixture/o/r/pulls"))
+        .and(wiremock::matchers::query_param("state", "all"))
+        .and(header("authorization", "Bearer synthetic-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            {"index":1,"state":"Open"},{"index":2,"state":"Closed"},{"index":3,"state":"Merged"}
+        ])))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let mut wire = Wire::new(config(&server.uri()));
+    wire.initialize("2025-06-18").await;
+    let catalog = wire.request("tools/list", json!({})).await;
+    let tool = catalog["result"]["tools"]
+        .as_array()
+        .expect("tools")
+        .iter()
+        .find(|tool| tool["name"] == "list_change_requests")
+        .expect("tool");
+    let schema = tool["inputSchema"].to_string();
+    for state in ["open", "closed", "merged", "all"] {
+        assert!(schema.contains(&format!("\"{state}\"")));
+    }
+    assert!(schema.contains("enum"));
+    assert!(
+        tool["description"]
+            .as_str()
+            .expect("description")
+            .contains("never returns a prefix")
+    );
+    let result = wire
+        .request(
+            "tools/call",
+            json!({"name":"list_change_requests","arguments":{
+                "forge":"fixture","owner":"o","repo":"r","state":"all"
+            }}),
+        )
+        .await;
+    assert_eq!(result["result"]["isError"], false);
+    let pulls: Value = serde_json::from_str(
+        result["result"]["content"][0]["text"]
+            .as_str()
+            .expect("text"),
+    )
+    .expect("array");
+    assert_eq!(pulls.as_array().expect("array").len(), 3);
+    for invalid in ["invalid", "ALL", ""] {
+        let result = wire
+            .request(
+                "tools/call",
+                json!({"name":"list_change_requests","arguments":{
+                    "forge":"fixture","owner":"o","repo":"r","state":invalid
+                }}),
+            )
+            .await;
+        assert_error(&result, -32602);
+    }
+    wire.finish(true).await;
 }

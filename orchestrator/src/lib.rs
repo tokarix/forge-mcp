@@ -2143,7 +2143,7 @@ mod tests {
         async fn list_change_requests(
             &self,
             _repository: &RepositoryRef,
-            _state: Option<&ChangeRequestState>,
+            _state: Option<&domain::ChangeRequestFilter>,
             _credential: &ForgeCredential,
         ) -> Result<Vec<ChangeRequest>, ForgeError> {
             Err(forge::ForgeError::Unsupported(
@@ -2554,7 +2554,7 @@ mod tests {
         async fn list_change_requests(
             &self,
             _repository: &RepositoryRef,
-            _state: Option<&ChangeRequestState>,
+            _state: Option<&domain::ChangeRequestFilter>,
             _credential: &ForgeCredential,
         ) -> Result<Vec<ChangeRequest>, ForgeError> {
             Err(forge::ForgeError::Unsupported(
@@ -3276,7 +3276,7 @@ mod tests {
         async fn list_change_requests(
             &self,
             _: &RepositoryRef,
-            _: Option<&ChangeRequestState>,
+            _: Option<&domain::ChangeRequestFilter>,
             _: &ForgeCredential,
         ) -> Result<Vec<ChangeRequest>, ForgeError> {
             Err(forge::ForgeError::Unsupported(
@@ -3975,7 +3975,7 @@ mod tests {
         async fn list_change_requests(
             &self,
             _repository: &RepositoryRef,
-            _state: Option<&ChangeRequestState>,
+            _state: Option<&domain::ChangeRequestFilter>,
             _credential: &ForgeCredential,
         ) -> Result<Vec<ChangeRequest>, ForgeError> {
             Err(forge::ForgeError::Unsupported(
@@ -4820,7 +4820,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
         async fn list_change_requests(
             &self,
             _repository: &RepositoryRef,
-            _state: Option<&ChangeRequestState>,
+            _state: Option<&domain::ChangeRequestFilter>,
             _credential: &ForgeCredential,
         ) -> Result<Vec<ChangeRequest>, ForgeError> {
             Err(forge::ForgeError::Unsupported(
@@ -5480,7 +5480,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
         async fn list_change_requests(
             &self,
             _: &RepositoryRef,
-            _: Option<&ChangeRequestState>,
+            _: Option<&domain::ChangeRequestFilter>,
             _: &ForgeCredential,
         ) -> Result<Vec<ChangeRequest>, ForgeError> {
             Err(forge::ForgeError::Unsupported(
@@ -6081,7 +6081,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
         async fn list_change_requests(
             &self,
             _: &RepositoryRef,
-            _: Option<&ChangeRequestState>,
+            _: Option<&domain::ChangeRequestFilter>,
             _: &ForgeCredential,
         ) -> Result<Vec<ChangeRequest>, ForgeError> {
             Err(forge::ForgeError::Unsupported(
@@ -7810,7 +7810,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
         async fn list_change_requests(
             &self,
             _: &RepositoryRef,
-            _: Option<&ChangeRequestState>,
+            _: Option<&domain::ChangeRequestFilter>,
             _: &ForgeCredential,
         ) -> Result<Vec<ChangeRequest>, ForgeError> {
             Err(ForgeError::Unsupported("test fake".into()))
@@ -8365,7 +8365,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
         async fn list_change_requests(
             &self,
             _: &RepositoryRef,
-            _: Option<&ChangeRequestState>,
+            _: Option<&domain::ChangeRequestFilter>,
             _: &ForgeCredential,
         ) -> Result<Vec<ChangeRequest>, ForgeError> {
             Err(forge::ForgeError::Unsupported("test fake".into()))

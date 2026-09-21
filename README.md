@@ -1096,3 +1096,36 @@ failures remain visible. Unknown draft retains existing gateway scheduling
 behavior for compatibility and is not readiness; C1's owned policy is stricter.
 This guard does not cancel already-armed remote schedules and does not eliminate
 the race between reading draft state and scheduling. Those require F2/C1.
+
+## Pull request listing
+
+`GET /api/v1/repos/{forge}/{owner}/{repo}/pulls` and the MCP
+`list_change_requests` tool return the existing JSON array. The optional `state`
+accepts exactly `open`, `closed`, `merged`, or `all`; invalid values are rejected.
+`open` selects domain `Open`, `closed` selects `Closed` (excluding merged PRs),
+and `merged` selects `Merged`. `all` includes all three states. An omitted filter
+preserves provider defaults (Forgejo open, GitHub all, GitLab upstream default).
+Forgejo filters the upstream closed set to distinguish closed from merged.
+GitHub supports `all` through its existing pagination; GitLab rejects explicit
+`all` because its listing does not yet guarantee exhaustive results.
+
+Forgejo success means pagination was exhausted according to provider continuation
+metadata. Results are deduplicated by repository PR number in first-occurrence
+order. Every page uses the caller's scoped credential. Continuation URLs must
+retain the origin, repository path and query filters; only the validated page
+number is used to construct the next request. Redirects, invalid or inconsistent
+continuations, failed pages and exhausted safety budgets reject the entire
+request, never return a successful prefix. The shared issue-list budgets apply:
+100 requested items per page, at most 1,000 pages and 100,000 raw entries
+(including duplicates), 8 MiB per page, 64 MiB total response bodies, and a
+60-second listing deadline. Short pages with a next link are followed; a full
+page without continuation is terminal according to provider metadata.
+
+This is not an atomic snapshot of a concurrently changing forge. Consumers,
+including Cockpit recovery, still need fresh PR detail/head checks and admission
+fences. Exhaustive listing alone does not prevent concurrent PR creation.
+
+For issue #255 rollout, merge/issue closure does not prove deployment. The
+operator must deploy the fixed server and rebuild/deploy the shim for the tool
+schema, verify deployed exhaustive listing and `all`, and only then remove
+`needs-input` from `tokarix/cockpit#410`.

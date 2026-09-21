@@ -1275,18 +1275,24 @@ impl crate::ForgeAdapter for GitLabAdapter {
     async fn list_change_requests(
         &self,
         repository: &RepositoryRef,
-        state: Option<&ChangeRequestState>,
+        state: Option<&domain::ChangeRequestFilter>,
         credential: &ForgeCredential,
     ) -> Result<Vec<ChangeRequest>, ForgeError> {
+        if state == Some(&domain::ChangeRequestFilter::All) {
+            return Err(ForgeError::Unsupported(
+                "exhaustive all-state pull listing is not supported on GitLab".into(),
+            ));
+        }
         let url = format!(
             "{}/projects/{}/merge_requests",
             self.api_base(),
             Self::project_path(repository),
         );
         let state_str = state.map(|s| match s {
-            ChangeRequestState::Closed => "closed",
-            ChangeRequestState::Merged => "merged",
-            ChangeRequestState::Open => "opened",
+            domain::ChangeRequestFilter::Closed => "closed",
+            domain::ChangeRequestFilter::Merged => "merged",
+            domain::ChangeRequestFilter::Open => "opened",
+            domain::ChangeRequestFilter::All => "all",
         });
         let token = self.effective_token(credential);
         let mut request = Self::authenticate(self.client.get(&url), token);
