@@ -4434,7 +4434,7 @@ mod tests {
                         CallToolRequestParams::new("read_repository_file").with_arguments(args),
                     )
                     .await?;
-                assert_eq!(result.content[0].raw.as_text().expect("text").text, "hello");
+                assert_eq!(result.content[0].as_text().expect("text").text, "hello");
                 let requests = mock.received_requests().await.expect("requests");
                 // Initialization starts gateway discovery/event requests. Only
                 // the contents operation belongs to this forwarding contract.

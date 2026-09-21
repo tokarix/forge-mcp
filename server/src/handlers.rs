@@ -4796,7 +4796,6 @@ mod tests {
             } else {
                 assert_eq!(
                     result.expect("success").content[0]
-                        .raw
                         .as_text()
                         .expect("text")
                         .text,

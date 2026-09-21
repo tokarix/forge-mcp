@@ -410,6 +410,122 @@ pub(crate) fn next_page_from_link_header(
     Ok(next)
 }
 
+fn validate_pull_link_target(target: &str, expected: &reqwest::Url) -> Result<u64, ForgeError> {
+    let expected_query: std::collections::BTreeMap<_, _> = expected
+        .query_pairs()
+        .filter(|(key, _)| key != "page")
+        .collect();
+    let url = reqwest::Url::parse(&target[1..target.len() - 1])
+        .map_err(|_| pagination_error("malformed Link URL"))?;
+    if url.origin() != expected.origin()
+        || url.path() != expected.path()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(pagination_error("unsafe continuation destination"));
+    }
+    let mut query = std::collections::BTreeMap::new();
+    for (key, value) in url.query_pairs() {
+        if query.insert(key, value).is_some() {
+            return Err(pagination_error("duplicate continuation query parameter"));
+        }
+    }
+    let page = query
+        .remove("page")
+        .ok_or_else(|| pagination_error("continuation is missing page"))?;
+    if page.parse::<u64>().ok().filter(|page| *page > 0).is_none() || query != expected_query {
+        return Err(pagination_error("inconsistent continuation query"));
+    }
+    let number = page
+        .parse::<u64>()
+        .map_err(|_| pagination_error("invalid continuation page"))?;
+    Ok(number)
+}
+
+// Validate provider destinations, then extract only the page number. Requests
+// are always rebuilt locally with the caller's scoped credential.
+fn pull_next_page(
+    headers: &reqwest::header::HeaderMap,
+    request_url: &str,
+) -> Result<Option<u64>, ForgeError> {
+    let expected = reqwest::Url::parse(request_url)
+        .map_err(|_| pagination_error("invalid pull request URL"))?;
+    let current = expected
+        .query_pairs()
+        .find(|(key, _)| key == "page")
+        .and_then(|(_, value)| value.parse::<u64>().ok())
+        .ok_or_else(|| pagination_error("invalid current page"))?;
+    let mut last_page = None;
+    let mut combined = reqwest::header::HeaderMap::new();
+    let mut links = Vec::new();
+    for value in headers.get_all(reqwest::header::LINK) {
+        let value = value
+            .to_str()
+            .map_err(|_| pagination_error("Link header is not valid UTF-8"))?;
+        if value.trim().is_empty() {
+            return Err(pagination_error("empty Link header"));
+        }
+        for entry in value.split(',') {
+            let target = entry
+                .split(';')
+                .next()
+                .map(str::trim)
+                .filter(|target| target.starts_with('<') && target.ends_with('>'))
+                .ok_or_else(|| pagination_error("malformed Link header"))?;
+            let relations: Vec<_> = entry
+                .split(';')
+                .skip(1)
+                .filter_map(|parameter| parameter.trim().split_once('='))
+                .filter(|(name, _)| name.trim() == "rel")
+                .collect();
+            if relations.len() != 1
+                || !relations[0]
+                    .1
+                    .trim()
+                    .trim_matches('"')
+                    .split_whitespace()
+                    .all(|rel| matches!(rel, "next" | "prev" | "first" | "last"))
+                || relations[0].1.trim().trim_matches('"').is_empty()
+            {
+                return Err(pagination_error("invalid continuation relation"));
+            }
+            let number = validate_pull_link_target(target, &expected)?;
+            for relation in relations[0].1.trim().trim_matches('"').split_whitespace() {
+                match relation {
+                    "last" => {
+                        if number < current || last_page.replace(number).is_some() {
+                            return Err(pagination_error("inconsistent last page"));
+                        }
+                    }
+                    "first" if number != 1 => return Err(pagination_error("invalid first page")),
+                    "prev" if number.checked_add(1) != Some(current) => {
+                        return Err(pagination_error("invalid previous page"));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        links.push(value);
+    }
+    if !links.is_empty() {
+        combined.insert(
+            reqwest::header::LINK,
+            links
+                .join(",")
+                .parse()
+                .map_err(|_| pagination_error("invalid combined Link header"))?,
+        );
+    }
+    let next = next_page_from_link_header(&combined)?;
+    if last_page.is_some_and(|last| (last > current) != next.is_some()) {
+        return Err(pagination_error(
+            "last page disagrees with next continuation",
+        ));
+    }
+    Ok(next)
+}
+
 pub(crate) fn validate_next_page(
     current: u64,
     next: Option<u64>,
@@ -1123,6 +1239,103 @@ impl ForgejoAdapter {
                 .build()?,
             config,
         })
+    }
+
+    async fn list_pulls_with_limits(
+        &self,
+        repository: &RepositoryRef,
+        state: Option<&ChangeRequestState>,
+        credential: &ForgeCredential,
+        limits: IssuePaginationLimits,
+    ) -> Result<Vec<ChangeRequest>, ForgeError> {
+        let state = state.map(|state| match state {
+            ChangeRequestState::Open => "open",
+            ChangeRequestState::Closed | ChangeRequestState::Merged => "closed",
+        });
+        let limits = limits.validate()?;
+        let deadline = Instant::now()
+            .checked_add(limits.deadline)
+            .ok_or_else(|| pagination_error("deadline overflow"))?;
+        let effective_token = credential.token.as_deref().or(self.config.token.as_deref());
+        let mut page = 1_u64;
+        let mut pages = 0_u64;
+        let mut raw_items = 0_usize;
+        let mut used_bytes = 0_usize;
+        let mut pulls = Vec::new();
+        let mut seen = HashSet::new();
+
+        loop {
+            if pages >= limits.max_pages {
+                return Err(pagination_error(format!(
+                    "provider exceeded the page budget of {} pages",
+                    limits.max_pages
+                )));
+            }
+            let remaining = remaining_deadline(deadline)?;
+            let mut url = format!(
+                "{}/api/v1/repos/{}/{}/pulls?limit={}&page={page}",
+                self.config.base_url.trim_end_matches('/'),
+                repository.owner,
+                repository.name,
+                limits.page_size,
+            );
+            if let Some(state) = state {
+                let _ = write!(url, "&state={state}");
+            }
+
+            let mut request = self.client.get(&url).timeout(remaining);
+            if let Some(token) = effective_token {
+                request = request.bearer_auth(token);
+            }
+            let response = request.send().await?;
+            if response.status().is_redirection() {
+                return Err(redirect_error(&response));
+            }
+            let response =
+                read_bounded_issue_response(response, limits, used_bytes, deadline).await?;
+            used_bytes = used_bytes
+                .checked_add(response.body.len())
+                .ok_or_else(|| pagination_error("cumulative byte count overflow"))?;
+            if !response.status.is_success() {
+                return Err(issue_list_status_error(&response));
+            }
+
+            let page_pulls: Vec<ForgejoPullRequest> = serde_json::from_slice(&response.body)
+                .map_err(|error| {
+                    pagination_error(format!("invalid pull request page JSON: {error}"))
+                })?;
+            let _ = remaining_deadline(deadline)?;
+            let next_raw_items = raw_items
+                .checked_add(page_pulls.len())
+                .ok_or_else(|| pagination_error("raw pull request count overflow"))?;
+            if next_raw_items > limits.max_raw_issues {
+                return Err(pagination_error(format!(
+                    "provider exceeded the raw pull request budget of {} pull requests",
+                    limits.max_raw_issues
+                )));
+            }
+            raw_items = next_raw_items;
+            let empty_page = page_pulls.is_empty();
+            for pull in page_pulls {
+                let pull = pull.into_change_request();
+                if seen.insert(pull.index) {
+                    pulls.push(pull);
+                }
+            }
+
+            pages = pages
+                .checked_add(1)
+                .ok_or_else(|| pagination_error("page count overflow"))?;
+            let _ = remaining_deadline(deadline)?;
+            let next = validate_next_page(page, pull_next_page(&response.headers, &url)?)?;
+            let Some(next) = next else {
+                return Ok(pulls);
+            };
+            if empty_page {
+                return Err(pagination_error("empty pull page has continuation"));
+            }
+            page = next;
+        }
     }
 
     async fn list_issues_with_limits(
@@ -2594,34 +2807,13 @@ impl ForgeAdapter for ForgejoAdapter {
         state: Option<&ChangeRequestState>,
         credential: &ForgeCredential,
     ) -> Result<Vec<ChangeRequest>, ForgeError> {
-        let url = format!(
-            "{}/api/v1/repos/{}/{}/pulls",
-            self.config.base_url.trim_end_matches('/'),
-            repository.owner,
-            repository.name,
-        );
-
-        let state_str = state.map(|s| match s {
-            ChangeRequestState::Closed | ChangeRequestState::Merged => "closed",
-            ChangeRequestState::Open => "open",
-        });
-
-        let effective_token = credential.token.as_deref().or(self.config.token.as_deref());
-        let mut request = self.client.get(&url);
-        if let Some(state_str) = state_str {
-            request = request.query(&[("state", state_str)]);
-        }
-        if let Some(token) = effective_token {
-            request = request.bearer_auth(token);
-        }
-
-        let response = Self::check_response(request.send().await?).await?;
-
-        let prs: Vec<ForgejoPullRequest> = response.json().await?;
-        Ok(prs
-            .into_iter()
-            .map(ForgejoPullRequest::into_change_request)
-            .collect())
+        self.list_pulls_with_limits(
+            repository,
+            state,
+            credential,
+            IssuePaginationLimits::default(),
+        )
+        .await
     }
 
     async fn list_issues(
@@ -8251,3 +8443,6 @@ mod draft_contract_tests {
         assert!(serde_json::from_value::<ForgejoPullRequest>(value).is_err());
     }
 }
+
+#[cfg(test)]
+mod pull_pagination_tests;
