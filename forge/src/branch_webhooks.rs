@@ -333,6 +333,8 @@ pub(crate) fn pull_request(
         return Err(invalid());
     }
     let event = ChangeRequestEvent {
+        requested_reviewer: None,
+        sender: None,
         repository: p.repository.into_ref(alias, kind, host)?,
         delivery_id: delivery.into(),
         index,
@@ -513,6 +515,8 @@ pub(crate) fn gitlab_merge_request(
     let labels_changed =
         crate::gitlab::gitlab_labels_changed(&serde_json::json!({"labels": deltas.labels}));
     finish_state(ChangeRequestEvent {
+        requested_reviewer: None,
+        sender: None,
         repository: p.project.into_ref(alias, kind, host)?,
         delivery_id,
         index: a.iid,

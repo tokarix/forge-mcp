@@ -1,0 +1,14 @@
+{
+  "action": "review_requested",
+  "number": 92,
+  "pull_request": {
+    "number": 92,
+    "state": "open",
+    "draft": false,
+    "requested_reviewers": [{"login": "agent-reviewer"}],
+    "requested_reviewers_teams": []
+  },
+  "requested_reviewer": {"login": "agent-reviewer", "email": "private@example.invalid"},
+  "repository": {"owner": {"login": "org"}, "name": "repo"},
+  "sender": {"login": "requester", "email": "sender@example.invalid"}
+}

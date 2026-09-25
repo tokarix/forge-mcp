@@ -2928,6 +2928,8 @@ mod tests {
             ] {
                 let write = Arc::new(FakeWriteService::new());
                 let event = ChangeRequestEvent {
+                    requested_reviewer: None,
+                    sender: None,
                     change_request_changes: Some(domain::ChangeRequestChanges {
                         base: Some(domain::BaseBranchChange {
                             previous: Some("main".into()),
@@ -3042,6 +3044,8 @@ mod tests {
             ] {
                 let write = Arc::new(FakeWriteService::new());
                 let event = ChangeRequestEvent {
+                    requested_reviewer: None,
+                    sender: None,
                     change_request_changes: None,
                     provider_action: None,
                     action,
@@ -3941,6 +3945,7 @@ mod tests {
                     index: request.index,
                     labels: vec![],
                     merge_base_sha: None,
+                    requested_reviewers: None,
                     mergeability: Mergeability::Unknown,
                     state: ChangeRequestState::Open,
                     title: "Fix".to_string(),
@@ -4107,6 +4112,7 @@ mod tests {
                 index: request.index,
                 labels: vec![],
                 merge_base_sha: None,
+                requested_reviewers: None,
                 mergeability: Mergeability::Unknown,
                 state: ChangeRequestState::Closed,
                 title: "Fix".to_string(),
@@ -4180,6 +4186,7 @@ mod tests {
                     index: 1,
                     labels: vec![],
                     merge_base_sha: None,
+                    requested_reviewers: None,
                     mergeability: Mergeability::Unknown,
                     state: ChangeRequestState::Open,
                     title: "Fix".to_string(),
@@ -4298,6 +4305,7 @@ mod tests {
                 index: request.index,
                 labels: vec![],
                 merge_base_sha: None,
+                requested_reviewers: None,
                 mergeability: Mergeability::Unknown,
                 state: ChangeRequestState::Open,
                 title: request.title.unwrap_or_else(|| "Fix".to_string()),
@@ -6760,6 +6768,7 @@ mod tests {
                 index: 1,
                 labels: vec!["ready-for-code-review".to_string()],
                 merge_base_sha: None,
+                requested_reviewers: None,
                 mergeability: Mergeability::Conflicting,
                 state: ChangeRequestState::Open,
                 title: "Fix".to_string(),
@@ -6812,6 +6821,7 @@ mod tests {
                 index: 1,
                 labels: vec![],
                 merge_base_sha: None,
+                requested_reviewers: None,
                 mergeability: Mergeability::Mergeable,
                 state: ChangeRequestState::Open,
                 title: "Fix".to_string(),

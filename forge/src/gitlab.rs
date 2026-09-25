@@ -438,6 +438,7 @@ impl GitLabMergeRequest {
             index: self.iid,
             labels: self.labels.unwrap_or_default(),
             merge_base_sha,
+            requested_reviewers: None,
             mergeability,
             state,
             title: self.title,
@@ -2061,6 +2062,8 @@ fn parse_gitlab_merge_request_event(
 
     Ok(Some(domain::WebhookEvent::ChangeRequest(
         ChangeRequestEvent {
+            requested_reviewer: None,
+            sender: None,
             change_request_changes: None,
             provider_action: None,
             labels_changed,
@@ -4250,6 +4253,11 @@ mod draft_contract_tests {
         serde_json::from_value::<GitLabMergeRequest>(value)
             .expect("valid test fixture")
             .into_change_request()
+    }
+
+    #[test]
+    fn unsupported_requested_reviewers_remain_unknown() {
+        assert_eq!(convert(fixture()).requested_reviewers, None);
     }
 
     #[test]

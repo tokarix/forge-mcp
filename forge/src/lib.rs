@@ -1745,8 +1745,15 @@ struct ForgejoPullRequest {
     mergeable: Option<bool>,
     merged: bool,
     number: u64,
+    #[serde(default)]
+    requested_reviewers: Option<Vec<ForgejoRequestedReviewer>>,
     state: String,
     title: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ForgejoRequestedReviewer {
+    login: String,
 }
 
 impl ForgejoPullRequest {
@@ -1777,6 +1784,12 @@ impl ForgejoPullRequest {
                 .map(|l| l.name)
                 .collect(),
             merge_base_sha: self.merge_base,
+            requested_reviewers: self.requested_reviewers.map(|reviewers| {
+                reviewers
+                    .into_iter()
+                    .map(|reviewer| reviewer.login)
+                    .collect()
+            }),
             mergeability,
             state,
             title: self.title,
@@ -2001,6 +2014,7 @@ enum WebhookEventType {
     Issues,
     PullRequest,
     PullRequestLabel,
+    PullRequestReviewRequest,
     PullRequestReview,
     Unknown(String),
 }
@@ -2012,6 +2026,7 @@ impl WebhookEventType {
             "issues" => Self::Issues,
             "pull_request" => Self::PullRequest,
             "pull_request_label" => Self::PullRequestLabel,
+            "pull_request_review_request" => Self::PullRequestReviewRequest,
             "pull_request_approved"
             | "pull_request_comment"
             | "pull_request_rejected"
@@ -2082,8 +2097,10 @@ struct ForgejoWebhookPullRequest {
 struct ForgejoLifecyclePullRequest {
     head: Option<LifecycleHead>,
     merged: Option<bool>,
+    #[serde(default)]
     html_url: String,
     number: Option<u64>,
+    #[serde(default)]
     title: String,
 }
 
@@ -2099,7 +2116,11 @@ struct ForgejoWebhookPullRequestEventPayload {
     action: String,
     number: Option<u64>,
     pull_request: ForgejoLifecyclePullRequest,
+    #[serde(default)]
+    requested_reviewer: Option<ForgejoRequestedReviewer>,
     repository: ForgejoWebhookRepository,
+    #[serde(default)]
+    sender: Option<ForgejoRequestedReviewer>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3505,13 +3526,14 @@ impl ForgeWebhookAdapter for ForgejoAdapter {
 
         let event_header = header_value(headers, &["x-forgejo-event", "x-gitea-event"])
             .ok_or_else(|| ForgeWebhookError::MissingHeader("x-forgejo-event".to_string()))?;
-        // v16 groups PR labels under pull_request; Event-Type is the specific
-        // subscription. Keep its dispatch limited to label actions.
-        let event_type = if event_header == "pull_request"
-            && header_value(headers, &["x-forgejo-event-type", "x-gitea-event-type"])
-                == Some("pull_request_label")
-        {
-            WebhookEventType::PullRequestLabel
+        // Forgejo groups PR sub-events under pull_request; Event-Type names
+        // the specific subscription.
+        let event_type = if event_header == "pull_request" {
+            match header_value(headers, &["x-forgejo-event-type", "x-gitea-event-type"]) {
+                Some("pull_request_label") => WebhookEventType::PullRequestLabel,
+                Some("pull_request_review_request") => WebhookEventType::PullRequestReviewRequest,
+                _ => WebhookEventType::PullRequest,
+            }
         } else {
             WebhookEventType::parse(event_header)
         };
@@ -3531,6 +3553,16 @@ impl ForgeWebhookAdapter for ForgejoAdapter {
                     serde_json::from_slice(body)
                         .map_err(|e| ForgeWebhookError::InvalidPayload(e.to_string()))?;
                 if !matches!(payload.action.as_str(), "label_updated" | "label_cleared") {
+                    return Ok(None);
+                }
+                parse_pull_request_event(body, delivery_id, forge_alias, forge_kind, host)
+            }
+            WebhookEventType::PullRequestReviewRequest => {
+                let payload: serde_json::Value = serde_json::from_slice(body)
+                    .map_err(|_| ForgeWebhookError::InvalidPayload("invalid JSON".to_string()))?;
+                if payload.get("action").and_then(serde_json::Value::as_str)
+                    != Some("review_requested")
+                {
                     return Ok(None);
                 }
                 parse_pull_request_event(body, delivery_id, forge_alias, forge_kind, host)
@@ -3565,6 +3597,29 @@ fn validate_terminal_identity(
     Ok(())
 }
 
+fn review_request_logins(
+    requested_reviewer: Option<ForgejoRequestedReviewer>,
+    sender: Option<ForgejoRequestedReviewer>,
+) -> Result<Option<(String, String)>, ForgeWebhookError> {
+    let Some(reviewer) = requested_reviewer else {
+        // A team request is not an assignment to a user agent.
+        return Ok(None);
+    };
+    if reviewer.login.trim().is_empty() {
+        return Err(ForgeWebhookError::InvalidPayload(
+            "requested reviewer login missing".to_string(),
+        ));
+    }
+    let sender = sender
+        .ok_or_else(|| ForgeWebhookError::InvalidPayload("sender login missing".to_string()))?;
+    if sender.login.trim().is_empty() {
+        return Err(ForgeWebhookError::InvalidPayload(
+            "sender login missing".to_string(),
+        ));
+    }
+    Ok(Some((reviewer.login, sender.login)))
+}
+
 fn parse_pull_request_event(
     body: &[u8],
     delivery_id: String,
@@ -3584,6 +3639,7 @@ fn parse_pull_request_event(
         "label_updated" | "label_cleared" => ChangeRequestEventAction::LabelsChanged,
         "opened" => ChangeRequestEventAction::Opened,
         "reopened" => ChangeRequestEventAction::Reopened,
+        "review_requested" => ChangeRequestEventAction::ReviewRequested,
         "synchronize" | "synchronized" => ChangeRequestEventAction::Synchronized,
         "closed" => match payload.pull_request.merged {
             Some(true) => ChangeRequestEventAction::Merged,
@@ -3598,7 +3654,15 @@ fn parse_pull_request_event(
     };
 
     let labels_changed = action == ChangeRequestEventAction::LabelsChanged;
-    if labels_changed {
+    let review_requested = action == ChangeRequestEventAction::ReviewRequested;
+    if !review_requested
+        && (payload.pull_request.title.is_empty() || payload.pull_request.html_url.is_empty())
+    {
+        return Err(ForgeWebhookError::InvalidPayload(
+            "pull request title or URL missing".to_string(),
+        ));
+    }
+    if labels_changed || review_requested {
         validate_pull_request_numbers(payload.number, payload.pull_request.number)?;
     }
     let owner = payload.repository.owner.into_owner()?;
@@ -3609,16 +3673,28 @@ fn parse_pull_request_event(
             ForgeWebhookError::InvalidPayload("pull request number missing".to_string())
         })?;
 
-    if action.is_terminal() || labels_changed {
+    if action.is_terminal() || labels_changed || review_requested {
         validate_terminal_identity(index, &owner, &payload.repository.name)?;
     }
+    let (requested_reviewer, sender) = if review_requested {
+        let Some((reviewer, sender)) =
+            review_request_logins(payload.requested_reviewer, payload.sender)?
+        else {
+            return Ok(None);
+        };
+        (Some(reviewer), Some(sender))
+    } else {
+        (None, None)
+    };
     let head_sha = match payload.pull_request.head {
-        Some(head) if action.is_terminal() || labels_changed => head.sha.unwrap_or_default(),
+        Some(head) if action.is_terminal() || labels_changed || review_requested => {
+            head.sha.unwrap_or_default()
+        }
         Some(LifecycleHead {
             ref_name: Some(_),
             sha: Some(sha),
         }) => sha,
-        None if action.is_terminal() || labels_changed => String::new(),
+        None if action.is_terminal() || labels_changed || review_requested => String::new(),
         _ => {
             return Err(ForgeWebhookError::InvalidPayload(
                 "pull request head metadata missing".to_string(),
@@ -3630,8 +3706,13 @@ fn parse_pull_request_event(
         ChangeRequestEvent {
             change_request_changes: None,
             provider_action: None,
+            requested_reviewer,
+            sender,
             labels_changed,
-            payload_fingerprint: label_payload_fingerprint(body, labels_changed),
+            payload_fingerprint: label_payload_fingerprint(
+                body,
+                labels_changed || review_requested,
+            ),
             action,
             delivery_id,
             head_sha,
@@ -4124,6 +4205,43 @@ mod tests {
                     "{encoded:?}: {result:?}"
                 );
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn get_change_request_reads_current_requested_reviewers() {
+        use crate::ForgeAdapter;
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+
+        let mock = MockServer::start().await;
+        let adapter = test_adapter(&mock.uri());
+        let repo = test_repo();
+        let credential = domain::ForgeCredential { token: None };
+        for (reviewers, expected) in [
+            (
+                serde_json::json!([{"login": "agent-reviewer"}]),
+                Some(vec!["agent-reviewer".to_string()]),
+            ),
+            (serde_json::json!([]), Some(vec![])),
+            (serde_json::Value::Null, None),
+        ] {
+            mock.reset().await;
+            let mut value = super::draft_contract_tests::fixture();
+            value["requested_reviewers"] = reviewers;
+            Mock::given(method("GET"))
+                .and(path("/api/v1/repos/org/repo/pulls/1"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(value))
+                .expect(1)
+                .mount(&mock)
+                .await;
+            let current = adapter
+                .get_change_request(&repo, 1, &credential)
+                .await
+                .expect("PR");
+            assert_eq!(current.requested_reviewers, expected);
         }
     }
 
@@ -8381,6 +8499,21 @@ mod draft_contract_tests {
         serde_json::from_value::<ForgejoPullRequest>(value)
             .expect("valid test fixture")
             .into_change_request()
+    }
+
+    #[test]
+    fn requested_reviewers_distinguish_current_empty_and_unavailable() {
+        let mut value = fixture();
+        assert_eq!(convert(value.clone()).requested_reviewers, None);
+        value["requested_reviewers"] = json!([{"login": "first"}, {"login": "second"}]);
+        assert_eq!(
+            convert(value.clone()).requested_reviewers,
+            Some(vec!["first".into(), "second".into()])
+        );
+        value["requested_reviewers"] = json!([]);
+        assert_eq!(convert(value.clone()).requested_reviewers, Some(vec![]));
+        value["requested_reviewers"] = Value::Null;
+        assert_eq!(convert(value).requested_reviewers, None);
     }
 
     #[test]

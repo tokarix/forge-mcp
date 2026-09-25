@@ -152,6 +152,8 @@ impl PublishableEvent for PullRequestReviewCommentEvent {
                 self.index
             ),
             meta: ChannelEventMeta {
+                requested_reviewer: None,
+                sender: None,
                 branch_push: None,
                 change_request_changes: None,
                 inline_review: Some(self.details.clone()),
@@ -271,6 +273,8 @@ impl PublishableEvent for PullRequestReviewThreadEvent {
                 self.index
             ),
             meta: ChannelEventMeta {
+                requested_reviewer: None,
+                sender: None,
                 branch_push: None,
                 change_request_changes: None,
                 inline_review: Some(self.details.clone()),

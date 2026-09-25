@@ -763,6 +763,10 @@ struct ChannelEventMetaEnvelope {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     provider_action: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    requested_reviewer: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sender: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     review_id: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reviewed_commit_id: Option<String>,
@@ -1245,6 +1249,8 @@ impl McpShim {
                     labels_changed: false,
                     ci: None,
                     provider_action: None,
+                    requested_reviewer: None,
+                    sender: None,
                     review_id: None,
                     reviewed_commit_id: None,
                     action: "opened".to_string(),
@@ -5276,8 +5282,20 @@ mod tests {
                 "delivery_id": "delivery-456"
             }
         });
-        let sse =
-            format!("event: change_request\nid: internal:delivery-456\ndata: {event_body}\n\n",);
+        let review_request = serde_json::json!({
+            "kind": "change_request",
+            "content": "change_request review_requested on internal/org/repo#92 at ",
+            "meta": {
+                "forge_alias": "internal", "owner": "org", "repo": "repo",
+                "event_kind": "change_request", "action": "review_requested",
+                "change_request": 92, "head_sha": null,
+                "requested_reviewer": "agent-reviewer", "sender": "requester",
+                "delivery_id": "review-delivery"
+            }
+        });
+        let sse = format!(
+            "event: change_request\nid: internal:delivery-456\ndata: {event_body}\n\nevent: change_request\nid: internal:review-delivery\ndata: {review_request}\n\n"
+        );
 
         wiremock::Mock::given(wiremock::matchers::method("GET"))
             .and(wiremock::matchers::path("/api/v1/agent/events"))
@@ -5305,10 +5323,14 @@ mod tests {
             .map(|t| t.text.clone())
             .expect("text content");
         let events: Vec<serde_json::Value> = serde_json::from_str(&text)?;
-        assert_eq!(events.len(), 1);
+        assert_eq!(events.len(), 2);
         assert_eq!(events[0]["meta"]["delivery_id"], "delivery-456");
         assert_eq!(events[0]["meta"]["forge_alias"], "internal");
         assert_eq!(events[0]["meta"]["change_request"], 24);
+        assert_eq!(events[1]["meta"]["action"], "review_requested");
+        assert_eq!(events[1]["meta"]["change_request"], 92);
+        assert_eq!(events[1]["meta"]["requested_reviewer"], "agent-reviewer");
+        assert_eq!(events[1]["meta"]["sender"], "requester");
 
         // Second poll returns empty
         let result = client

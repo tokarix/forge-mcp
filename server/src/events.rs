@@ -273,6 +273,8 @@ mod tests {
         repo: &str,
     ) -> domain::ChangeRequestEvent {
         domain::ChangeRequestEvent {
+            requested_reviewer: None,
+            sender: None,
             change_request_changes: None,
             provider_action: None,
             labels_changed: false,

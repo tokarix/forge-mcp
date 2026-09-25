@@ -120,6 +120,9 @@ pub struct ChangeRequest {
     #[serde(default)]
     pub labels: Vec<String>,
     pub merge_base_sha: Option<String>,
+    /// Current requested user logins; None means the provider did not supply them.
+    #[serde(default)]
+    pub requested_reviewers: Option<Vec<String>>,
     #[serde(default)]
     pub mergeability: Mergeability,
     pub state: ChangeRequestState,
@@ -171,6 +174,10 @@ pub struct ChannelEventMeta {
     pub repo: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_action: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_reviewer: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_id: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -316,6 +323,10 @@ pub struct ChangeRequestEvent {
     pub change_request_changes: Option<ChangeRequestChanges>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_action: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_reviewer: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub labels_changed: bool,
     /// SHA-256 of authenticated bytes; internal retry identity only.
@@ -348,9 +359,14 @@ impl PublishableEvent for ChangeRequestEvent {
                 ],
             );
         }
-        if self.labels_changed {
+        if self.labels_changed || self.action == ChangeRequestEventAction::ReviewRequested {
+            let kind = if self.labels_changed {
+                "labels"
+            } else {
+                "review_request"
+            };
             return format!(
-                "{}:change_request:labels:{}/{}/{}:{}:{}",
+                "{}:change_request:{kind}:{}/{}/{}:{}:{}",
                 self.repository.alias,
                 self.repository.owner,
                 self.repository.name,
@@ -396,6 +412,8 @@ impl PublishableEvent for ChangeRequestEvent {
                 labels_changed: self.labels_changed,
                 ci: None,
                 provider_action: self.provider_action.clone(),
+                requested_reviewer: self.requested_reviewer.clone(),
+                sender: self.sender.clone(),
                 review_id: None,
                 reviewed_commit_id: None,
                 action: self.action.as_str().to_string(),
@@ -405,6 +423,7 @@ impl PublishableEvent for ChangeRequestEvent {
                 forge_alias: self.repository.alias.clone(),
                 head_sha: if (self.action.is_terminal()
                     || self.labels_changed
+                    || self.action == ChangeRequestEventAction::ReviewRequested
                     || self.change_request_changes.is_some())
                     && self.head_sha.is_empty()
                 {
@@ -431,6 +450,7 @@ pub enum ChangeRequestEventAction {
     Merged,
     Opened,
     Reopened,
+    ReviewRequested,
     #[serde(rename = "synchronize")]
     Synchronized,
 }
@@ -450,6 +470,7 @@ impl ChangeRequestEventAction {
             Self::Merged => "merged",
             Self::Opened => "opened",
             Self::Reopened => "reopened",
+            Self::ReviewRequested => "review_requested",
             Self::Synchronized => "synchronize",
         }
     }
@@ -564,6 +585,8 @@ impl PublishableEvent for IssueCommentEvent {
                 self.issue_index,
             ),
             meta: ChannelEventMeta {
+                requested_reviewer: None,
+                sender: None,
                 branch_push: None,
                 change_request_changes: None,
                 inline_review: None,
@@ -654,6 +677,8 @@ impl PublishableEvent for IssueEvent {
                 self.index,
             ),
             meta: ChannelEventMeta {
+                requested_reviewer: None,
+                sender: None,
                 branch_push: None,
                 change_request_changes: None,
                 inline_review: None,
@@ -785,6 +810,8 @@ impl PublishableEvent for PullRequestReviewEvent {
                 self.index,
             ),
             meta: ChannelEventMeta {
+                requested_reviewer: None,
+                sender: None,
                 branch_push: None,
                 change_request_changes: None,
                 inline_review: None,
@@ -894,6 +921,8 @@ impl PublishableEvent for AutoMergeFailedEvent {
                 self.error,
             ),
             meta: ChannelEventMeta {
+                requested_reviewer: None,
+                sender: None,
                 branch_push: None,
                 change_request_changes: None,
                 inline_review: None,
@@ -1869,6 +1898,8 @@ mod tests {
                 action
             );
             let mut event = ChangeRequestEvent {
+                requested_reviewer: None,
+                sender: None,
                 change_request_changes: None,
                 provider_action: None,
                 labels_changed: false,
@@ -2068,6 +2099,7 @@ mod tests {
             index: 1,
             labels: vec![],
             merge_base_sha: None,
+            requested_reviewers: None,
             mergeability: Mergeability::Unknown,
             state: ChangeRequestState::Open,
             title: "Fix".to_string(),
@@ -2094,6 +2126,7 @@ mod tests {
             index: 1,
             labels: vec![],
             merge_base_sha: None,
+            requested_reviewers: None,
             mergeability: Mergeability::Conflicting,
             state: ChangeRequestState::Open,
             title: "Fix".to_string(),
@@ -2132,6 +2165,7 @@ mod tests {
             index: 1,
             labels: vec!["bugfix".to_string()],
             merge_base_sha: None,
+            requested_reviewers: None,
             mergeability: Mergeability::Unknown,
             state: ChangeRequestState::Open,
             title: "Fix".to_string(),

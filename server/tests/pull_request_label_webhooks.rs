@@ -33,6 +33,7 @@ use tower::ServiceExt;
 // GitHub pull_request and GitLab merge-request-events documentation (2026-09-07).
 // Real wire proof belongs to forgejo_issue_label_webhooks in its CI-owned lane.
 const SECRET: &str = "pr-label-fixture-secret";
+const REVIEW_REQUEST_FIXTURE: &[u8] = include_bytes!("fixtures/forgejo-review-requested.json");
 
 fn forgejo() -> ForgejoAdapter {
     ForgejoAdapter::new(ForgejoConfig {
@@ -92,6 +93,13 @@ fn headers(family: &str, body: &[u8], delivery: &str) -> Vec<(String, String)> {
                 "x-hub-signature-256".into(),
                 format!("sha256={}", signature(body)),
             ),
+        ]
+    } else if family == "pull_request_review_request" {
+        vec![
+            ("x-forgejo-event".into(), "pull_request".into()),
+            ("x-forgejo-event-type".into(), family.into()),
+            ("x-forgejo-delivery".into(), delivery.into()),
+            ("x-forgejo-signature".into(), signature(body)),
         ]
     } else {
         vec![
@@ -300,6 +308,87 @@ async fn signed_labels_http_authorization_replay_and_dedupe() {
         );
         assert!(allowed.try_recv().is_err());
     }
+}
+
+#[tokio::test]
+async fn forgejo_review_request_header_normalizes_logins_and_deduplicates() {
+    // Forgejo v16.0.3 modules/webhook/type.go groups the review-request
+    // subscription under Event=pull_request; Event-Type names the subscription.
+    let family = "pull_request_review_request";
+    let (app, bus) = app(forgejo(), ForgeKind::Forgejo, false);
+    let mut allowed = subscribe(&bus, "allowed", "labels-forge/org/repo", None);
+    let fixture: Value = serde_json::from_slice(REVIEW_REQUEST_FIXTURE).expect("fixture");
+    let parsed = change(family, &fixture, "review-delivery");
+    assert_eq!(
+        parsed.action,
+        domain::ChangeRequestEventAction::ReviewRequested
+    );
+    assert_eq!(parsed.index, 92);
+    assert_eq!(parsed.requested_reviewer.as_deref(), Some("agent-reviewer"));
+    assert_eq!(parsed.sender.as_deref(), Some("requester"));
+
+    for _ in 0..2 {
+        assert_eq!(
+            post(
+                &app,
+                family,
+                REVIEW_REQUEST_FIXTURE.to_vec(),
+                "review-delivery",
+                true
+            )
+            .await,
+            StatusCode::ACCEPTED
+        );
+    }
+    let event = allowed.try_recv().expect("one review request");
+    assert!(allowed.try_recv().is_err());
+    let envelope: Value = serde_json::from_str(&event.data).expect("event envelope");
+    assert_eq!(envelope["meta"]["action"], "review_requested");
+    assert_eq!(envelope["meta"]["change_request"], 92);
+    assert_eq!(envelope["meta"]["forge_alias"], "labels-forge");
+    assert_eq!(envelope["meta"]["owner"], "org");
+    assert_eq!(envelope["meta"]["repo"], "repo");
+    assert_eq!(envelope["meta"]["requested_reviewer"], "agent-reviewer");
+    assert_eq!(envelope["meta"]["sender"], "requester");
+    assert!(envelope["meta"]["head_sha"].is_null());
+    assert!(!event.data.contains("private@example.invalid"));
+    assert!(!event.data.contains("sender@example.invalid"));
+    assert!(!event.data.contains("requested_reviewers_teams"));
+
+    let mut team = fixture.clone();
+    team.as_object_mut()
+        .expect("object")
+        .remove("requested_reviewer");
+    team["requested_team"] = json!({"name": "review-team"});
+    assert!(
+        parse(family, &team, "team")
+            .expect("team payload")
+            .is_none()
+    );
+    let mut missing_index = fixture.clone();
+    missing_index
+        .as_object_mut()
+        .expect("object")
+        .remove("number");
+    missing_index["pull_request"]
+        .as_object_mut()
+        .expect("PR")
+        .remove("number");
+    assert!(parse(family, &missing_index, "bad-index").is_err());
+    let mut empty_login = fixture;
+    empty_login["requested_reviewer"]["login"] = json!("  ");
+    assert!(parse(family, &empty_login, "bad-login").is_err());
+    let mut missing_login = empty_login.clone();
+    missing_login["requested_reviewer"] = json!({"email": "private@example.invalid"});
+    let error = parse(family, &missing_login, "missing-login").expect_err("missing login");
+    assert!(!format!("{error:?}").contains("private@example.invalid"));
+    let mut missing_sender = empty_login;
+    missing_sender["requested_reviewer"]["login"] = json!("agent-reviewer");
+    missing_sender
+        .as_object_mut()
+        .expect("object")
+        .remove("sender");
+    assert!(parse(family, &missing_sender, "missing-sender").is_err());
 }
 
 #[test]

@@ -61,6 +61,8 @@ impl PublishableEvent for BranchPushEvent {
                 self.details.r#ref
             ),
             meta: ChannelEventMeta {
+                requested_reviewer: None,
+                sender: None,
                 branch_push: Some(self.details.clone()),
                 change_request_changes: None,
                 labels_changed: false,

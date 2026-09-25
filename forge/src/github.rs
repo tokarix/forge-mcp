@@ -826,6 +826,7 @@ impl GitHubPullRequest {
             index: self.number,
             labels: self.labels.into_iter().map(|label| label.name).collect(),
             merge_base_sha: None,
+            requested_reviewers: None,
             mergeability,
             state,
             title: self.title,
@@ -3349,6 +3350,8 @@ fn parse_pull_request_webhook(
 
     Ok(Some(domain::WebhookEvent::ChangeRequest(
         domain::ChangeRequestEvent {
+            requested_reviewer: None,
+            sender: None,
             change_request_changes: None,
             provider_action: None,
             labels_changed,
@@ -5683,6 +5686,11 @@ mod draft_contract_tests {
         serde_json::from_value::<GitHubPullRequest>(value)
             .expect("valid test fixture")
             .into_change_request()
+    }
+
+    #[test]
+    fn unsupported_requested_reviewers_remain_unknown() {
+        assert_eq!(convert(fixture()).requested_reviewers, None);
     }
 
     #[test]
