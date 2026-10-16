@@ -40,6 +40,7 @@ use utoipa_scalar::{Scalar, Servable};
         handlers::get_pull_ci_details,
         handlers::get_pull_comments,
         handlers::get_pull_reviews,
+        handlers::get_pull_inline_comments,
         handlers::get_pull_discussion_comments,
         handlers::get_pull_diff,
         handlers::list_issues,
@@ -213,6 +214,10 @@ pub fn build_router_with_diagnostics(
         .route(
             "/api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}/diff",
             get(handlers::get_pull_diff),
+        )
+        .route(
+            "/api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}/inline-comments",
+            get(handlers::get_pull_inline_comments),
         )
         .route(
             "/api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}/reviews",

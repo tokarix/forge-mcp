@@ -147,6 +147,12 @@ async fn narrow_reads_isolate_resources_and_preserve_fields() {
     for kind in [ForgeKind::Forgejo, ForgeKind::GitHub, ForgeKind::GitLab] {
         for reviews in [false, true] {
             let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/repos/org/repo/pulls/7/comments"))
+                .respond_with(ResponseTemplate::new(500))
+                .expect(0)
+                .mount(&server)
+                .await;
             let mut payload = if reviews {
                 review_data(&kind)
             } else {
@@ -240,6 +246,12 @@ async fn narrow_empty_and_selected_errors() {
         for reviews in [false, true] {
             for status in [200, 503] {
                 let server = MockServer::start().await;
+                Mock::given(method("GET"))
+                    .and(path("/repos/org/repo/pulls/7/comments"))
+                    .respond_with(ResponseTemplate::new(500))
+                    .expect(0)
+                    .mount(&server)
+                    .await;
                 let p = provider(kind.clone(), &server.uri());
                 let (selected, unused) = if reviews {
                     (&p.reviews, &p.discussion)
@@ -279,6 +291,12 @@ async fn github_narrow_pagination_and_later_page_errors() {
     for reviews in [false, true] {
         for status in [200, 503] {
             let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/repos/org/repo/pulls/7/comments"))
+                .respond_with(ResponseTemplate::new(500))
+                .expect(0)
+                .mount(&server)
+                .await;
             let p = provider(ForgeKind::GitHub, &server.uri());
             let (selected, unused) = if reviews {
                 (&p.reviews, &p.discussion)
@@ -332,6 +350,12 @@ async fn mixed_feed_retains_stable_ties_and_fails_without_partial_results() {
     for kind in [ForgeKind::Forgejo, ForgeKind::GitHub, ForgeKind::GitLab] {
         for status in [200, 503] {
             let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/repos/org/repo/pulls/7/comments"))
+                .respond_with(ResponseTemplate::new(500))
+                .expect(0)
+                .mount(&server)
+                .await;
             let p = provider(kind.clone(), &server.uri());
             Mock::given(method("GET"))
                 .and(path(&p.discussion))

@@ -32,6 +32,30 @@ These narrow reads fetch only their selected provider resource; an error reading
 the other resource cannot break them. Empty streams return `[]`. Existing comment
 and submit-review writes are unchanged. Inline review comments are not included.
 
+`get_change_request_inline_comments` reads GitHub inline roots and replies only
+(including GitHub Enterprise API bases). Its HTTP route is
+`GET /api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}/inline-comments`.
+It uses the same forge/owner/repo/index arguments and authorization as the other
+reads. Forgejo and GitLab return an explicit unsupported-feature error.
+
+Results use `ChangeRequestInlineComment`: actual `id`/`node_id`,
+`pull_request_review_id`, reply-parent `in_reply_to_id`, author login, raw Markdown
+`body`, creation/update timestamps and web `url`; file `path` and `diff_hunk`;
+`commit_id`/`original_commit_id`, `line`/`original_line`,
+`start_line`/`original_start_line`, `side`/`start_side`, legacy
+`position`/`original_position`, and `subject_type` when supplied. Optional values
+remain null when absent or null upstream. Diff positions are never file lines;
+reply-parent IDs are not authoritative thread IDs. This REST read does not
+establish resolved/unresolved, approval, or authoritative outdated-thread state.
+
+The GitHub read uses the existing API version and bounded pagination (100 entries
+per page, at most 1,000 pages within 60 seconds). Later-page failures, malformed
+responses/continuations and budget exhaustion fail the entire read; a successful
+empty stream returns `[]`. Inline reads do not fetch discussion or formal reviews,
+and the existing feeds continue to exclude inline comments. Existing per-agent
+and managed GitHub App credentials apply; installation tokens need Pull requests
+read permission. See the [GitHub REST endpoint](https://docs.github.com/en/rest/pulls/comments#list-review-comments-on-a-pull-request).
+
 For example, pass `forge="adlevio", owner="tokarix", repo="forge-mcp", index=137`
 to these tools (substitute the pull request index for the task):
 

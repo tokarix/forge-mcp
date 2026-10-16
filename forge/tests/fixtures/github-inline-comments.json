@@ -1,0 +1,86 @@
+[
+  {
+    "id": 101,
+    "node_id": "PRRC_root",
+    "pull_request_review_id": 91,
+    "user": {
+      "login": "alice"
+    },
+    "body": "Please fix **this**.\n\n```rust\nlet x = 1;\n```",
+    "created_at": "2026-10-01T10:00:00Z",
+    "updated_at": "2026-10-02T10:00:00Z",
+    "html_url": "https://github.example/org/repo/pull/7#discussion_r101",
+    "path": "src/lib.rs",
+    "diff_hunk": "@@ -10,4 +10,6 @@\n context\n+new",
+    "commit_id": "current",
+    "original_commit_id": "original",
+    "line": 14,
+    "original_line": 12,
+    "start_line": 11,
+    "original_start_line": 10,
+    "side": "RIGHT",
+    "start_side": "LEFT",
+    "position": 7,
+    "original_position": 5,
+    "subject_type": "line"
+  },
+  {
+    "id": 102,
+    "node_id": "PRRC_reply",
+    "pull_request_review_id": 91,
+    "user": {
+      "login": "bob"
+    },
+    "body": "Reply\nwith markdown _intact_.",
+    "created_at": "2026-10-01T10:00:00Z",
+    "updated_at": "2026-10-02T10:00:00Z",
+    "html_url": "https://github.example/org/repo/pull/7#discussion_r101",
+    "path": "src/lib.rs",
+    "diff_hunk": "@@ -10,4 +10,6 @@\n context\n+new",
+    "commit_id": "older-current",
+    "original_commit_id": "original",
+    "line": null,
+    "original_line": 12,
+    "start_line": null,
+    "original_start_line": 10,
+    "side": "RIGHT",
+    "start_side": "LEFT",
+    "position": null,
+    "original_position": 5,
+    "subject_type": "line",
+    "in_reply_to_id": 101
+  },
+  {
+    "id": 103,
+    "node_id": "PRRC_root",
+    "pull_request_review_id": 91,
+    "user": {
+      "login": "alice"
+    },
+    "body": "File-level feedback",
+    "created_at": "2026-10-01T10:00:00Z",
+    "updated_at": "2026-10-02T10:00:00Z",
+    "html_url": "https://github.example/org/repo/pull/7#discussion_r101",
+    "path": "src/lib.rs",
+    "diff_hunk": null,
+    "commit_id": "current",
+    "original_commit_id": "original",
+    "line": null,
+    "original_line": null,
+    "start_line": null,
+    "original_start_line": null,
+    "side": null,
+    "start_side": null,
+    "position": null,
+    "original_position": null,
+    "subject_type": "file"
+  },
+  {
+    "id": 104,
+    "user": null,
+    "body": "Please fix **this**.\n\n```rust\nlet x = 1;\n```",
+    "created_at": "2026-10-01T10:00:00Z",
+    "updated_at": "2026-10-02T10:00:00Z",
+    "html_url": "https://github.example/org/repo/pull/7#discussion_r101"
+  }
+]

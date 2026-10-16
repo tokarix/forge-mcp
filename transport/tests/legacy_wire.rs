@@ -145,11 +145,15 @@ async fn baseline_initialization_and_catalog() {
         // Issue #255 intentionally extends this one tool; keep the recorded
         // SDK baseline intact for every other tool. Its new contract is tested
         // separately below through tools/list and tools/call.
+        // Issue #261 adds an inline read, covered by its own schema/session tests.
         for frame in [&mut catalog, &mut expected] {
             frame["result"]["tools"]
                 .as_array_mut()
                 .expect("tools")
-                .retain(|tool| tool["name"] != "list_change_requests");
+                .retain(|tool| {
+                    tool["name"] != "list_change_requests"
+                        && tool["name"] != "get_change_request_inline_comments"
+                });
         }
         assert_eq!(catalog, expected);
         for arguments in [None, Some(json!({}))] {

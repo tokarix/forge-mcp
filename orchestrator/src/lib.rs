@@ -201,6 +201,27 @@ where
             .map_err(|e| ServiceError::Upstream(e.to_string()))
     }
 
+    async fn get_change_request_inline_comments(
+        &self,
+        request: domain::GetChangeRequestInlineCommentsRequest,
+        credential: &ForgeCredential,
+    ) -> Result<Vec<domain::ChangeRequestInlineComment>, ServiceError> {
+        self.audit_sink
+            .record(AuditRecord {
+                agent: request.agent,
+                action: "get_change_request_inline_comments".to_string(),
+                repository: request.repository.clone(),
+                target: request.index.to_string(),
+            })
+            .await
+            .map_err(|e| ServiceError::Audit(e.to_string()))?;
+
+        self.adapter
+            .get_change_request_inline_comments(&request.repository, request.index, credential)
+            .await
+            .map_err(|e| ServiceError::Upstream(e.to_string()))
+    }
+
     async fn get_change_request_reviews(
         &self,
         request: domain::GetChangeRequestReviewsRequest,
@@ -2068,6 +2089,21 @@ mod tests {
             ))
         }
 
+        async fn get_change_request_inline_comments(
+            &self,
+            repository: &RepositoryRef,
+            index: u64,
+            credential: &ForgeCredential,
+        ) -> Result<Vec<domain::ChangeRequestInlineComment>, ForgeError> {
+            self.stream_reads.lock().expect("stream reads").push((
+                "get_change_request_inline_comments".into(),
+                repository.clone(),
+                index,
+                credential.clone(),
+            ));
+            Ok(vec![])
+        }
+
         async fn get_change_request_reviews(
             &self,
             repository: &RepositoryRef,
@@ -2807,13 +2843,25 @@ mod tests {
             )
             .await
             .expect("discussion");
+        service
+            .get_change_request_inline_comments(
+                domain::GetChangeRequestInlineCommentsRequest {
+                    agent: request.agent.clone(),
+                    repository: request.repository.clone(),
+                    index: 261,
+                },
+                &credential,
+            )
+            .await
+            .expect("inline comments");
         let records = audit.records().expect("audit records");
         let reads = adapter.stream_reads.lock().expect("stream reads");
-        assert_eq!(records.len(), 2);
-        assert_eq!(reads.len(), 2);
+        assert_eq!(records.len(), 3);
+        assert_eq!(reads.len(), 3);
         for (i, (action, index)) in [
             ("get_change_request_reviews", 137),
             ("get_change_request_discussion_comments", 138),
+            ("get_change_request_inline_comments", 261),
         ]
         .into_iter()
         .enumerate()
@@ -2838,6 +2886,11 @@ mod tests {
             repository: request.repository.clone(),
             index: 137,
         };
+        let inline = domain::GetChangeRequestInlineCommentsRequest {
+            agent: request.agent.clone(),
+            repository: request.repository.clone(),
+            index: 261,
+        };
         let discussion = domain::GetChangeRequestDiscussionCommentsRequest {
             agent: request.agent,
             repository: request.repository,
@@ -2854,6 +2907,12 @@ mod tests {
         assert!(matches!(
             service
                 .get_change_request_discussion_comments(discussion.clone(), &credential)
+                .await,
+            Err(ServiceError::Audit(_))
+        ));
+        assert!(matches!(
+            service
+                .get_change_request_inline_comments(inline.clone(), &credential)
                 .await,
             Err(ServiceError::Audit(_))
         ));
@@ -2878,7 +2937,13 @@ mod tests {
                 .await,
             Err(ServiceError::Upstream(_))
         ));
-        assert_eq!(audit.records().expect("audit records").len(), 2);
+        assert!(matches!(
+            service
+                .get_change_request_inline_comments(inline, &credential)
+                .await,
+            Err(ServiceError::Upstream(_))
+        ));
+        assert_eq!(audit.records().expect("audit records").len(), 3);
     }
 
     // --- get_change_request_checks tests ---

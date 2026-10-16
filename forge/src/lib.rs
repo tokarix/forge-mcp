@@ -670,6 +670,19 @@ pub trait ForgeAdapter: Send + Sync {
         credential: &ForgeCredential,
     ) -> Result<Vec<ChangeRequestCommentDetail>, ForgeError>;
 
+    /// Reads inline comments and replies without discussion or formal reviews.
+    /// Providers without this capability fail explicitly without upstream access.
+    async fn get_change_request_inline_comments(
+        &self,
+        _repository: &RepositoryRef,
+        _index: u64,
+        _credential: &ForgeCredential,
+    ) -> Result<Vec<domain::ChangeRequestInlineComment>, ForgeError> {
+        Err(ForgeError::Unsupported(
+            "inline PR review comments are supported only by GitHub".into(),
+        ))
+    }
+
     /// Reads submitted top-level reviews without fetching discussion or inline comments.
     /// GitLab exposes current approvals only: ID is 0, body/timestamp are empty,
     /// and commit references are absent; `REQUEST_CHANGES` events are unavailable.

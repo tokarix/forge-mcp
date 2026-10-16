@@ -894,6 +894,14 @@ mod tests {
             unimplemented!()
         }
 
+        async fn get_change_request_inline_comments(
+            &self,
+            _request: domain::GetChangeRequestInlineCommentsRequest,
+            _: &domain::ForgeCredential,
+        ) -> Result<Vec<domain::ChangeRequestInlineComment>, ServiceError> {
+            unimplemented!()
+        }
+
         async fn get_change_request_reviews(
             &self,
             _request: domain::GetChangeRequestReviewsRequest,

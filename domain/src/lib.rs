@@ -296,6 +296,65 @@ pub struct GetChangeRequestCommentsRequest {
     pub repository: RepositoryRef,
 }
 
+/// A read-only inline diff review comment or reply, separate from discussion
+/// and formal verdicts. Optional coordinates preserve unknown locations.
+/// REST does not establish thread resolution, approval, or outdated state.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ChangeRequestInlineComment {
+    /// Actual provider comment ID.
+    pub id: u64,
+    /// Provider node ID.
+    pub node_id: Option<String>,
+    /// Associated submitted review ID, when supplied.
+    pub pull_request_review_id: Option<u64>,
+    /// Reply-parent comment ID; this is not an authoritative thread ID.
+    pub in_reply_to_id: Option<u64>,
+    /// Author login, if the provider still exposes the user.
+    pub author: Option<String>,
+    /// Raw Markdown comment body.
+    pub body: String,
+    /// Provider creation timestamp.
+    pub created_at: String,
+    /// Provider last-update timestamp.
+    pub updated_at: String,
+    /// Comment web URL.
+    pub url: String,
+    /// Repository-relative file path.
+    pub path: Option<String>,
+    /// Provider diff hunk.
+    pub diff_hunk: Option<String>,
+    /// Current commit reference.
+    pub commit_id: Option<String>,
+    /// Original commit reference.
+    pub original_commit_id: Option<String>,
+    /// Current file line; absent means unknown.
+    pub line: Option<u64>,
+    /// Original file line.
+    pub original_line: Option<u64>,
+    /// Current start file line for a multi-line comment.
+    pub start_line: Option<u64>,
+    /// Original start file line.
+    pub original_start_line: Option<u64>,
+    /// Diff side for the end line, as supplied by the provider.
+    pub side: Option<String>,
+    /// Diff side for the start line, as supplied by the provider.
+    pub start_side: Option<String>,
+    /// Legacy current diff position; never a file line.
+    pub position: Option<u64>,
+    /// Legacy original diff position; never a file line.
+    pub original_position: Option<u64>,
+    /// Provider location kind, such as line or file.
+    pub subject_type: Option<String>,
+}
+
+/// Identifies a pull request whose inline comments should be read.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GetChangeRequestInlineCommentsRequest {
+    pub agent: AgentIdentity,
+    pub index: u64,
+    pub repository: RepositoryRef,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GetChangeRequestReviewsRequest {
     pub agent: AgentIdentity,
@@ -1509,6 +1568,17 @@ pub trait RepositoryReadService: Send + Sync {
         request: GetChangeRequestCommentsRequest,
         credential: &ForgeCredential,
     ) -> Result<Vec<ChangeRequestCommentDetail>, ServiceError>;
+
+    /// Reads inline diff comments and replies without fetching other PR resources.
+    /// Currently supported by GitHub only, with bounded pagination.
+    ///
+    /// # Errors
+    /// Returns an error on unsupported providers, audit failure or upstream failure.
+    async fn get_change_request_inline_comments(
+        &self,
+        request: GetChangeRequestInlineCommentsRequest,
+        credential: &ForgeCredential,
+    ) -> Result<Vec<ChangeRequestInlineComment>, ServiceError>;
 
     /// Reads submitted top-level reviews without fetching discussion or inline comments.
     /// GitLab exposes current approvals only: ID is 0, body/timestamp are empty,

@@ -1378,6 +1378,54 @@ pub async fn get_pull_discussion_comments(
 
 #[utoipa::path(
     get,
+    path = "/api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}/inline-comments",
+    params(
+        ("forge" = String, Path, description = "Forge alias"),
+        ("owner" = String, Path, description = "Repository owner"),
+        ("repo" = String, Path, description = "Repository name"),
+        ("index" = u64, Path, description = "Pull request index"),
+    ),
+    responses(
+        (status = 200, description = "Inline diff review comments and replies (GitHub only)"),
+        (status = 401, description = "Unauthorized", body = ErrorBody),
+    ),
+    security(("bearer" = []))
+)]
+/// GET /api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}/inline-comments
+pub async fn get_pull_inline_comments(
+    State(state): State<AppState>,
+    Path(path): Path<PullPath>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let forge = resolve_forge(&state.forge_registry, &path.forge)?;
+    let agent = resolve_agent(
+        &headers,
+        &state.agent_registry,
+        &path.forge,
+        &path.owner,
+        &path.repo,
+    )?;
+
+    let credential = resolve_credential(agent, &path.forge, forge);
+
+    let result = forge
+        .read_service
+        .get_change_request_inline_comments(
+            domain::GetChangeRequestInlineCommentsRequest {
+                agent: agent.identity.clone(),
+                index: path.index,
+                repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
+            },
+            &credential,
+        )
+        .await
+        .map_err(map_service_error)?;
+
+    Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(to_json_value(&result)?))
+}
+
+#[utoipa::path(
+    get,
     path = "/api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}/reviews",
     params(
         ("forge" = String, Path, description = "Forge alias"),
@@ -3816,6 +3864,21 @@ mod tests {
                     review_state: Some("APPROVED".to_string()),
                 },
             ])
+        }
+
+        async fn get_change_request_inline_comments(
+            &self,
+            request: domain::GetChangeRequestInlineCommentsRequest,
+            credential: &domain::ForgeCredential,
+        ) -> Result<Vec<domain::ChangeRequestInlineComment>, ServiceError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            assert_eq!(request.agent.agent_id, "codex");
+            assert_eq!(request.repository.alias, "test-forge");
+            assert_eq!(request.repository.owner, "org");
+            assert_eq!(request.repository.name, "repo");
+            assert_eq!(request.index, 1);
+            assert_eq!(credential.token.as_deref(), Some("caller-forge-token"));
+            Ok(vec![])
         }
 
         async fn get_change_request_reviews(
@@ -7146,7 +7209,11 @@ mod tests {
 
     #[tokio::test]
     async fn narrow_pull_reads_preserve_scope_and_access_control() {
-        for (endpoint, kind) in [("reviews", "review"), ("discussion-comments", "comment")] {
+        for (endpoint, kind) in [
+            ("reviews", "review"),
+            ("discussion-comments", "comment"),
+            ("inline-comments", ""),
+        ] {
             for (forge, repo, token, expected) in [
                 ("test-forge", "repo", "test-token", StatusCode::OK),
                 (
@@ -7177,8 +7244,12 @@ mod tests {
                         .expect("body");
                     let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
                     let entries = json.as_array().expect("entries");
-                    assert_eq!(entries.len(), 1);
-                    assert_eq!(entries[0]["kind"], kind);
+                    if endpoint == "inline-comments" {
+                        assert!(entries.is_empty());
+                    } else {
+                        assert_eq!(entries.len(), 1);
+                        assert_eq!(entries[0]["kind"], kind);
+                    }
                 }
             }
         }
@@ -7191,6 +7262,7 @@ mod tests {
         for (endpoint, methods) in [
             ("reviews", vec!["get", "post"]),
             ("discussion-comments", vec!["get"]),
+            ("inline-comments", vec!["get"]),
             ("comments", vec!["get", "post"]),
         ] {
             let path =

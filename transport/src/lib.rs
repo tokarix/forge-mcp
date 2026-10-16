@@ -340,6 +340,19 @@ pub struct GetChangeRequestCommentsTool {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct GetChangeRequestInlineCommentsTool {
+    /// Forge alias -- use `forge_info` to discover available aliases.
+    pub forge: String,
+    /// Change request index number.
+    #[serde(deserialize_with = "serde_aux::field_attributes::deserialize_number_from_string")]
+    pub index: u64,
+    /// Repository owner or organization.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct GetChangeRequestReviewsTool {
     /// Forge alias -- use `forge_info` to discover available aliases.
     pub forge: String,
@@ -1816,6 +1829,34 @@ impl McpShim {
         self.gateway_get(url, &gw.token).await
     }
 
+    /// Read inline diff comments and replies only.
+    #[tool(
+        input_schema = schema_for_type::<GetChangeRequestInlineCommentsTool>(),
+        name = "get_change_request_inline_comments",
+        description = "Get read-only inline PR diff review comments and replies (GitHub only). Preserves review/reply IDs, raw Markdown, paths, diff hunks and optional current/original coordinates. Unknown locations remain null; diff positions are not file lines. Reply-parent IDs are not thread IDs. Does not report thread resolution, approval or authoritative outdated state. Bounded pagination fails the whole read on errors; unsupported providers return an error."
+    )]
+    async fn get_change_request_inline_comments(
+        &self,
+        Parameters(request): Parameters<GetChangeRequestInlineCommentsTool>,
+    ) -> Result<String, McpError> {
+        let gw = self.resolve_gateway(&request.forge).await?;
+        let url = Self::build_url(
+            &gw.url,
+            &[
+                "api",
+                "v1",
+                "repos",
+                &request.forge,
+                &request.owner,
+                &request.repo,
+                "pulls",
+                &request.index.to_string(),
+                "inline-comments",
+            ],
+        )?;
+        self.gateway_get(url, &gw.token).await
+    }
+
     /// Read reviews only.
     #[tool(
         input_schema = schema_for_type::<GetChangeRequestReviewsTool>(),
@@ -3055,6 +3096,7 @@ mod tests {
                 "get_change_request_discussion_comments",
                 "discussion comments only",
             ),
+            ("get_change_request_inline_comments", "GitHub only"),
         ] {
             let tool = shim.tool_router.get(name).expect("advertised tool");
             assert!(
@@ -4913,6 +4955,65 @@ mod tests {
                 "author": "reviewer", "body": "looks good", "created_at": "2026-03-18T10:00:00Z",
                 "id": 1, "kind": "comment", "review_state": null
             }])
+        );
+
+        drop(client);
+        server_handle.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_change_request_inline_comments_calls_gateway()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mock_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path_regex(
+                r"/api/v1/repos/.+/.+/.+/pulls/\d+/inline-comments",
+            ))
+            .and(wiremock::matchers::header(
+                "authorization",
+                "Bearer test-token",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                    {"id": 101, "body": "**raw**", "in_reply_to_id": 100,
+                     "line": null, "original_line": 14, "position": null}
+                ])),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let (client, server_handle) =
+            spawn_shim_and_client(test_config(&mock_server.uri())).await?;
+
+        let args = serde_json::json!({
+            "forge": "test-forge",
+            "owner": "org",
+            "repo": "repo",
+            "index": "1"
+        })
+        .as_object()
+        .expect("json args as object")
+        .clone();
+
+        let result = client
+            .call_tool(
+                CallToolRequestParams::new("get_change_request_inline_comments")
+                    .with_arguments(args),
+            )
+            .await?;
+
+        let text = result
+            .content
+            .first()
+            .and_then(|c| c.as_text())
+            .map(|t| t.text.clone())
+            .expect("text result");
+        let forwarded: serde_json::Value = serde_json::from_str(&text)?;
+        assert_eq!(
+            forwarded,
+            serde_json::json!([{"id":101, "body":"**raw**", "in_reply_to_id":100,
+                "line":null, "original_line":14, "position":null}])
         );
 
         drop(client);

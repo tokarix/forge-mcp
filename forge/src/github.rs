@@ -874,6 +874,62 @@ struct GitHubComment {
 }
 
 #[derive(Debug, Deserialize)]
+struct GitHubInlineComment {
+    user: Option<GitHubUser>,
+    id: u64,
+    node_id: Option<String>,
+    pull_request_review_id: Option<u64>,
+    in_reply_to_id: Option<u64>,
+    body: String,
+    created_at: String,
+    updated_at: String,
+    #[serde(rename = "html_url")]
+    url: String,
+    path: Option<String>,
+    diff_hunk: Option<String>,
+    commit_id: Option<String>,
+    original_commit_id: Option<String>,
+    line: Option<u64>,
+    original_line: Option<u64>,
+    start_line: Option<u64>,
+    original_start_line: Option<u64>,
+    side: Option<String>,
+    start_side: Option<String>,
+    position: Option<u64>,
+    original_position: Option<u64>,
+    subject_type: Option<String>,
+}
+
+impl From<GitHubInlineComment> for domain::ChangeRequestInlineComment {
+    fn from(comment: GitHubInlineComment) -> Self {
+        Self {
+            author: comment.user.map(|user| user.login),
+            id: comment.id,
+            node_id: comment.node_id,
+            pull_request_review_id: comment.pull_request_review_id,
+            in_reply_to_id: comment.in_reply_to_id,
+            body: comment.body,
+            created_at: comment.created_at,
+            updated_at: comment.updated_at,
+            url: comment.url,
+            path: comment.path,
+            diff_hunk: comment.diff_hunk,
+            commit_id: comment.commit_id,
+            original_commit_id: comment.original_commit_id,
+            line: comment.line,
+            original_line: comment.original_line,
+            start_line: comment.start_line,
+            original_start_line: comment.original_start_line,
+            side: comment.side,
+            start_side: comment.start_side,
+            position: comment.position,
+            original_position: comment.original_position,
+            subject_type: comment.subject_type,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
 struct GitHubReview {
     body: Option<String>,
     commit_id: Option<String>,
@@ -2361,6 +2417,22 @@ impl crate::ForgeAdapter for GitHubAdapter {
             .collect();
         details.sort_by(|left, right| left.created_at.cmp(&right.created_at));
         Ok(details)
+    }
+
+    async fn get_change_request_inline_comments(
+        &self,
+        repository: &RepositoryRef,
+        index: u64,
+        credential: &ForgeCredential,
+    ) -> Result<Vec<domain::ChangeRequestInlineComment>, ForgeError> {
+        let repo = Self::repo_path(repository);
+        let url = format!("{}/repos/{repo}/pulls/{index}/comments", self.api_base());
+        Ok(self
+            .get_paginated::<GitHubInlineComment>(&url, &[], credential)
+            .await?
+            .into_iter()
+            .map(Into::into)
+            .collect())
     }
 
     async fn get_change_request_reviews(
