@@ -1183,7 +1183,10 @@ impl ForgejoAdapter {
 
         let mut lines = Vec::new();
         for l in logs.into_iter().rev().take(20) {
-            let bytes = base64::Engine::decode(&base64::prelude::BASE64_STANDARD, l.data.trim())
+            let Some(data) = l.data else {
+                continue;
+            };
+            let bytes = base64::Engine::decode(&base64::prelude::BASE64_STANDARD, data.trim())
                 .map_err(|e| format!("Failed to decode log data for step {}: {e}", step.name))?;
             let line = String::from_utf8_lossy(&bytes).into_owned();
             if !line.trim().is_empty() {
@@ -1694,7 +1697,7 @@ struct WoodpeckerStep {
 
 #[derive(Debug, Deserialize)]
 struct WoodpeckerLogEntry {
-    data: String,
+    data: Option<String>,
 }
 
 /// Forgejo combined commit status response from
@@ -4070,6 +4073,110 @@ mod tests {
             } else {
                 assert!(result.is_err(), "{encoded:?}");
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn ci_details_handles_nullable_woodpecker_logs() {
+        let mock = MockServer::start().await;
+        let adapter = ForgejoAdapter::new(ForgejoConfig {
+            base_url: mock.uri(),
+            token: None,
+            woodpecker_url: Some(mock.uri()),
+            woodpecker_token: None,
+        })
+        .expect("build adapter");
+        let target_url = format!("{}/repos/1/pipeline/42", mock.uri());
+        let ordinary: Vec<_> = (0..25)
+            .map(|i| {
+                serde_json::json!({
+                    "data": base64::Engine::encode(
+                        &base64::prelude::BASE64_STANDARD, format!("line {i}\n"))
+                })
+            })
+            .collect();
+        let mut nullable = ordinary.clone();
+        nullable[0]["data"] = serde_json::Value::Null; // Before the retained tail.
+        nullable[7]["data"] = serde_json::Value::Null;
+        nullable[9]["data"] = serde_json::json!("");
+        nullable[11]["data"] = serde_json::json!("IAo="); // Blank decoded line.
+        let expected: Vec<_> = (5..25).map(|i| format!("line {i}\n")).collect();
+        let nullable_expected: Vec<_> = (5..25)
+            .filter(|i| ![7, 9, 11].contains(i))
+            .map(|i| format!("line {i}\n"))
+            .collect();
+        for (logs, expected_lines, expected_error) in [
+            (ordinary, expected, None),
+            (nullable, nullable_expected, None),
+            (
+                vec![
+                    serde_json::json!({"data": null}),
+                    serde_json::json!({"data": ""}),
+                    serde_json::json!({"data": "IAo="}),
+                ],
+                vec![],
+                Some("found no usable log excerpts"),
+            ),
+            (
+                vec![serde_json::json!({"data": 42})],
+                vec![],
+                Some("Failed to parse logs for step verify"),
+            ),
+            (
+                vec![serde_json::json!({"data": "!!!"})],
+                vec![],
+                Some("Failed to decode log data for step verify"),
+            ),
+        ] {
+            mock.reset().await;
+            Mock::given(method("GET"))
+                .and(path_regex(r"/api/v1/repos/.+/commits/abc/status"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "sha": "abc", "state": "failure", "total_count": 1,
+                    "statuses": [{"context": "ci/verify", "status": "failure", "target_url": target_url}]
+                })))
+                .mount(&mock).await;
+            Mock::given(method("GET"))
+                .and(path_regex(r"/api/repos/1/pipelines/42"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "workflows": [{"id": 1, "children": [{"id": 2, "name": "verify", "state": "failure"}]}]
+                })))
+                .mount(&mock).await;
+            Mock::given(method("GET"))
+                .and(path_regex(r"/api/repos/1/logs/42/2"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(logs))
+                .mount(&mock)
+                .await;
+            let details = adapter
+                .get_change_request_ci_details(
+                    &test_repo(),
+                    "abc",
+                    &ForgeCredential { token: None },
+                )
+                .await
+                .expect("CI details");
+            assert_eq!(details.state, domain::CommitStatusState::Failure);
+            assert_eq!(details.details[0].state, domain::CommitStatusState::Failure);
+            match &details.details[0].resolution {
+                domain::CiResolution::Resolved { failed_steps, .. } => {
+                    assert!(expected_error.is_none());
+                    assert_eq!(failed_steps[0].name, "verify");
+                    assert_eq!(
+                        failed_steps[0].log_excerpt.as_ref().expect("excerpt").lines,
+                        expected_lines
+                    );
+                }
+                domain::CiResolution::Error { message } => {
+                    assert!(
+                        message.contains(expected_error.expect("expected successful resolution")),
+                        "{message}"
+                    );
+                }
+                other @ domain::CiResolution::Unsupported => {
+                    panic!("unexpected resolution: {other:?}");
+                }
+            }
+            mock.verify().await;
         }
     }
 
