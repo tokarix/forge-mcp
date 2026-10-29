@@ -1101,6 +1101,78 @@ pub struct CreateIssueRequest {
     pub title: String,
 }
 
+/// Explicit repository-scoped historical run selection. IDs are lookup hints.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct HistoricalCiSelector {
+    /// Initially only "woodpecker" is supported.
+    pub provider: String,
+    /// Provider repository database identifier, verified against repository access.
+    pub provider_repository_id: u64,
+    /// Repository-scoped pipeline number, distinct from its database identifier.
+    pub pipeline_number: u64,
+}
+impl HistoricalCiSelector {
+    /// Whether both selectors fit the provider's positive signed identifiers.
+    #[must_use]
+    pub fn valid(&self) -> bool {
+        self.provider_repository_id > 0
+            && self.pipeline_number > 0
+            && i64::try_from(self.provider_repository_id).is_ok()
+            && i64::try_from(self.pipeline_number).is_ok()
+    }
+}
+/// Authorized historical diagnostic request, independent of PR/head state.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GetRepositoryCiDetailsRequest {
+    pub agent: AgentIdentity,
+    pub repository: RepositoryRef,
+    pub selector: HistoricalCiSelector,
+}
+/// Historical evidence never qualifies current CI or merge eligibility.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CiEvidenceKind {
+    Historical,
+}
+/// Repository-scoped historical diagnostic response.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct RepositoryCiDetails {
+    pub evidence_kind: CiEvidenceKind,
+    pub selector: HistoricalCiSelector,
+    pub outcome: HistoricalCiOutcome,
+}
+/// Selected source identity and reusable evidence, or an actionable selection failure.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum HistoricalCiOutcome {
+    Unsupported {
+        message: String,
+    },
+    SelectionDiagnostic {
+        diagnostic: CiDiagnostic,
+    },
+    Selected {
+        /// Exact sanitized source commit; never a PR head assertion.
+        commit: String,
+        /// Unknown when missing or unsafe to represent exactly.
+        reference: Option<String>,
+        evidence: Box<CiResolution>,
+    },
+}
+impl RepositoryCiDetails {
+    /// Explicit unsupported response for backends without historical CI.
+    #[must_use]
+    pub fn unsupported(selector: HistoricalCiSelector) -> Self {
+        Self {
+            evidence_kind: CiEvidenceKind::Historical,
+            selector,
+            outcome: HistoricalCiOutcome::Unsupported {
+                message: "Historical CI provider is unsupported or not configured".into(),
+            },
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GetChangeRequestCiDetailsRequest {
     pub agent: AgentIdentity,
@@ -1668,6 +1740,18 @@ pub enum ServiceError {
 
 #[async_trait]
 pub trait RepositoryReadService: Send + Sync {
+    /// Retrieve explicitly selected historical evidence.
+    ///
+    /// # Errors
+    /// Returns audit or upstream service errors.
+    async fn get_repository_ci_details(
+        &self,
+        request: GetRepositoryCiDetailsRequest,
+        _credential: &ForgeCredential,
+    ) -> Result<RepositoryCiDetails, ServiceError> {
+        Ok(RepositoryCiDetails::unsupported(request.selector))
+    }
+
     /// Retrieves CI details for a change request's checks.
     ///
     /// # Errors
@@ -2812,5 +2896,30 @@ mod draft_contract_tests {
                 None
             );
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod historical_ci_tests {
+    use super::*;
+    #[test]
+    fn historical_selector_boundaries_and_marker() {
+        let mut selector = HistoricalCiSelector {
+            provider: "woodpecker".into(),
+            provider_repository_id: 29,
+            pipeline_number: 248,
+        };
+        for n in [0, i64::MAX as u64 + 1, u64::MAX] {
+            selector.pipeline_number = n;
+            assert!(!selector.valid());
+        }
+        selector.pipeline_number = i64::MAX as u64;
+        assert!(selector.valid());
+        let json = serde_json::to_value(RepositoryCiDetails::unsupported(selector)).expect("json");
+        assert_eq!(json["evidence_kind"], "historical");
+        assert_eq!(json["outcome"]["type"], "unsupported");
+        assert!(json.get("head_sha").is_none());
+        assert!(json.get("state").is_none());
     }
 }

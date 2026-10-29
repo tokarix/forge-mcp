@@ -149,6 +149,36 @@ where
             .map_err(|e| ServiceError::Upstream(e.to_string()))
     }
 
+    async fn get_repository_ci_details(
+        &self,
+        request: domain::GetRepositoryCiDetailsRequest,
+        credential: &ForgeCredential,
+    ) -> Result<domain::RepositoryCiDetails, ServiceError> {
+        if !request.selector.valid() {
+            return Err(ServiceError::Validation(
+                "Historical CI selectors must be positive signed 64-bit integers".into(),
+            ));
+        }
+        self.audit_sink
+            .record(AuditRecord {
+                agent: request.agent,
+                action: "get_repository_ci_details".into(),
+                repository: request.repository.clone(),
+                target: format!(
+                    "{}/{}/{}",
+                    request.selector.provider,
+                    request.selector.provider_repository_id,
+                    request.selector.pipeline_number
+                ),
+            })
+            .await
+            .map_err(|e| ServiceError::Audit(e.to_string()))?;
+        self.adapter
+            .get_repository_ci_details(&request.repository, request.selector, credential)
+            .await
+            .map_err(|e| ServiceError::Upstream(e.to_string()))
+    }
+
     async fn get_change_request_ci_details(
         &self,
         request: GetChangeRequestCiDetailsRequest,
@@ -3492,6 +3522,36 @@ mod tests {
             name: "repo".to_string(),
             owner: "org".to_string(),
         }
+    }
+
+    #[tokio::test]
+    async fn historical_read_audits_selector_without_requiring_pr_head() {
+        let adapter = Arc::new(ChecksTestForgeAdapter::success());
+        let audit = Arc::new(InMemoryAuditSink::new());
+        let orchestrator = ReadOrchestrator::new(adapter, Arc::clone(&audit));
+        let result = orchestrator
+            .get_repository_ci_details(
+                domain::GetRepositoryCiDetailsRequest {
+                    agent: checks_test_agent(),
+                    repository: checks_test_repo(),
+                    selector: domain::HistoricalCiSelector {
+                        provider: "woodpecker".into(),
+                        provider_repository_id: 29,
+                        pipeline_number: 248,
+                    },
+                },
+                &domain::ForgeCredential { token: None },
+            )
+            .await
+            .expect("historical");
+        assert!(matches!(
+            result.outcome,
+            domain::HistoricalCiOutcome::Unsupported { .. }
+        ));
+        let records = audit.records().expect("audit");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].action, "get_repository_ci_details");
+        assert_eq!(records[0].target, "woodpecker/29/248");
     }
 
     #[tokio::test]

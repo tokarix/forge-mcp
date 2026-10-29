@@ -43,6 +43,8 @@ struct Pipeline {
     id: i64,
     number: u64,
     commit: String,
+    #[serde(rename = "ref")]
+    reference: Option<String>,
     status: Option<String>,
     #[serde(default)]
     errors: Option<Vec<ProviderError>>,
@@ -88,6 +90,11 @@ struct Runner {
     version: Option<String>,
 }
 
+enum Selection<'a> {
+    CurrentHead { expected_sha: &'a str },
+    Historical,
+}
+
 /// One resolver per CI-details call; credentials and caches never cross requests.
 pub(crate) struct Resolver {
     session: Session,
@@ -101,6 +108,7 @@ pub(crate) struct Resolver {
     steps: usize,
     emitted: usize,
     truncated: bool,
+    source: Option<(String, Option<String>)>,
 }
 impl Resolver {
     pub(crate) fn new(
@@ -126,6 +134,7 @@ impl Resolver {
             steps: 0,
             emitted: 0,
             truncated: false,
+            source: None,
         }))
     }
 
@@ -148,11 +157,76 @@ impl Resolver {
         if !self.origin.matches_origin(target) {
             return CiResolution::Unsupported;
         }
-        match self.evidence(repo, sha, target).await {
+        let (repo_id, number) = match self.origin.pipeline(target) {
+            Ok(ids) => ids,
+            Err(f) => {
+                return CiResolution::Error {
+                    message: format!("{:?}: {}", f.code, f.message),
+                };
+            }
+        };
+        match self
+            .evidence(
+                repo,
+                Selection::CurrentHead { expected_sha: sha },
+                repo_id,
+                number,
+            )
+            .await
+        {
             Ok(result) => self.bound_output(result),
             Err(f) => CiResolution::Error {
                 message: format!("{:?}: {}", f.code, f.message),
             },
+        }
+    }
+
+    pub(crate) async fn historical(
+        &mut self,
+        repo: &RepositoryRef,
+        selector: domain::HistoricalCiSelector,
+    ) -> domain::RepositoryCiDetails {
+        if !selector.valid() {
+            return selection_failure(selector, &binding());
+        }
+        match self
+            .evidence(
+                repo,
+                Selection::Historical,
+                selector.provider_repository_id,
+                selector.pipeline_number,
+            )
+            .await
+        {
+            Err(f) => selection_failure(selector, &f),
+            Ok(evidence) => {
+                let Some((commit, reference)) = self.source.take() else {
+                    return selection_failure(selector, &binding());
+                };
+                let mut response = domain::RepositoryCiDetails {
+                    evidence_kind: domain::CiEvidenceKind::Historical,
+                    selector: selector.clone(),
+                    outcome: domain::HistoricalCiOutcome::Selected {
+                        commit,
+                        reference,
+                        evidence: Box::new(evidence),
+                    },
+                };
+                // Reserve the entire envelope's escaped JSON overhead before bounding evidence.
+                let full_size = serde_json::to_vec(&response).map_or(usize::MAX, |v| v.len());
+                if let domain::HistoricalCiOutcome::Selected { evidence, .. } =
+                    &mut response.outcome
+                {
+                    let nested_size = serde_json::to_vec(&evidence).map_or(0, |v| v.len());
+                    let overhead = full_size.saturating_sub(nested_size);
+                    self.limits.output_bytes = self.limits.output_bytes.saturating_sub(overhead);
+                    **evidence = self.bound_output((**evidence).clone());
+                    if !matches!(**evidence, CiResolution::Resolved { .. }) {
+                        return selection_failure(selector, &limit());
+                    }
+                }
+                response
+            }
         }
     }
 
@@ -161,10 +235,10 @@ impl Resolver {
     async fn evidence(
         &mut self,
         repo: &RepositoryRef,
-        sha: &str,
-        target: &str,
+        selection: Selection<'_>,
+        repo_id: u64,
+        number: u64,
     ) -> Result<CiResolution, Failure> {
-        let (repo_id, number) = self.origin.pipeline(target)?;
         if !self.pipelines.contains(&(repo_id, number))
             && self.pipelines.len() >= self.limits.pipelines
         {
@@ -192,9 +266,31 @@ impl Resolver {
             .session
             .json(Resource::Pipeline(repo_id, number))
             .await?;
-        if pipeline.id <= 0 || pipeline.number != number || pipeline.commit != sha || sha.is_empty()
+        if pipeline.id <= 0 || pipeline.number != number {
+            return Err(binding());
+        }
+        if let Selection::CurrentHead { expected_sha } = selection
+            && (expected_sha.is_empty() || pipeline.commit != expected_sha)
         {
             return Err(binding());
+        }
+        let mut source_incomplete = false;
+        if matches!(selection, Selection::Historical) {
+            let commit = self.text(&pipeline.commit, self.limits.string_bytes);
+            if commit.trim().is_empty() || commit != pipeline.commit {
+                return Err(Failure {
+                    code: Code::MalformedResponse,
+                    status: None,
+                    message: "Historical pipeline commit is missing or cannot be represented exactly",
+                });
+            }
+            let reference = pipeline.reference.and_then(|raw| {
+                let safe = self.text(&raw, self.limits.string_bytes);
+                (safe == raw && !safe.trim().is_empty()).then_some(safe)
+            });
+            source_incomplete =
+                reference.is_none() || pipeline.status.as_ref().is_none_or(|s| s.trim().is_empty());
+            self.source = Some((commit, reference));
         }
         let id = pipeline.id;
         let mut evidence = WoodpeckerPipelineEvidence {
@@ -219,6 +315,20 @@ impl Resolver {
                 None,
             )],
         };
+        if source_incomplete {
+            evidence.diagnostics.push(diagnostic(
+                Component::Pipeline,
+                &Failure {
+                    code: Code::MalformedResponse,
+                    status: None,
+                    message: "Historical source ref or provider state is unknown",
+                },
+                id,
+                None,
+                None,
+                None,
+            ));
+        }
         let errors = pipeline.errors.unwrap_or_default();
         if errors.len() > 64 {
             self.truncated = true;
@@ -514,6 +624,18 @@ impl Resolver {
         }
     }
 }
+pub(crate) fn selection_failure(
+    selector: domain::HistoricalCiSelector,
+    failure: &Failure,
+) -> domain::RepositoryCiDetails {
+    let mut d = diagnostic(Component::Pipeline, failure, 0, None, None, None);
+    d.pipeline_id = None;
+    domain::RepositoryCiDetails {
+        evidence_kind: domain::CiEvidenceKind::Historical,
+        selector,
+        outcome: domain::HistoricalCiOutcome::SelectionDiagnostic { diagnostic: d },
+    }
+}
 fn binding() -> Failure {
     Failure {
         code: Code::BindingMismatch,
@@ -613,6 +735,210 @@ mod tests {
         )
         .expect("serialize")
     }
+
+    fn selector() -> domain::HistoricalCiSelector {
+        domain::HistoricalCiSelector {
+            provider: "woodpecker".into(),
+            provider_repository_id: 29,
+            pipeline_number: 42,
+        }
+    }
+    #[tokio::test]
+    async fn historical_keeps_actual_identity_for_every_provider_state_without_current_reads() {
+        for state in ["failure", "pending", "success"] {
+            let server = MockServer::start().await;
+            let mut p = fixture("pipeline");
+            p["commit"] = "old-selected-commit".into();
+            p["ref"] = "refs/heads/old".into();
+            p["status"] = state.into();
+            if state != "failure" {
+                p["workflows"] = serde_json::json!([]);
+            }
+            setup(&server, p).await;
+            mount(&server, "/api/repos/29/logs/42/7001", fixture("passing")).await;
+            let response = resolver(&server, None, Limits::default())
+                .historical(&repository(), selector())
+                .await;
+            let json = serde_json::to_value(response).expect("serialize");
+            assert_eq!(json["evidence_kind"], "historical");
+            assert_eq!(json["outcome"]["commit"], "old-selected-commit");
+            assert_eq!(json["outcome"]["reference"], "refs/heads/old");
+            assert_eq!(json["outcome"]["evidence"]["woodpecker"]["status"], state);
+            assert_eq!(json["outcome"]["evidence"]["woodpecker"]["number"], 42);
+            assert_ne!(json["outcome"]["evidence"]["woodpecker"]["id"], 42);
+            assert!(json.get("head_sha").is_none());
+            for request in server.received_requests().await.expect("requests") {
+                assert!(
+                    request.url.path() == "/api/repos/29"
+                        || request.url.path().starts_with("/api/repos/29/")
+                );
+            }
+        }
+    }
+    #[tokio::test]
+    async fn adapter_historical_248_ignores_retry_249_and_changed_head() {
+        use crate::ForgeAdapter;
+        for latest in ["pending", "success"] {
+            let ci = MockServer::start().await;
+            let forge = MockServer::start().await;
+            let mut repo = fixture("repo");
+            repo["forge_url"] = format!("{}/fixture-owner/fixture-repo", forge.uri()).into();
+            mount(&ci, "/api/repos/29", repo).await;
+            let mut pipeline = fixture("pipeline");
+            pipeline["number"] = 248.into();
+            pipeline["commit"] = "historical-source".into();
+            pipeline["ref"] = "refs/heads/historical".into();
+            mount(&ci, "/api/repos/29/pipelines/248", pipeline).await;
+            mount(&ci, "/api/repos/29/logs/248/7001", fixture("passing")).await;
+            mount(
+                &forge,
+                "/api/v1/repos/fixture-owner/fixture-repo/pulls/1",
+                serde_json::json!({"head":{"sha":"changed-head"}}),
+            )
+            .await;
+            mount(&forge, "/api/v1/repos/fixture-owner/fixture-repo/commits/changed-head/status",
+                serde_json::json!({"state":latest,"target_url":format!("{}/repos/29/pipeline/249",ci.uri())})).await;
+            let adapter = crate::ForgejoAdapter::new(crate::ForgejoConfig {
+                base_url: forge.uri(),
+                token: Some("FORGE_SECRET".into()),
+                woodpecker_url: Some(ci.uri()),
+                woodpecker_token: None,
+            })
+            .expect("adapter");
+            let mut selection = selector();
+            selection.pipeline_number = 248;
+            let response = adapter
+                .get_repository_ci_details(
+                    &repository(),
+                    selection,
+                    &domain::ForgeCredential {
+                        token: Some("FORGE_SECRET".into()),
+                    },
+                )
+                .await
+                .expect("historical");
+            let json = serde_json::to_value(response).expect("json");
+            assert_eq!(json["outcome"]["commit"], "historical-source");
+            assert_eq!(json["outcome"]["reference"], "refs/heads/historical");
+            assert_eq!(json["outcome"]["evidence"]["woodpecker"]["number"], 248);
+            assert!(json["outcome"]["evidence"]["failed_steps"][0]["log_excerpt"].is_object());
+            assert!(
+                forge
+                    .received_requests()
+                    .await
+                    .expect("requests")
+                    .is_empty()
+            );
+            assert!(
+                ci.received_requests()
+                    .await
+                    .expect("requests")
+                    .iter()
+                    .all(|r| !r.url.path().contains("249")
+                        && !r.headers.contains_key("authorization"))
+            );
+        }
+    }
+    #[tokio::test]
+    async fn current_head_still_requires_nonempty_exact_sha() {
+        let server = MockServer::start().await;
+        setup(&server, fixture("pipeline")).await;
+        for sha in ["", "different"] {
+            let response = resolver(&server, None, Limits::default())
+                .resolve(
+                    &repository(),
+                    sha,
+                    &format!("{}/repos/29/pipeline/42", server.uri()),
+                )
+                .await;
+            assert!(matches!(response, CiResolution::Error { .. }));
+        }
+        assert!(
+            server
+                .received_requests()
+                .await
+                .expect("requests")
+                .iter()
+                .all(|r| !r.url.path().contains("logs"))
+        );
+    }
+    #[tokio::test]
+    async fn historical_selection_failures_are_typed_and_suppress_enrichment() {
+        for (status, code) in [
+            (401, "authorization_denied"),
+            (403, "authorization_denied"),
+            (404, "resource_not_found"),
+            (429, "unavailable"),
+            (503, "unavailable"),
+        ] {
+            let server = MockServer::start().await;
+            mount(&server, "/api/repos/29", fixture("repo")).await;
+            Mock::given(path("/api/repos/29/pipelines/42"))
+                .respond_with(ResponseTemplate::new(status).set_body_string("SENTINEL"))
+                .mount(&server)
+                .await;
+            let response = resolver(&server, None, Limits::default())
+                .historical(&repository(), selector())
+                .await;
+            let json = serde_json::to_value(response).expect("json");
+            assert_eq!(json["outcome"]["type"], "selection_diagnostic");
+            assert_eq!(json["outcome"]["diagnostic"]["code"], code);
+            assert_eq!(json["outcome"]["diagnostic"]["http_status"], status);
+            assert!(!json.to_string().contains("SENTINEL"));
+            assert_eq!(server.received_requests().await.expect("requests").len(), 2);
+        }
+    }
+    #[tokio::test]
+    async fn historical_source_binding_and_complete_envelope_limits() {
+        for mutation in 0..7 {
+            let server = MockServer::start().await;
+            let mut repo = fixture("repo");
+            let mut p = fixture("pipeline");
+            match mutation {
+                0 => repo["forge_url"] = "https://other.invalid/fixture-owner/fixture-repo".into(),
+                1 => p["number"] = 43.into(),
+                2 => p["commit"] = "".into(),
+                3 => p["commit"] = "終".repeat(5000).into(),
+                4 => {
+                    p["ref"] = serde_json::Value::Null;
+                    p["status"] = serde_json::Value::Null;
+                }
+                5 => p["ref"] = "終".repeat(5000).into(),
+                _ => p["workflows"][0]["name"] = "終".repeat(5000).into(),
+            }
+            mount(&server, "/api/repos/29", repo).await;
+            mount(&server, "/api/repos/29/pipelines/42", p).await;
+            mount(&server, "/api/repos/29/logs/42/7001", fixture("passing")).await;
+            let limits = Limits {
+                output_bytes: 2400,
+                ..Limits::default()
+            };
+            let response = resolver(&server, None, limits)
+                .historical(&repository(), selector())
+                .await;
+            let json = serde_json::to_value(response).expect("json");
+            assert!(serde_json::to_vec(&json).expect("json").len() <= limits.output_bytes);
+            if mutation < 4 {
+                assert_eq!(json["outcome"]["type"], "selection_diagnostic");
+                assert!(
+                    server
+                        .received_requests()
+                        .await
+                        .expect("requests")
+                        .iter()
+                        .all(|r| !r.url.path().contains("logs"))
+                );
+            } else {
+                assert_eq!(json["outcome"]["type"], "selected");
+                assert!(json.to_string().contains(if mutation == 6 {
+                    "limit_exceeded"
+                } else {
+                    "malformed_response"
+                }));
+            }
+        }
+    }
+
     #[tokio::test]
     async fn exit_255_partial_evidence_secrets_and_request_local_reuse() {
         let server = MockServer::start().await;

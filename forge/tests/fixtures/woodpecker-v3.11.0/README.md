@@ -70,3 +70,9 @@ valid output with invalid base64 so an error must not erase the valid evidence.
 A 404 on the agent lookup is resource-not-found, not proof that the agent API
 is unsupported. The absence of historical termination evidence follows from
 this pinned contract; it should be reported separately as `not_exposed`.
+
+Historical selection also decodes the pinned pipeline model's `commit` and
+`ref` JSON fields (Go `Commit` and `Ref`). These fields are already present
+in the synthetic pipeline fixtures. They describe the selected run's source,
+independently of current PR metadata. The public historical envelope calls
+the latter `reference`; no repository ID field is invented in pipeline JSON.

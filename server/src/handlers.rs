@@ -26,14 +26,13 @@ use domain::{
 use crate::api::AgentEventsQuery;
 use crate::api::{
     AddIssueDependencyBody, AddIssueLabelBody, BranchDetailsResult, BranchItem,
-    ChangeRequestCiDetailsResult, CiCheckDetailResult, CiFailureStepResult, CiLogExcerptResult,
-    CiProviderResult, CiResolutionResult, CommentBody, CommentOnIssueBody, CommitPatchBody,
-    CommitPatchResult, ContentsPath, ContentsQuery, ContentsResult, CreateIssueBody, ErrorBody,
-    ForgePath, GetBranchQuery, IssueDependencyPath, IssueLabelPath, IssuePath, ListBranchesQuery,
-    ListBranchesResponse as ApiListBranchesResponse, ListIssuesQuery, ListPullsQuery,
-    ListRepositoriesQuery, OpenPullBody, PullPath, RebaseBranchBody, RebaseBranchResult,
-    RebaseOperationBody, RemoveIssueDependencyQuery, RepoPath, ScheduleAutoMergeBody,
-    SubmitReviewBody, UpdateChangeRequestBody, UpdateIssueBody,
+    ChangeRequestCiDetailsResult, CiCheckDetailResult, CommentBody, CommentOnIssueBody,
+    CommitPatchBody, CommitPatchResult, ContentsPath, ContentsQuery, ContentsResult,
+    CreateIssueBody, ErrorBody, ForgePath, GetBranchQuery, IssueDependencyPath, IssueLabelPath,
+    IssuePath, ListBranchesQuery, ListBranchesResponse as ApiListBranchesResponse, ListIssuesQuery,
+    ListPullsQuery, ListRepositoriesQuery, OpenPullBody, PullPath, RebaseBranchBody,
+    RebaseBranchResult, RebaseOperationBody, RemoveIssueDependencyQuery, RepoPath,
+    ScheduleAutoMergeBody, SubmitReviewBody, UpdateChangeRequestBody, UpdateIssueBody,
 };
 use crate::auth::{AgentRegistry, extract_bearer_token};
 use tokio_stream::StreamExt;
@@ -747,36 +746,7 @@ pub async fn get_pull_ci_details(
                 description: d.description,
                 state: format!("{:?}", d.state).to_lowercase(),
                 target_url: d.target_url,
-                resolution: match d.resolution {
-                    domain::CiResolution::Unsupported => CiResolutionResult::Unsupported,
-                    domain::CiResolution::Error { message } => {
-                        CiResolutionResult::Error { message }
-                    }
-                    domain::CiResolution::Resolved {
-                        woodpecker,
-                        provider,
-                        pipeline_url,
-                        failed_steps,
-                    } => CiResolutionResult::Resolved {
-                        woodpecker: woodpecker.map(|e| Box::new((*e).into())),
-                        provider: match provider {
-                            domain::CiProvider::GithubActions => CiProviderResult::GithubActions,
-                            domain::CiProvider::Woodpecker => CiProviderResult::Woodpecker,
-                        },
-                        pipeline_url,
-                        failed_steps: failed_steps
-                            .into_iter()
-                            .map(|s| CiFailureStepResult {
-                                woodpecker: s.woodpecker.map(Into::into),
-                                name: s.name,
-                                state: s.state,
-                                log_excerpt: s
-                                    .log_excerpt
-                                    .map(|l| CiLogExcerptResult { lines: l.lines }),
-                            })
-                            .collect(),
-                    },
-                },
+                resolution: d.resolution.into(),
             })
             .collect(),
     };
@@ -3946,6 +3916,28 @@ mod tests {
         ) -> Result<domain::CombinedCommitStatus, ServiceError> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Err(ServiceError::Upstream("unimplemented in test fake".into()))
+        }
+
+        async fn get_repository_ci_details(
+            &self,
+            request: domain::GetRepositoryCiDetailsRequest,
+            _: &domain::ForgeCredential,
+        ) -> Result<domain::RepositoryCiDetails, ServiceError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(domain::RepositoryCiDetails {
+                evidence_kind: domain::CiEvidenceKind::Historical,
+                selector: request.selector,
+                outcome: domain::HistoricalCiOutcome::Selected {
+                    commit: "historical-source".into(),
+                    reference: Some("refs/heads/old".into()),
+                    evidence: Box::new(domain::CiResolution::Resolved {
+                        provider: domain::CiProvider::Woodpecker,
+                        pipeline_url: "https://ci.invalid/repos/29/pipeline/248".into(),
+                        failed_steps: vec![],
+                        woodpecker: None,
+                    }),
+                },
+            })
         }
 
         async fn get_change_request_ci_details(
@@ -7763,6 +7755,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn historical_route_authorizes_and_validates_selectors() {
+        for (token, number, allowed, expected) in [
+            ("invalid", "248", true, StatusCode::UNAUTHORIZED),
+            ("test-token", "0", true, StatusCode::BAD_REQUEST),
+            (
+                "test-token",
+                "9223372036854775808",
+                true,
+                StatusCode::BAD_REQUEST,
+            ),
+            ("test-token", "248", false, StatusCode::FORBIDDEN),
+            ("test-token", "248", true, StatusCode::OK),
+        ] {
+            let read = Arc::new(FakeReadService::new());
+            let permissions = if allowed {
+                vec!["test-forge/org/repo".into()]
+            } else {
+                vec![]
+            };
+            let app = crate::build_router(
+                test_state_with_read(read.clone(), permissions, Arc::new(FakeWriteService::new())),
+                false,
+            );
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/api/v1/repos/test-forge/org/repo/ci/woodpecker/29/pipelines/{number}"
+                        ))
+                        .header("authorization", format!("Bearer {token}"))
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(response.status(), expected);
+            assert_eq!(
+                read.calls.load(std::sync::atomic::Ordering::SeqCst),
+                usize::from(expected == StatusCode::OK)
+            );
+            if expected == StatusCode::OK {
+                let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .expect("body");
+                let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+                assert_eq!(json["evidence_kind"], "historical");
+                assert_eq!(json["selector"]["pipeline_number"], 248);
+                assert_eq!(json["outcome"]["commit"], "historical-source");
+                assert_eq!(json["outcome"]["reference"], "refs/heads/old");
+            }
+        }
+    }
+
+    #[tokio::test]
     #[allow(clippy::too_many_lines)] // Full evidence fixture and both authorization paths.
     async fn ci_details_preserve_woodpecker_envelope_and_deny_before_service() {
         let timestamps = domain::CiTimestamps {
@@ -8460,3 +8506,66 @@ mod tests {
 #[cfg(test)]
 #[path = "change_request_terminal_webhooks.rs"]
 mod change_request_terminal_webhooks;
+
+#[derive(serde::Deserialize)]
+pub struct HistoricalCiPath {
+    forge: String,
+    owner: String,
+    repo: String,
+    provider_repository_id: u64,
+    pipeline_number: u64,
+}
+/// Retrieve exactly one historical Woodpecker pipeline after repository authorization.
+#[utoipa::path(
+    get,
+    path = "/api/v1/repos/{forge}/{owner}/{repo}/ci/woodpecker/{provider_repository_id}/pipelines/{pipeline_number}",
+    params(
+        ("forge" = String, Path), ("owner" = String, Path), ("repo" = String, Path),
+        ("provider_repository_id" = u64, Path), ("pipeline_number" = u64, Path),
+    ),
+    responses(
+        (status = 200, body = crate::api::RepositoryCiDetailsResult),
+        (status = 400, body = ErrorBody),
+        (status = 401, body = ErrorBody),
+    ),
+    security(("bearer" = []))
+)]
+pub async fn get_repository_ci_details(
+    State(state): State<AppState>,
+    Path(path): Path<HistoricalCiPath>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let forge = resolve_forge(&state.forge_registry, &path.forge)?;
+    let agent = resolve_agent(
+        &headers,
+        &state.agent_registry,
+        &path.forge,
+        &path.owner,
+        &path.repo,
+    )?;
+    let selector = domain::HistoricalCiSelector {
+        provider: "woodpecker".into(),
+        provider_repository_id: path.provider_repository_id,
+        pipeline_number: path.pipeline_number,
+    };
+    if !selector.valid() {
+        return Err(map_service_error(domain::ServiceError::Validation(
+            "Historical CI selectors must be positive signed 64-bit integers".into(),
+        )));
+    }
+    let result = forge
+        .read_service
+        .get_repository_ci_details(
+            domain::GetRepositoryCiDetailsRequest {
+                agent: agent.identity.clone(),
+                repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
+                selector,
+            },
+            &resolve_credential(agent, &path.forge, forge),
+        )
+        .await
+        .map_err(map_service_error)?;
+    Ok::<_, (StatusCode, Json<ErrorBody>)>(Json(crate::api::RepositoryCiDetailsResult::from(
+        result,
+    )))
+}

@@ -771,10 +771,110 @@ mod ci_evidence_contract_tests {
             "WoodpeckerRunnerEvidenceResult",
             "CiDiagnosticResult",
             "CiDiagnosticCodeResult",
+            "RepositoryCiDetailsResult",
+            "HistoricalCiSelectorResult",
+            "HistoricalCiOutcomeResult",
+            "HistoricalEvidenceKindResult",
             "CiDiagnosticComponentResult",
             "CiTimestampsResult",
         ] {
             assert!(schemas.get(name).is_some(), "missing schema {name}");
+        }
+    }
+}
+
+impl From<domain::CiResolution> for CiResolutionResult {
+    fn from(value: domain::CiResolution) -> Self {
+        match value {
+            domain::CiResolution::Unsupported => CiResolutionResult::Unsupported,
+            domain::CiResolution::Error { message } => CiResolutionResult::Error { message },
+            domain::CiResolution::Resolved {
+                woodpecker,
+                provider,
+                pipeline_url,
+                failed_steps,
+            } => CiResolutionResult::Resolved {
+                woodpecker: woodpecker.map(|e| Box::new((*e).into())),
+                provider: match provider {
+                    domain::CiProvider::GithubActions => CiProviderResult::GithubActions,
+                    domain::CiProvider::Woodpecker => CiProviderResult::Woodpecker,
+                },
+                pipeline_url,
+                failed_steps: failed_steps
+                    .into_iter()
+                    .map(|s| CiFailureStepResult {
+                        woodpecker: s.woodpecker.map(Into::into),
+                        name: s.name,
+                        state: s.state,
+                        log_excerpt: s.log_excerpt.map(|l| CiLogExcerptResult { lines: l.lines }),
+                    })
+                    .collect(),
+            },
+        }
+    }
+}
+
+/// Explicit historical lookup, independent of current checks and merge qualification.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct RepositoryCiDetailsResult {
+    pub evidence_kind: HistoricalEvidenceKindResult,
+    pub selector: HistoricalCiSelectorResult,
+    pub outcome: HistoricalCiOutcomeResult,
+}
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoricalEvidenceKindResult {
+    Historical,
+}
+#[derive(Debug, Serialize, ToSchema)]
+pub struct HistoricalCiSelectorResult {
+    pub provider: String,
+    pub provider_repository_id: u64,
+    pub pipeline_number: u64,
+}
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum HistoricalCiOutcomeResult {
+    Unsupported {
+        message: String,
+    },
+    SelectionDiagnostic {
+        diagnostic: CiDiagnosticResult,
+    },
+    Selected {
+        commit: String,
+        reference: Option<String>,
+        evidence: Box<CiResolutionResult>,
+    },
+}
+impl From<domain::RepositoryCiDetails> for RepositoryCiDetailsResult {
+    fn from(value: domain::RepositoryCiDetails) -> Self {
+        Self {
+            evidence_kind: HistoricalEvidenceKindResult::Historical,
+            selector: HistoricalCiSelectorResult {
+                provider: value.selector.provider,
+                provider_repository_id: value.selector.provider_repository_id,
+                pipeline_number: value.selector.pipeline_number,
+            },
+            outcome: match value.outcome {
+                domain::HistoricalCiOutcome::Unsupported { message } => {
+                    HistoricalCiOutcomeResult::Unsupported { message }
+                }
+                domain::HistoricalCiOutcome::SelectionDiagnostic { diagnostic } => {
+                    HistoricalCiOutcomeResult::SelectionDiagnostic {
+                        diagnostic: diagnostic.into(),
+                    }
+                }
+                domain::HistoricalCiOutcome::Selected {
+                    commit,
+                    reference,
+                    evidence,
+                } => HistoricalCiOutcomeResult::Selected {
+                    commit,
+                    reference,
+                    evidence: Box::new((*evidence).into()),
+                },
+            },
         }
     }
 }

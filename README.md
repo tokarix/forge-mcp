@@ -1237,3 +1237,58 @@ Configured secrets are redacted before text is truncated at UTF-8 boundaries.
 `limit_exceeded` explicitly marks incomplete evidence; validated metadata is
 retained where space permits. GitHub Actions responses omit these optional
 Woodpecker fields.
+
+### Historical CI evidence after a retry
+
+Use `get_repository_ci_details` to explicitly select a retained Woodpecker
+run independently of a PR's current head or latest check. For example, after
+failed pipeline 248 is replaced by pending pipeline 249:
+
+```json
+{"forge":"adlevio","owner":"tokarix","repo":"forge-mcp","provider":"woodpecker",
+ "provider_repository_id":29,"pipeline_number":248}
+```
+
+The equivalent route is
+`GET /api/v1/repos/adlevio/tokarix/forge-mcp/ci/woodpecker/29/pipelines/248`.
+The repository ID is a verified lookup hint; pipeline number 248 is scoped to
+that repository and differs from the pipeline database ID.
+
+The response has `evidence_kind: "historical"`, the requested `selector`, and
+a typed `outcome`. A `selected` outcome includes the actual `commit` and
+`reference` (for example `refs/heads/topic`), and `evidence` containing the
+canonical configured-origin pipeline URL, actual pipeline ID/number/state,
+workflows and available failed-step log excerpts. The commit is never labelled
+`head_sha`. Missing ref/state is unknown with a `malformed_response`
+diagnostic; an unusable commit prevents selection. Successful and pending
+selected runs retain their actual state without fabricated failed steps.
+
+For example, selected evidence can contain this source identity and partial
+excerpt (other evidence fields omitted):
+
+```json
+{"evidence_kind":"historical",
+ "selector":{"provider":"woodpecker","provider_repository_id":29,"pipeline_number":248},
+ "outcome":{"type":"selected",
+   "commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","reference":"refs/heads/topic",
+   "evidence":{"type":"resolved","provider":"woodpecker",
+     "pipeline_url":"https://ci.example/repos/29/pipeline/248",
+     "woodpecker":{"repository_id":29,"id":9001,"number":248,"status":"failure"},
+     "failed_steps":[{"name":"verify","state":"failure",
+       "log_excerpt":{"lines":["valid preceding output"]}}]}}}
+```
+
+Valid sibling excerpts survive missing, malformed or denied logs and runners.
+Selection failures use `selection_diagnostic` with `resource_not_found`
+(404), `authorization_denied` (401/403), `unavailable` (timeouts, 429, 5xx),
+`malformed_response`, `binding_mismatch` or `limit_exceeded`. A provider
+404 reports the observed result and cannot distinguish a missing run from a
+hidden private resource. An unconfigured provider returns `unsupported`;
+credential-required enrichment reports `credential_missing`.
+
+Historical lookup is diagnostic even if the chosen run is newest. It does not
+qualify current CI or merge eligibility; use the existing current-head tools
+for those decisions. Evidence is bounded and redacted, with explicit partial
+diagnostics. This retrieves evidence still retained upstream, not durable log
+archival, and cannot reconstruct deleted runs or logs. Current runner metadata
+cannot explain historical termination.

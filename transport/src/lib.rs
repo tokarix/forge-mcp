@@ -314,6 +314,22 @@ pub struct GetChangeRequestChecksTool {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct GetRepositoryCiDetailsTool {
+    /// Forge alias.
+    pub forge: String,
+    /// Repository owner.
+    pub owner: String,
+    /// Repository name.
+    pub repo: String,
+    /// Initially only woodpecker is supported.
+    pub provider: String,
+    /// Positive provider repository database ID, verified against repository access.
+    pub provider_repository_id: u64,
+    /// Positive repository-scoped run number, distinct from pipeline database ID.
+    pub pipeline_number: u64,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct GetChangeRequestCiDetailsTool {
     /// Forge alias -- use `forge_info` to discover available aliases.
     pub forge: String,
@@ -1988,6 +2004,52 @@ impl McpShim {
                 "pulls",
                 &request.index.to_string(),
                 "checks",
+            ],
+        )?;
+        self.gateway_get(url, &gw.token).await
+    }
+
+    /// Explicit repository-scoped historical diagnostic lookup.
+    #[tool(
+        input_schema = schema_for_type::<GetRepositoryCiDetailsTool>(),
+        name = "get_repository_ci_details",
+        description = "Retrieve one explicitly selected historical Woodpecker pipeline, using provider_repository_id (repository database ID) and pipeline_number (repository-scoped run number). Returns actual commit/ref, state and bounded partial evidence still retained upstream. Historical evidence never qualifies current PR CI or merge eligibility, even when selecting the newest run."
+    )]
+    async fn get_repository_ci_details(
+        &self,
+        Parameters(request): Parameters<GetRepositoryCiDetailsTool>,
+    ) -> Result<String, McpError> {
+        if request.provider != "woodpecker" {
+            return Err(McpError::invalid_params(
+                "Unsupported historical CI provider",
+                None,
+            ));
+        }
+        if request.provider_repository_id == 0
+            || request.pipeline_number == 0
+            || i64::try_from(request.provider_repository_id).is_err()
+            || i64::try_from(request.pipeline_number).is_err()
+        {
+            return Err(McpError::invalid_params(
+                "Historical selectors must be positive signed 64-bit integers",
+                None,
+            ));
+        }
+        let gw = self.resolve_gateway(&request.forge).await?;
+        let url = Self::build_url(
+            &gw.url,
+            &[
+                "api",
+                "v1",
+                "repos",
+                &request.forge,
+                &request.owner,
+                &request.repo,
+                "ci",
+                "woodpecker",
+                &request.provider_repository_id.to_string(),
+                "pipelines",
+                &request.pipeline_number.to_string(),
             ],
         )?;
         self.gateway_get(url, &gw.token).await
@@ -7519,6 +7581,55 @@ mod tests {
         let gw = shim.resolve_gateway("alpha").await?;
         assert_eq!(gw.name, "gw-b");
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn historical_tool_passes_selected_identity_and_rejects_invalid_inputs()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mock = wiremock::MockServer::start().await;
+        let expected = serde_json::json!({
+            "evidence_kind":"historical",
+            "selector":{"provider":"woodpecker","provider_repository_id":29,"pipeline_number":248},
+            "outcome":{"type":"selected","commit":"old-commit","reference":"refs/heads/old",
+                "evidence":{"type":"resolved","provider":"woodpecker","pipeline_url":"https://ci.invalid/repos/29/pipeline/248","failed_steps":[]}}
+        });
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(
+                "/api/v1/repos/adlevio/tokarix/forge-mcp/ci/woodpecker/29/pipelines/248",
+            ))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(&expected))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        let shim = McpShim::new(test_config(&mock.uri()));
+        let mut request = serde_json::json!({"forge":"adlevio","owner":"tokarix","repo":"forge-mcp",
+            "provider":"woodpecker","provider_repository_id":29,"pipeline_number":248});
+        let result = shim
+            .get_repository_ci_details(Parameters(serde_json::from_value(request.clone())?))
+            .await?;
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&result)?,
+            expected
+        );
+        for (field, value) in [
+            ("provider", serde_json::json!("other")),
+            ("pipeline_number", serde_json::json!(0)),
+            ("provider_repository_id", serde_json::json!(u64::MAX)),
+        ] {
+            let original = request[field].clone();
+            request[field] = value;
+            assert!(
+                shim.get_repository_ci_details(Parameters(serde_json::from_value(
+                    request.clone()
+                )?))
+                .await
+                .is_err()
+            );
+            request[field] = original;
+        }
+        let schema = schema_for_type::<GetRepositoryCiDetailsTool>();
+        assert!(schema["properties"].get("pipeline_number").is_some());
         Ok(())
     }
 

@@ -146,6 +146,7 @@ async fn baseline_initialization_and_catalog() {
         // SDK baseline intact for every other tool. Its new contract is tested
         // separately below through tools/list and tools/call.
         // Issue #261 adds an inline read, covered by its own schema/session tests.
+        // Issue #266 adds historical CI, with separate schema/session coverage.
         for frame in [&mut catalog, &mut expected] {
             frame["result"]["tools"]
                 .as_array_mut()
@@ -153,6 +154,7 @@ async fn baseline_initialization_and_catalog() {
                 .retain(|tool| {
                     tool["name"] != "list_change_requests"
                         && tool["name"] != "get_change_request_inline_comments"
+                        && tool["name"] != "get_repository_ci_details"
                 });
         }
         assert_eq!(catalog, expected);
@@ -702,5 +704,73 @@ async fn pull_listing_schema_and_all_forwarding() {
             .await;
         assert_error(&result, -32602);
     }
+    wire.finish(true).await;
+}
+
+#[tokio::test]
+async fn historical_ci_schema_and_session_preserve_source_identity() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/agent/info"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"forges":[{"alias":"fixture","type":"forgejo"}]})),
+        )
+        .mount(&server)
+        .await;
+    let expected = json!({"evidence_kind":"historical",
+        "selector":{"provider":"woodpecker","provider_repository_id":29,"pipeline_number":248},
+        "outcome":{"type":"selected","commit":"old-source","reference":"refs/heads/old",
+            "evidence":{"type":"resolved","provider":"woodpecker","pipeline_url":"https://ci.invalid/repos/29/pipeline/248","failed_steps":[]}}});
+    Mock::given(method("GET"))
+        .and(path(
+            "/api/v1/repos/fixture/o/r/ci/woodpecker/29/pipelines/248",
+        ))
+        .and(header("authorization", "Bearer synthetic-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&expected))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let mut wire = Wire::new(config(&server.uri()));
+    wire.initialize("2025-06-18").await;
+    let catalog = wire.request("tools/list", json!({})).await;
+    let tool = catalog["result"]["tools"]
+        .as_array()
+        .expect("tools")
+        .iter()
+        .find(|tool| tool["name"] == "get_repository_ci_details")
+        .expect("tool");
+    for field in [
+        "forge",
+        "owner",
+        "repo",
+        "provider",
+        "provider_repository_id",
+        "pipeline_number",
+    ] {
+        assert!(tool["inputSchema"]["properties"].get(field).is_some());
+        assert!(
+            tool["inputSchema"]["required"]
+                .as_array()
+                .expect("required")
+                .contains(&json!(field))
+        );
+    }
+    let result = wire
+        .request(
+            "tools/call",
+            json!({"name":"get_repository_ci_details",
+        "arguments":{"forge":"fixture","owner":"o","repo":"r","provider":"woodpecker",
+        "provider_repository_id":29,"pipeline_number":248}}),
+        )
+        .await;
+    assert_eq!(result["result"]["isError"], false);
+    let actual: Value = serde_json::from_str(
+        result["result"]["content"][0]["text"]
+            .as_str()
+            .expect("text"),
+    )
+    .expect("json");
+    assert_eq!(actual, expected);
     wire.finish(true).await;
 }

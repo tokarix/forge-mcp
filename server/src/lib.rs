@@ -38,6 +38,7 @@ use utoipa_scalar::{Scalar, Servable};
         handlers::list_branches,
         handlers::get_pull_checks,
         handlers::get_pull_ci_details,
+        handlers::get_repository_ci_details,
         handlers::get_pull_comments,
         handlers::get_pull_reviews,
         handlers::get_pull_inline_comments,
@@ -60,6 +61,10 @@ use utoipa_scalar::{Scalar, Servable};
     components(schemas(
         api::AddIssueDependencyBody,
         api::AddIssueLabelBody,
+        api::RepositoryCiDetailsResult,
+        api::HistoricalEvidenceKindResult,
+        api::HistoricalCiSelectorResult,
+        api::HistoricalCiOutcomeResult,
         api::ChangeRequestCiDetailsResult,
         api::CiCheckDetailResult,
         api::CiResolutionResult,
@@ -211,6 +216,10 @@ pub fn build_router_with_diagnostics(
         .route(
             "/api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}/ci-details",
             get(handlers::get_pull_ci_details),
+        )
+        .route(
+            "/api/v1/repos/{forge}/{owner}/{repo}/ci/woodpecker/{provider_repository_id}/pipelines/{pipeline_number}",
+            get(handlers::get_repository_ci_details),
         )
         .route(
             "/api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}/comments",

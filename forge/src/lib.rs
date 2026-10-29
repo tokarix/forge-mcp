@@ -731,6 +731,16 @@ pub trait ForgeAdapter: Send + Sync {
         credential: &ForgeCredential,
     ) -> Result<domain::CombinedCommitStatus, ForgeError>;
 
+    /// Retrieve one repository-bound historical run without fetching PR state.
+    async fn get_repository_ci_details(
+        &self,
+        _repository: &RepositoryRef,
+        selector: domain::HistoricalCiSelector,
+        _credential: &ForgeCredential,
+    ) -> Result<domain::RepositoryCiDetails, ForgeError> {
+        Ok(domain::RepositoryCiDetails::unsupported(selector))
+    }
+
     /// Returns detailed CI information for the given commit SHA.
     async fn get_change_request_ci_details(
         &self,
@@ -2263,6 +2273,29 @@ impl ForgeAdapter for ForgejoAdapter {
             statuses,
             total_count: combined.total_count,
         })
+    }
+
+    async fn get_repository_ci_details(
+        &self,
+        repository: &RepositoryRef,
+        selector: domain::HistoricalCiSelector,
+        _credential: &ForgeCredential,
+    ) -> Result<domain::RepositoryCiDetails, ForgeError> {
+        if selector.provider != "woodpecker" {
+            return Ok(domain::RepositoryCiDetails::unsupported(selector));
+        }
+        if !selector.valid() {
+            return Err(ForgeError::InvalidPayload(
+                "Historical CI selectors must be positive signed 64-bit integers".into(),
+            ));
+        }
+        let result =
+            match woodpecker_resolver::Resolver::new(&self.config, woodpecker::Limits::default()) {
+                Ok(Some(mut resolver)) => resolver.historical(repository, selector).await,
+                Ok(None) => domain::RepositoryCiDetails::unsupported(selector),
+                Err(failure) => woodpecker_resolver::selection_failure(selector, &failure),
+            };
+        Ok(result)
     }
 
     async fn get_change_request_ci_details(
