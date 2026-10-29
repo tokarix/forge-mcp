@@ -35,6 +35,8 @@ pub struct Limits {
     pub output_bytes: usize,
     /// Maximum log entries retained for each step.
     pub excerpt_entries: usize,
+    /// Maximum UTF-8 bytes in a metadata string.
+    pub string_bytes: usize,
     /// Maximum UTF-8 bytes in one excerpt.
     pub excerpt_bytes: usize,
 }
@@ -53,6 +55,7 @@ impl Default for Limits {
             output_bytes: 256 * 1024,
             excerpt_entries: 20,
             excerpt_bytes: 8 * 1024,
+            string_bytes: 1024,
         }
     }
 }
@@ -124,6 +127,21 @@ impl Origin {
             base.set_path(&format!("{}/", base.path()));
         }
         Ok(Self(base))
+    }
+
+    pub(crate) fn matches_origin(&self, target: &str) -> bool {
+        Url::parse(target).is_ok_and(|url| url.origin() == self.0.origin())
+    }
+
+    /// Construct a canonical UI URL from validated numeric identity.
+    ///
+    /// # Errors
+    /// Returns a binding failure if the configured base cannot be joined.
+    pub fn pipeline_url(&self, repo: u64, number: u64) -> Result<String, Failure> {
+        self.0
+            .join(&format!("repos/{repo}/pipeline/{number}"))
+            .map(String::from)
+            .map_err(|_| binding_failure())
     }
 
     /// Parse an exact pipeline UI URL without trusting it as an API destination.

@@ -1997,7 +1997,7 @@ impl McpShim {
     #[tool(
         input_schema = schema_for_type::<GetChangeRequestCiDetailsTool>(),
         name = "get_change_request_ci_details",
-        description = "Get the detailed CI/check status for a change request (pull request). Returns the aggregate state (success, pending, failure, error) and detailed per-check information for the current PR head SHA."
+        description = "Get the detailed CI/check status for a change request (pull request). Returns the aggregate state (success, pending, failure, error) and detailed per-check information for the current PR head SHA, including bounded Woodpecker pipeline, workflow, step, runner and partial-log evidence when available. A resolved diagnostic does not mean CI passed; component diagnostics describe missing evidence and limits."
     )]
     async fn get_change_request_ci_details(
         &self,

@@ -3708,6 +3708,7 @@ mod tests {
     }
 
     struct FakeReadService {
+        ci_details: Option<domain::ChangeRequestCiDetails>,
         calls: std::sync::atomic::AtomicUsize,
         issue_dependencies: Arc<Mutex<Option<Result<domain::IssueDependencies, ServiceError>>>>,
         list_branches: Arc<Mutex<Option<ListBranchesResponse>>>,
@@ -3720,6 +3721,7 @@ mod tests {
         fn new() -> Self {
             Self {
                 calls: std::sync::atomic::AtomicUsize::new(0),
+                ci_details: None,
                 issue_dependencies: Arc::new(Mutex::new(None)),
                 list_branches: Arc::new(Mutex::new(None)),
                 get_branch: Arc::new(Mutex::new(None)),
@@ -3731,6 +3733,7 @@ mod tests {
         fn with_list_branches(resp: ListBranchesResponse) -> Arc<Self> {
             let svc = Self {
                 calls: std::sync::atomic::AtomicUsize::new(0),
+                ci_details: None,
                 issue_dependencies: Arc::new(Mutex::new(None)),
                 list_branches: Arc::new(Mutex::new(Some(resp))),
                 get_branch: Arc::new(Mutex::new(None)),
@@ -3743,6 +3746,7 @@ mod tests {
         fn with_get_branch(resp: BranchDetails) -> Arc<Self> {
             let svc = Self {
                 calls: std::sync::atomic::AtomicUsize::new(0),
+                ci_details: None,
                 issue_dependencies: Arc::new(Mutex::new(None)),
                 list_branches: Arc::new(Mutex::new(None)),
                 get_branch: Arc::new(Mutex::new(Some(resp))),
@@ -3755,6 +3759,7 @@ mod tests {
         fn with_get_change_request(resp: ChangeRequest) -> Arc<Self> {
             let svc = Self {
                 calls: std::sync::atomic::AtomicUsize::new(0),
+                ci_details: None,
                 issue_dependencies: Arc::new(Mutex::new(None)),
                 list_branches: Arc::new(Mutex::new(None)),
                 get_branch: Arc::new(Mutex::new(None)),
@@ -3767,6 +3772,7 @@ mod tests {
         fn with_list_change_requests(resp: Vec<ChangeRequest>) -> Arc<Self> {
             let svc = Self {
                 calls: std::sync::atomic::AtomicUsize::new(0),
+                ci_details: None,
                 issue_dependencies: Arc::new(Mutex::new(None)),
                 list_branches: Arc::new(Mutex::new(None)),
                 get_branch: Arc::new(Mutex::new(None)),
@@ -3781,6 +3787,7 @@ mod tests {
         ) -> Arc<Self> {
             Arc::new(Self {
                 calls: std::sync::atomic::AtomicUsize::new(0),
+                ci_details: None,
                 issue_dependencies: Arc::new(Mutex::new(Some(result))),
                 list_branches: Arc::new(Mutex::new(None)),
                 get_branch: Arc::new(Mutex::new(None)),
@@ -3947,6 +3954,9 @@ mod tests {
             _cred: &domain::ForgeCredential,
         ) -> Result<domain::ChangeRequestCiDetails, domain::ServiceError> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if let Some(details) = &self.ci_details {
+                return Ok(details.clone());
+            }
             Ok(domain::ChangeRequestCiDetails {
                 head_sha: "abc123".to_string(),
                 state: domain::CommitStatusState::Failure,
@@ -7750,6 +7760,113 @@ mod tests {
                 .expect("error field is a string")
                 .contains("message is required"),
         );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // Full evidence fixture and both authorization paths.
+    async fn ci_details_preserve_woodpecker_envelope_and_deny_before_service() {
+        let timestamps = domain::CiTimestamps {
+            created: None,
+            updated: None,
+            started: Some(0),
+            finished: None,
+        };
+        let evidence = domain::WoodpeckerPipelineEvidence {
+            repository_id: 29,
+            id: 5001,
+            number: 42,
+            status: Some("failure".into()),
+            errors: vec!["workflow error".into()],
+            timestamps: timestamps.clone(),
+            workflows: vec![domain::WoodpeckerWorkflowEvidence {
+                id: 6001,
+                name: Some("checks".into()),
+                state: Some("failure".into()),
+                error: Some("provider error".into()),
+                runner_id: Some(17),
+                timestamps: timestamps.clone(),
+            }],
+            runners: vec![],
+            diagnostics: vec![domain::CiDiagnostic {
+                component: domain::CiDiagnosticComponent::Runner,
+                code: domain::CiDiagnosticCode::AuthorizationDenied,
+                message: "Woodpecker request did not succeed".into(),
+                http_status: Some(403),
+                pipeline_id: Some(5001),
+                workflow_id: Some(6001),
+                step_id: None,
+                runner_id: Some(17),
+            }],
+        };
+        let step = domain::WoodpeckerStepEvidence {
+            workflow_id: 6001,
+            id: 7001,
+            uuid: Some("uuid".into()),
+            exit_code: Some(255),
+            error: None,
+            timestamps,
+            diagnostics: vec![],
+        };
+        let expected = serde_json::to_value(&evidence).expect("evidence");
+        let mut read = FakeReadService::new();
+        read.ci_details = Some(domain::ChangeRequestCiDetails {
+            head_sha: "abc123".into(),
+            state: domain::CommitStatusState::Failure,
+            details: vec![domain::CiCheckDetail {
+                context: "ci/woodpecker".into(),
+                description: "failed".into(),
+                state: domain::CommitStatusState::Failure,
+                target_url: "https://ci.example/repos/29/pipeline/42".into(),
+                resolution: domain::CiResolution::Resolved {
+                    provider: domain::CiProvider::Woodpecker,
+                    pipeline_url: "https://ci.example/repos/29/pipeline/42".into(),
+                    woodpecker: Some(Box::new(evidence)),
+                    failed_steps: vec![domain::CiFailureStep {
+                        name: "verify".into(),
+                        state: "failure".into(),
+                        log_excerpt: None,
+                        woodpecker: Some(step),
+                    }],
+                },
+            }],
+        });
+        let read = Arc::new(read);
+        for (allowed, status) in [(false, StatusCode::FORBIDDEN), (true, StatusCode::OK)] {
+            let permissions = if allowed {
+                vec!["test-forge/org/repo".to_owned()]
+            } else {
+                vec![]
+            };
+            let app = crate::build_router(
+                test_state_with_read(read.clone(), permissions, Arc::new(FakeWriteService::new())),
+                false,
+            );
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/v1/repos/test-forge/org/repo/pulls/1/ci-details")
+                        .header("authorization", "Bearer test-token")
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(response.status(), status);
+            if allowed {
+                let bytes = axum::body::to_bytes(response.into_body(), 65536)
+                    .await
+                    .expect("body");
+                let body: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON");
+                assert_eq!(body["state"], "failure");
+                assert_eq!(body["details"][0]["resolution"]["woodpecker"], expected);
+                assert_eq!(
+                    body["details"][0]["resolution"]["failed_steps"][0]["woodpecker"]["exit_code"],
+                    255
+                );
+            } else {
+                assert_eq!(read.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+            }
+        }
     }
 
     #[tokio::test]

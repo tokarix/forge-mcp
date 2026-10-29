@@ -1153,3 +1153,87 @@ For issue #255 rollout, merge/issue closure does not prove deployment. The
 operator must deploy the fixed server and rebuild/deploy the shim for the tool
 schema, verify deployed exhaustive listing and `all`, and only then remove
 `needs-input` from `tokarix/cockpit#410`.
+
+### Woodpecker failure evidence
+
+`get_change_request_ci_details` and the repository CI-details REST endpoint
+include optional `resolution.woodpecker` and `failed_steps[].woodpecker` evidence.
+`type: "resolved"` means a pipeline was safely identified; it does not mean CI
+passed or that every log or runner request succeeded. Check and aggregate states
+remain authoritative. Passing tests and completed build output cannot override a
+failed step or its reported exit code (including 255).
+
+Configure `woodpecker_url` and optional `woodpecker_token` server-side in the
+Forgejo configuration. Only that CI token is sent to the configured CI origin;
+the gateway's forge or agent credential is never substituted. Redirects are
+blocked. The repository's forge URL, repository-scoped pipeline number, source
+head SHA and child identities must match before diagnostic enrichment. The
+supported contract and sanitized examples are pinned to Woodpecker v3.11.0 in
+`forge/tests/fixtures/woodpecker-v3.11.0/README.md`.
+
+Metadata survives missing logs, for example (selected fields):
+
+```json
+{
+  "type": "resolved",
+  "provider": "woodpecker",
+  "pipeline_url": "https://ci.example/repos/29/pipeline/42",
+  "failed_steps": [{
+    "name": "verify", "state": "failure", "log_excerpt": null,
+    "woodpecker": {
+      "workflow_id": 6001, "id": 7001,
+      "uuid": "11111111-2222-4333-8444-555555555555",
+      "exit_code": 255,
+      "timestamps": {"started": 1793260003, "finished": 1793260059},
+      "diagnostics": [{"component": "step_logs", "code": "empty_logs",
+        "message": "No usable Woodpecker log output", "pipeline_id": 5001,
+        "workflow_id": 6001, "step_id": 7001}]
+    }
+  }]
+}
+```
+
+Partial log decoding retains valid excerpts with a `malformed_response`
+diagnostic on that step:
+
+```json
+{"log_excerpt":{"lines":["valid preceding output"]},"woodpecker":{
+  "diagnostics":[{"component":"step_logs","code":"malformed_response",
+  "message":"Some Woodpecker log entries could not be decoded; valid excerpts are retained",
+  "pipeline_id":5001,"workflow_id":6001,"step_id":7001}]}}
+```
+
+Runner lookup requires the configured Woodpecker credential and, in v3.11.0,
+administrator permission. Missing and denied credentials remain distinguishable
+in `resolution.woodpecker.diagnostics` (selected entries):
+
+```json
+[
+  {"component":"runner","code":"credential_missing",
+   "message":"Woodpecker runner credential is missing",
+   "pipeline_id":5001,"workflow_id":6001,"runner_id":17},
+  {"component":"runner","code":"authorization_denied","http_status":403,
+   "message":"Woodpecker request did not succeed",
+   "pipeline_id":5001,"workflow_id":6001,"runner_id":17},
+  {"component":"termination","code":"not_exposed",
+   "message":"The Woodpecker v3.11 API does not expose historical termination, resource usage or host/container logs; current runner metadata cannot establish a failure cause",
+   "pipeline_id":5001}
+]
+```
+
+These entries illustrate separate possible outcomes. A 404 means
+`resource_not_found`, not that a capability is unsupported. Only runner ID,
+platform, backend and version are exposed. Current runner observations do not
+prove its historical state. Use pipeline/workflow/runner IDs, step UUIDs and
+Unix-second timestamps to correlate with separately managed logs. Missing
+timestamps differ from explicit zero. No cause such as OOM, crash or timeout is
+inferred from exit 255.
+
+Each call shares a 30-second deadline, 64-request budget, 2 MiB response limit,
+8 MiB fetched-byte budget, and limits of 16 pipelines, 64 workflows, 128 steps
+and 16 distinct runners. Excerpts retain at most 20 entries of 8 KiB each. Total
+serialized Woodpecker evidence is limited to 256 KiB, including JSON escaping.
+Configured secrets are redacted before text is truncated at UTF-8 boundaries.
+`limit_exceeded` explicitly marks incomplete evidence; validated metadata is
+retained where space permits. GitHub Actions responses omit these optional
+Woodpecker fields.

@@ -36,7 +36,8 @@ Authoritative source links (all pinned to the same tag):
 * [Pipeline error type](https://github.com/woodpecker-ci/woodpecker/blob/v3.11.0/pipeline/errors/types/errors.go)
   defines pipeline `errors` as structured entries with `type`, `message`,
   `is_warning` and arbitrary `data`. Do not decode a pipeline `error` string
-  or expose arbitrary `data`. Workflow and step errors are strings.
+  or expose arbitrary `data`. Its Go slice can be null; `exit-255.json`
+  exercises that representation, while missing errors are also accepted. Workflow and step errors are strings.
 * [Agent API](https://github.com/woodpecker-ci/woodpecker/blob/v3.11.0/server/api/agent.go)
   and [routes](https://github.com/woodpecker-ci/woodpecker/blob/v3.11.0/server/router/api.go)
   provide single-agent `GET /api/agents/{agent_id}`, guarded by `MustAdmin`.

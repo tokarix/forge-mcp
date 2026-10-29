@@ -5,7 +5,7 @@
   "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "ref": "refs/pull/7/head",
   "status": "failure",
-  "errors": [],
+  "errors": null,
   "created": 1793260000,
   "started": 1793260001,
   "finished": 1793260060,
