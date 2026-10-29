@@ -38,6 +38,59 @@ fn fast_options() -> ReadinessOptions {
     }
 }
 
+#[tokio::test]
+async fn setup_operations_outlive_the_readiness_probe_timeout() {
+    let server = MockServer::start().await;
+    for (route, body) in [
+        ("/api/v1/version", serde_json::json!({"version": "fixture"})),
+        ("/api/v1/user", serde_json::json!({"login": "fixture-user"})),
+    ] {
+        Mock::given(method("GET"))
+            .and(path(route))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+    }
+    Mock::given(method("POST"))
+        .and(path("/api/v1/users/fixture-user/tokens"))
+        .respond_with(
+            ResponseTemplate::new(201)
+                .set_delay(Duration::from_millis(80))
+                .set_body_json(serde_json::json!({"sha1": "fixture-token"})),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/user/repos"))
+        .respond_with(
+            ResponseTemplate::new(201)
+                .set_delay(Duration::from_millis(80))
+                .set_body_json(serde_json::json!({"id": 1})),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let context = support::forgejo::Context::connect(
+        config(&complete(&server.uri())).unwrap(),
+        fast_options(),
+    )
+    .await
+    .unwrap();
+    let body = context
+        .request_success(
+            reqwest::Method::POST,
+            "/api/v1/user/repos",
+            Some(serde_json::json!({"name": "fixture"})),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"],
+        1
+    );
+}
+
 #[test]
 fn configuration_is_all_or_nothing_and_normalizes_origins() {
     let parsed = config(&complete("http://example.test:3000")).unwrap();

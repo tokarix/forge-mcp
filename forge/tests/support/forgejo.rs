@@ -8,6 +8,9 @@ pub const BASE_URL_ENV: &str = "FORGEJO_TEST_BASE_URL";
 pub const USERNAME_ENV: &str = "FORGEJO_TEST_USERNAME";
 pub const PASSWORD_ENV: &str = "FORGEJO_TEST_PASSWORD";
 const DEFAULT_PREVIEW_LIMIT: usize = 1024;
+// Provider setup includes password hashing and git initialization under CI load.
+// Keep readiness probes short without imposing their timeout on mutations.
+const OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -58,7 +61,6 @@ struct TokenResponse {
 
 #[derive(Debug)]
 pub struct ReadyService {
-    pub client: Client,
     pub version: String,
 }
 
@@ -295,7 +297,6 @@ pub async fn wait_for_ready(
         ));
     }
     Ok(ReadyService {
-        client,
         version: version.version,
     })
 }
@@ -307,11 +308,11 @@ impl Context {
 
     pub async fn connect(config: Config, options: ReadinessOptions) -> Result<Self, String> {
         let ready = wait_for_ready(&config, options).await?;
+        let client = build_client(OPERATION_TIMEOUT)?;
         let name = unique_name("forge-mcp-ci-token")?;
         let path = format!("/api/v1/users/{}/tokens", config.username);
         let url = api_url(&config.base_url, &path)?;
-        let response = ready
-            .client
+        let response = client
             .post(url)
             .basic_auth(&config.username, Some(config.password()))
             .json(&json!({"name": name, "scopes": ["all"]}))
@@ -356,7 +357,7 @@ impl Context {
         })?;
 
         Ok(Self {
-            client: ready.client,
+            client,
             base_url: config.base_url,
             username: config.username,
             version: ready.version,
