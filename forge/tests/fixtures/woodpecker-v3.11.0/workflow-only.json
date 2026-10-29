@@ -1,0 +1,31 @@
+{
+  "id": 5002,
+  "number": 43,
+  "event": "pull_request",
+  "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "status": "error",
+  "errors": [
+    {
+      "type": "generic",
+      "message": "workflow setup failed",
+      "is_warning": false,
+      "data": {
+        "environment": "SENTINEL_ERROR_DATA_SECRET"
+      }
+    }
+  ],
+  "created": 1793260000,
+  "started": 0,
+  "finished": 0,
+  "workflows": [
+    {
+      "id": 6002,
+      "pipeline_id": 5002,
+      "pid": 1,
+      "name": "checks",
+      "state": "error",
+      "error": "workflow setup failed",
+      "agent_id": 17
+    }
+  ]
+}

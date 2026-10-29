@@ -1,0 +1,10 @@
+{
+  "id": 29,
+  "forge_id": 1,
+  "forge_remote_id": "264",
+  "owner": "fixture-owner",
+  "name": "fixture-repo",
+  "full_name": "fixture-owner/fixture-repo",
+  "forge_url": "https://forge.example.invalid/fixture-owner/fixture-repo",
+  "clone_url": "https://forge.example.invalid/fixture-owner/fixture-repo.git"
+}

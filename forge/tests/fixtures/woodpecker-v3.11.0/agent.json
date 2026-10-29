@@ -1,0 +1,21 @@
+{
+  "id": 17,
+  "created": 1793200000,
+  "updated": 1793260100,
+  "name": "fixture-runner",
+  "owner_id": -1,
+  "token": "SENTINEL_REGISTRATION_SECRET",
+  "last_contact": 1793260100,
+  "last_work": 1793260060,
+  "platform": "linux/amd64",
+  "backend": "docker",
+  "capacity": 2,
+  "version": "3.11.0",
+  "no_schedule": false,
+  "custom_labels": {
+    "sensitive": "SENTINEL_LABEL_SECRET"
+  },
+  "unknown": {
+    "authorization": "SENTINEL_NESTED_SECRET"
+  }
+}

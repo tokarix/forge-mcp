@@ -1,0 +1,13 @@
+[
+  {
+    "step_uuid": "11111111-2222-4333-8444-555555555555",
+    "time": 1,
+    "line": 1,
+    "data": "dGVzdCByZXN1bHQ6IG9rLiA0MiBwYXNzZWQ7IDAgZmFpbGVk"
+  },
+  {
+    "time": 2,
+    "line": 2,
+    "data": "RmluaXNoZWQgcmVsZWFzZSBwcm9maWxlIHRhcmdldChzKQ=="
+  }
+]

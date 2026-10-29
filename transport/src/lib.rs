@@ -7588,6 +7588,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ci_details_preserves_woodpecker_partial_evidence()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mock = wiremock::MockServer::start().await;
+        let evidence = serde_json::json!({
+            "head_sha": "abc123", "state": "failure",
+            "details": [{
+                "context": "ci/woodpecker/pr/checks", "description": "Pipeline failed",
+                "state": "failure", "target_url": "https://ci.example/repos/29/pipeline/42/1",
+                "resolution": {
+                    "type": "resolved", "provider": "woodpecker",
+                    "pipeline_url": "https://ci.example/repos/29/pipeline/42",
+                    "woodpecker": {
+                        "repository_id": 29, "id": 5001, "number": 42,
+                        "status": "failure", "errors": [], "timestamps": {"started": 0},
+                        "workflows": [{"id": 6001, "state": "failure",
+                            "error": "step failed", "runner_id": 17, "timestamps": {}}],
+                        "runners": [{"id": 17, "platform": "linux/amd64", "version": "3.11.0"}],
+                        "diagnostics": [{"component": "termination", "code": "not_exposed",
+                            "message": "Historical termination evidence is not exposed",
+                            "pipeline_id": 5001}]
+                    },
+                    "failed_steps": [{
+                        "name": "verify", "state": "failure", "log_excerpt": null,
+                        "woodpecker": {"workflow_id": 6001, "id": 7001,
+                            "uuid": "fixture-step-uuid", "exit_code": 255, "timestamps": {},
+                            "diagnostics": [{"component": "step_logs", "code": "authorization_denied",
+                                "message": "Log lookup denied", "http_status": 403,
+                                "pipeline_id": 5001, "workflow_id": 6001, "step_id": 7001}]}
+                    }]
+                }
+            }]
+        });
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(
+                "/api/v1/repos/adlevio/tokarix/forge-mcp/pulls/267/ci-details",
+            ))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(&evidence))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        let shim = McpShim::new(test_config(&mock.uri()));
+        let result = shim
+            .get_change_request_ci_details(Parameters(serde_json::from_value(
+                serde_json::json!({"forge": "adlevio", "owner": "tokarix",
+                "repo": "forge-mcp", "index": 267}),
+            )?))
+            .await?;
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&result)?,
+            evidence
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn get_change_request_tool_passes_mergeability() -> Result<(), Box<dyn std::error::Error>>
     {
         let mock = wiremock::MockServer::start().await;

@@ -1,0 +1,39 @@
+{
+  "id": 5001,
+  "number": 42,
+  "event": "pull_request",
+  "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "ref": "refs/pull/7/head",
+  "status": "failure",
+  "errors": [],
+  "created": 1793260000,
+  "started": 1793260001,
+  "finished": 1793260060,
+  "workflows": [
+    {
+      "id": 6001,
+      "pipeline_id": 5001,
+      "pid": 1,
+      "name": "checks",
+      "state": "failure",
+      "error": "step exited with code 255; cause unavailable",
+      "agent_id": 17,
+      "started": 1793260002,
+      "finished": 1793260060,
+      "children": [
+        {
+          "id": 7001,
+          "uuid": "11111111-2222-4333-8444-555555555555",
+          "pipeline_id": 5001,
+          "pid": 2,
+          "ppid": 1,
+          "name": "verify",
+          "state": "failure",
+          "exit_code": 255,
+          "started": 1793260003,
+          "finished": 1793260059
+        }
+      ]
+    }
+  ]
+}
