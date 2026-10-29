@@ -1877,6 +1877,7 @@ impl<'a> GitHubActionsResolver<'a> {
         let excerpt = copy_actions_excerpt(&excerpt)?;
         if failed_step_count == 0 {
             output.push(domain::CiFailureStep {
+                woodpecker: None,
                 name: copy_actions_output(&job.name)?,
                 state: copy_actions_output(job_state)?,
                 log_excerpt: Some(excerpt),
@@ -1885,6 +1886,7 @@ impl<'a> GitHubActionsResolver<'a> {
             let mut excerpt = Some(excerpt);
             for (index, step) in job.steps.iter().filter(is_failed_step).enumerate() {
                 output.push(domain::CiFailureStep {
+                    woodpecker: None,
                     name: actions_step_name(&job.name, &step.name)?,
                     state: copy_actions_output(step.conclusion.as_deref().unwrap_or("error"))?,
                     log_excerpt: if index == 0 { excerpt.take() } else { None },
@@ -1896,6 +1898,7 @@ impl<'a> GitHubActionsResolver<'a> {
         self.budget.emitted_steps = next_steps;
         self.budget.output_bytes = next_bytes;
         Ok(domain::CiResolution::Resolved {
+            woodpecker: None,
             provider: domain::CiProvider::GithubActions,
             pipeline_url,
             failed_steps: output,
@@ -4816,6 +4819,7 @@ rRwzv5g6zr/Xm2UKcduXYVQs
             .expect("CI details");
         assert_eq!(details.state, domain::CommitStatusState::Failure);
         let domain::CiResolution::Resolved {
+            woodpecker: None,
             provider,
             pipeline_url,
             failed_steps,

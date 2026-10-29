@@ -272,6 +272,9 @@ pub enum CiResolutionResult {
         provider: CiProviderResult,
         pipeline_url: String,
         failed_steps: Vec<CiFailureStepResult>,
+        /// Optional validated Woodpecker evidence. Resolved does not mean CI passed.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        woodpecker: Option<Box<WoodpeckerPipelineEvidenceResult>>,
     },
 }
 
@@ -284,9 +287,274 @@ pub enum CiProviderResult {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct CiFailureStepResult {
+    /// Optional provider evidence, independent of log availability.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub woodpecker: Option<WoodpeckerStepEvidenceResult>,
     pub name: String,
     pub state: String,
     pub log_excerpt: Option<CiLogExcerptResult>,
+}
+
+/// Typed CI evidence; provider text must be sanitized and bounded before construction.
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CiDiagnosticComponentResult {
+    Pipeline,
+    Workflow,
+    StepLogs,
+    Runner,
+    Termination,
+    Operation,
+}
+
+impl From<domain::CiDiagnosticComponent> for CiDiagnosticComponentResult {
+    fn from(value: domain::CiDiagnosticComponent) -> Self {
+        match value {
+            domain::CiDiagnosticComponent::Pipeline => Self::Pipeline,
+            domain::CiDiagnosticComponent::Workflow => Self::Workflow,
+            domain::CiDiagnosticComponent::StepLogs => Self::StepLogs,
+            domain::CiDiagnosticComponent::Runner => Self::Runner,
+            domain::CiDiagnosticComponent::Termination => Self::Termination,
+            domain::CiDiagnosticComponent::Operation => Self::Operation,
+        }
+    }
+}
+
+/// Typed CI evidence; provider text must be sanitized and bounded before construction.
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CiDiagnosticCodeResult {
+    CredentialMissing,
+    AuthorizationDenied,
+    Unavailable,
+    ResourceNotFound,
+    NotExposed,
+    MalformedResponse,
+    EmptyLogs,
+    BindingMismatch,
+    LimitExceeded,
+}
+
+impl From<domain::CiDiagnosticCode> for CiDiagnosticCodeResult {
+    fn from(value: domain::CiDiagnosticCode) -> Self {
+        match value {
+            domain::CiDiagnosticCode::CredentialMissing => Self::CredentialMissing,
+            domain::CiDiagnosticCode::AuthorizationDenied => Self::AuthorizationDenied,
+            domain::CiDiagnosticCode::Unavailable => Self::Unavailable,
+            domain::CiDiagnosticCode::ResourceNotFound => Self::ResourceNotFound,
+            domain::CiDiagnosticCode::NotExposed => Self::NotExposed,
+            domain::CiDiagnosticCode::MalformedResponse => Self::MalformedResponse,
+            domain::CiDiagnosticCode::EmptyLogs => Self::EmptyLogs,
+            domain::CiDiagnosticCode::BindingMismatch => Self::BindingMismatch,
+            domain::CiDiagnosticCode::LimitExceeded => Self::LimitExceeded,
+        }
+    }
+}
+
+/// Typed CI evidence; provider text must be sanitized and bounded before construction.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CiDiagnosticResult {
+    /// Affected provider component.
+    pub component: CiDiagnosticComponentResult,
+    /// Stable machine-readable diagnostic code.
+    pub code: CiDiagnosticCodeResult,
+    /// Safe bounded explanation; never an upstream error body.
+    pub message: String,
+    /// Upstream HTTP status when available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub http_status: Option<u16>,
+    /// Provider pipeline identifier.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pipeline_id: Option<i64>,
+    /// Provider workflow identifier.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workflow_id: Option<i64>,
+    /// Provider step identifier.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step_id: Option<i64>,
+    /// Provider agent identifier.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runner_id: Option<i64>,
+}
+
+impl From<domain::CiDiagnostic> for CiDiagnosticResult {
+    fn from(value: domain::CiDiagnostic) -> Self {
+        Self {
+            component: value.component.into(),
+            code: value.code.into(),
+            message: value.message,
+            http_status: value.http_status,
+            pipeline_id: value.pipeline_id,
+            workflow_id: value.workflow_id,
+            step_id: value.step_id,
+            runner_id: value.runner_id,
+        }
+    }
+}
+
+/// Typed CI evidence; provider text must be sanitized and bounded before construction.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CiTimestampsResult {
+    /// Provider Unix timestamp in seconds; absence differs from zero.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created: Option<i64>,
+    /// Provider Unix timestamp in seconds; absence differs from zero.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated: Option<i64>,
+    /// Provider Unix timestamp in seconds; absence differs from zero.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started: Option<i64>,
+    /// Provider Unix timestamp in seconds; absence differs from zero.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finished: Option<i64>,
+}
+
+impl From<domain::CiTimestamps> for CiTimestampsResult {
+    fn from(value: domain::CiTimestamps) -> Self {
+        Self {
+            created: value.created,
+            updated: value.updated,
+            started: value.started,
+            finished: value.finished,
+        }
+    }
+}
+
+/// Typed CI evidence; provider text must be sanitized and bounded before construction.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct WoodpeckerStepEvidenceResult {
+    /// Containing workflow identifier.
+    pub workflow_id: i64,
+    /// Provider step identifier.
+    pub id: i64,
+    /// Provider step UUID for external log correlation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uuid: Option<String>,
+    /// Reported exit code; does not establish the exit cause.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i64>,
+    /// Sanitized provider step error.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Provider step timestamps.
+    pub timestamps: CiTimestampsResult,
+    /// Component failures and limitations.
+    pub diagnostics: Vec<CiDiagnosticResult>,
+}
+
+impl From<domain::WoodpeckerStepEvidence> for WoodpeckerStepEvidenceResult {
+    fn from(value: domain::WoodpeckerStepEvidence) -> Self {
+        Self {
+            workflow_id: value.workflow_id,
+            id: value.id,
+            uuid: value.uuid,
+            exit_code: value.exit_code,
+            error: value.error,
+            timestamps: value.timestamps.into(),
+            diagnostics: value.diagnostics.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+/// Typed CI evidence; provider text must be sanitized and bounded before construction.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct WoodpeckerWorkflowEvidenceResult {
+    /// Provider workflow identifier.
+    pub id: i64,
+    /// Provider workflow name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Provider workflow state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    /// Sanitized provider workflow error.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Referenced agent identifier from the validated workflow.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runner_id: Option<i64>,
+    /// Provider workflow timestamps.
+    pub timestamps: CiTimestampsResult,
+}
+
+impl From<domain::WoodpeckerWorkflowEvidence> for WoodpeckerWorkflowEvidenceResult {
+    fn from(value: domain::WoodpeckerWorkflowEvidence) -> Self {
+        Self {
+            id: value.id,
+            name: value.name,
+            state: value.state,
+            error: value.error,
+            runner_id: value.runner_id,
+            timestamps: value.timestamps.into(),
+        }
+    }
+}
+
+/// Typed CI evidence; provider text must be sanitized and bounded before construction.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct WoodpeckerRunnerEvidenceResult {
+    /// Validated referenced agent identifier.
+    pub id: i64,
+    /// Current observed platform.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
+    /// Current observed execution backend.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
+    /// Current observed agent version.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+}
+
+impl From<domain::WoodpeckerRunnerEvidence> for WoodpeckerRunnerEvidenceResult {
+    fn from(value: domain::WoodpeckerRunnerEvidence) -> Self {
+        Self {
+            id: value.id,
+            platform: value.platform,
+            backend: value.backend,
+            version: value.version,
+        }
+    }
+}
+
+/// Typed CI evidence; provider text must be sanitized and bounded before construction.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct WoodpeckerPipelineEvidenceResult {
+    /// Verified Woodpecker repository identifier.
+    pub repository_id: i64,
+    /// Provider pipeline identifier.
+    pub id: i64,
+    /// Repository-scoped pipeline number.
+    pub number: i64,
+    /// Provider pipeline status.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// Sanitized provider pipeline error messages.
+    pub errors: Vec<String>,
+    /// Provider pipeline timestamps.
+    pub timestamps: CiTimestampsResult,
+    /// Workflows, including failures without failed steps.
+    pub workflows: Vec<WoodpeckerWorkflowEvidenceResult>,
+    /// Allowlisted current observations, stored once per runner.
+    pub runners: Vec<WoodpeckerRunnerEvidenceResult>,
+    /// Component failures and explicit capability limitations.
+    pub diagnostics: Vec<CiDiagnosticResult>,
+}
+
+impl From<domain::WoodpeckerPipelineEvidence> for WoodpeckerPipelineEvidenceResult {
+    fn from(value: domain::WoodpeckerPipelineEvidence) -> Self {
+        Self {
+            repository_id: value.repository_id,
+            id: value.id,
+            number: value.number,
+            status: value.status,
+            errors: value.errors,
+            timestamps: value.timestamps.into(),
+            workflows: value.workflows.into_iter().map(Into::into).collect(),
+            runners: value.runners.into_iter().map(Into::into).collect(),
+            diagnostics: value.diagnostics.into_iter().map(Into::into).collect(),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -425,5 +693,88 @@ mod tests {
         };
         let json = serde_json::to_value(&body).expect("should serialize");
         assert_eq!(json["error"], "not found");
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod ci_evidence_contract_tests {
+    use super::*;
+
+    #[test]
+    fn step_evidence_conversion_preserves_failure_and_optional_zero_times() {
+        let evidence = domain::WoodpeckerStepEvidence {
+            workflow_id: 7,
+            id: 9,
+            uuid: Some("step-correlation".into()),
+            exit_code: Some(255),
+            error: None,
+            timestamps: domain::CiTimestamps {
+                created: None,
+                updated: None,
+                started: Some(0),
+                finished: Some(1_730_000_000),
+            },
+            diagnostics: vec![domain::CiDiagnostic {
+                component: domain::CiDiagnosticComponent::StepLogs,
+                code: domain::CiDiagnosticCode::EmptyLogs,
+                message: "No log entries available".into(),
+                http_status: Some(200),
+                pipeline_id: Some(3),
+                workflow_id: Some(7),
+                step_id: Some(9),
+                runner_id: None,
+            }],
+        };
+        let expected = serde_json::to_value(&evidence).expect("domain JSON");
+        let mapped = WoodpeckerStepEvidenceResult::from(evidence);
+        assert_eq!(serde_json::to_value(&mapped).expect("HTTP JSON"), expected);
+        assert_eq!(expected["exit_code"], 255);
+        assert_eq!(expected["timestamps"]["started"], 0);
+        assert!(expected["timestamps"].get("created").is_none());
+        assert_eq!(expected["diagnostics"][0]["code"], "empty_logs");
+    }
+
+    #[test]
+    fn legacy_resolved_and_step_json_have_no_new_keys() {
+        let result = CiResolutionResult::Resolved {
+            provider: CiProviderResult::GithubActions,
+            pipeline_url: "https://github.example/actions/runs/1".into(),
+            failed_steps: vec![CiFailureStepResult {
+                name: "test".into(),
+                state: "failure".into(),
+                log_excerpt: None,
+                woodpecker: None,
+            }],
+            woodpecker: None,
+        };
+        assert_eq!(
+            serde_json::to_value(result).expect("legacy JSON"),
+            serde_json::json!({
+                "type": "resolved",
+                "provider": "github_actions",
+                "pipeline_url": "https://github.example/actions/runs/1",
+                "failed_steps": [{"name": "test", "state": "failure", "log_excerpt": null}]
+            })
+        );
+    }
+
+    #[test]
+    fn evidence_schemas_are_registered() {
+        use utoipa::OpenApi;
+        let schema = serde_json::to_value(crate::ApiDoc::openapi()).expect("OpenAPI JSON");
+        let schemas = &schema["components"]["schemas"];
+        for name in [
+            "WoodpeckerPipelineEvidenceResult",
+            "WoodpeckerStepEvidenceResult",
+            "WoodpeckerWorkflowEvidenceResult",
+            "WoodpeckerRunnerEvidenceResult",
+            "CiDiagnosticResult",
+            "CiDiagnosticCodeResult",
+            "CiDiagnosticComponentResult",
+            "CiTimestampsResult",
+        ] {
+            assert!(schemas.get(name).is_some(), "missing schema {name}");
+        }
     }
 }

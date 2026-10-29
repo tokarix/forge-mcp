@@ -753,10 +753,12 @@ pub async fn get_pull_ci_details(
                         CiResolutionResult::Error { message }
                     }
                     domain::CiResolution::Resolved {
+                        woodpecker,
                         provider,
                         pipeline_url,
                         failed_steps,
                     } => CiResolutionResult::Resolved {
+                        woodpecker: woodpecker.map(|e| Box::new((*e).into())),
                         provider: match provider {
                             domain::CiProvider::GithubActions => CiProviderResult::GithubActions,
                             domain::CiProvider::Woodpecker => CiProviderResult::Woodpecker,
@@ -765,6 +767,7 @@ pub async fn get_pull_ci_details(
                         failed_steps: failed_steps
                             .into_iter()
                             .map(|s| CiFailureStepResult {
+                                woodpecker: s.woodpecker.map(Into::into),
                                 name: s.name,
                                 state: s.state,
                                 log_excerpt: s
@@ -3309,9 +3312,11 @@ mod tests {
                     state: domain::CommitStatusState::Failure,
                     target_url: "https://ci.example/1".into(),
                     resolution: domain::CiResolution::Resolved {
+                        woodpecker: None,
                         provider: domain::CiProvider::GithubActions,
                         pipeline_url: "https://github.example/actions/runs/1".into(),
                         failed_steps: vec![domain::CiFailureStep {
+                            woodpecker: None,
                             name: "test".into(),
                             state: "failure".into(),
                             log_excerpt: Some(domain::CiLogExcerpt {
@@ -3951,9 +3956,11 @@ mod tests {
                     state: domain::CommitStatusState::Failure,
                     target_url: "https://ci.example/1".into(),
                     resolution: domain::CiResolution::Resolved {
+                        woodpecker: None,
                         provider: domain::CiProvider::GithubActions,
                         pipeline_url: "https://github.example/actions/runs/1".into(),
                         failed_steps: vec![domain::CiFailureStep {
+                            woodpecker: None,
                             name: "test".into(),
                             state: "failure".into(),
                             log_excerpt: Some(domain::CiLogExcerpt {

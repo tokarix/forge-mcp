@@ -995,6 +995,7 @@ impl ForgejoAdapter {
                     {
                         Ok(log_excerpt) => {
                             failed_steps.push(domain::CiFailureStep {
+                                woodpecker: None,
                                 name: step.name,
                                 state: step.state,
                                 log_excerpt,
@@ -1003,6 +1004,7 @@ impl ForgejoAdapter {
                         Err(message) => {
                             log_errors.push(format!("{}: {}", step.name, message));
                             failed_steps.push(domain::CiFailureStep {
+                                woodpecker: None,
                                 name: step.name,
                                 state: step.state,
                                 log_excerpt: None,
@@ -1038,6 +1040,7 @@ impl ForgejoAdapter {
             .map_or_else(|_| target_url.to_string(), |u| u.to_string());
 
         domain::CiResolution::Resolved {
+            woodpecker: None,
             provider: domain::CiProvider::Woodpecker,
             pipeline_url: pipeline_ui_url,
             failed_steps,
@@ -6731,6 +6734,7 @@ mod tests {
 
         match res {
             domain::CiResolution::Resolved {
+                woodpecker: None,
                 provider,
                 pipeline_url,
                 failed_steps,

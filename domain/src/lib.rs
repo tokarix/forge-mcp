@@ -1135,6 +1135,9 @@ pub enum CiResolution {
         provider: CiProvider,
         pipeline_url: String,
         failed_steps: Vec<CiFailureStep>,
+        /// Optional validated Woodpecker evidence. Resolved does not mean CI passed.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        woodpecker: Option<Box<WoodpeckerPipelineEvidence>>,
     },
 }
 
@@ -1147,9 +1150,165 @@ pub enum CiProvider {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct CiFailureStep {
+    /// Optional provider evidence, independent of log availability.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub woodpecker: Option<WoodpeckerStepEvidence>,
     pub name: String,
     pub state: String,
     pub log_excerpt: Option<CiLogExcerpt>,
+}
+
+/// Typed CI evidence; provider text must be sanitized and bounded before construction.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CiDiagnosticComponent {
+    Pipeline,
+    Workflow,
+    StepLogs,
+    Runner,
+    Termination,
+    Operation,
+}
+
+/// Typed CI evidence; provider text must be sanitized and bounded before construction.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CiDiagnosticCode {
+    CredentialMissing,
+    AuthorizationDenied,
+    Unavailable,
+    ResourceNotFound,
+    NotExposed,
+    MalformedResponse,
+    EmptyLogs,
+    BindingMismatch,
+    LimitExceeded,
+}
+
+/// Typed CI evidence; provider text must be sanitized and bounded before construction.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct CiDiagnostic {
+    /// Affected provider component.
+    pub component: CiDiagnosticComponent,
+    /// Stable machine-readable diagnostic code.
+    pub code: CiDiagnosticCode,
+    /// Safe bounded explanation; never an upstream error body.
+    pub message: String,
+    /// Upstream HTTP status when available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub http_status: Option<u16>,
+    /// Provider pipeline identifier.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pipeline_id: Option<i64>,
+    /// Provider workflow identifier.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workflow_id: Option<i64>,
+    /// Provider step identifier.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step_id: Option<i64>,
+    /// Provider agent identifier.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runner_id: Option<i64>,
+}
+
+/// Typed CI evidence; provider text must be sanitized and bounded before construction.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct CiTimestamps {
+    /// Provider Unix timestamp in seconds; absence differs from zero.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created: Option<i64>,
+    /// Provider Unix timestamp in seconds; absence differs from zero.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated: Option<i64>,
+    /// Provider Unix timestamp in seconds; absence differs from zero.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started: Option<i64>,
+    /// Provider Unix timestamp in seconds; absence differs from zero.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finished: Option<i64>,
+}
+
+/// Typed CI evidence; provider text must be sanitized and bounded before construction.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct WoodpeckerStepEvidence {
+    /// Containing workflow identifier.
+    pub workflow_id: i64,
+    /// Provider step identifier.
+    pub id: i64,
+    /// Provider step UUID for external log correlation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uuid: Option<String>,
+    /// Reported exit code; does not establish the exit cause.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i64>,
+    /// Sanitized provider step error.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Provider step timestamps.
+    pub timestamps: CiTimestamps,
+    /// Component failures and limitations.
+    pub diagnostics: Vec<CiDiagnostic>,
+}
+
+/// Typed CI evidence; provider text must be sanitized and bounded before construction.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct WoodpeckerWorkflowEvidence {
+    /// Provider workflow identifier.
+    pub id: i64,
+    /// Provider workflow name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Provider workflow state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    /// Sanitized provider workflow error.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Referenced agent identifier from the validated workflow.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runner_id: Option<i64>,
+    /// Provider workflow timestamps.
+    pub timestamps: CiTimestamps,
+}
+
+/// Typed CI evidence; provider text must be sanitized and bounded before construction.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct WoodpeckerRunnerEvidence {
+    /// Validated referenced agent identifier.
+    pub id: i64,
+    /// Current observed platform.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
+    /// Current observed execution backend.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
+    /// Current observed agent version.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+}
+
+/// Typed CI evidence; provider text must be sanitized and bounded before construction.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct WoodpeckerPipelineEvidence {
+    /// Verified Woodpecker repository identifier.
+    pub repository_id: i64,
+    /// Provider pipeline identifier.
+    pub id: i64,
+    /// Repository-scoped pipeline number.
+    pub number: i64,
+    /// Provider pipeline status.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// Sanitized provider pipeline error messages.
+    pub errors: Vec<String>,
+    /// Provider pipeline timestamps.
+    pub timestamps: CiTimestamps,
+    /// Workflows, including failures without failed steps.
+    pub workflows: Vec<WoodpeckerWorkflowEvidence>,
+    /// Allowlisted current observations, stored once per runner.
+    pub runners: Vec<WoodpeckerRunnerEvidence>,
+    /// Component failures and explicit capability limitations.
+    pub diagnostics: Vec<CiDiagnostic>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -2589,9 +2748,11 @@ mod tests {
                 state: CommitStatusState::Failure,
                 target_url: "https://github.example/checks/42".to_string(),
                 resolution: CiResolution::Resolved {
+                    woodpecker: None,
                     provider: CiProvider::GithubActions,
                     pipeline_url: "https://github.example/actions/runs/7".to_string(),
                     failed_steps: vec![super::CiFailureStep {
+                        woodpecker: None,
                         name: "build / test".to_string(),
                         state: "failure".to_string(),
                         log_excerpt: Some(super::CiLogExcerpt {
