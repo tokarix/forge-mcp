@@ -301,6 +301,47 @@ fn build_state(
     ))
 }
 
+// Bind before advertising the callback so parallel CI processes cannot race
+// for a fixed port. The configured addresses still choose the listen interface
+// and the hostname reachable from the disposable Forgejo service.
+async fn bind_callback_listener(
+    mut listen_addr: SocketAddr,
+    mut callback_base: Url,
+) -> Result<(tokio::net::TcpListener, Url), String> {
+    listen_addr.set_port(0);
+    let listener = tokio::net::TcpListener::bind(listen_addr)
+        .await
+        .map_err(|error| format!("could not bind {LISTEN_ADDR_ENV} {listen_addr}: {error}"))?;
+    let local_addr = listener
+        .local_addr()
+        .map_err(|error| format!("could not inspect gateway listener: {error}"))?;
+    callback_base
+        .set_port(Some(local_addr.port()))
+        .map_err(|()| format!("could not set {CALLBACK_BASE_URL_ENV} port"))?;
+    Ok((listener, callback_base))
+}
+
+#[tokio::test]
+async fn callback_listener_avoids_occupied_configured_port() -> Result<(), String> {
+    let occupied = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(|error| format!("could not reserve test port: {error}"))?;
+    let configured = occupied
+        .local_addr()
+        .map_err(|error| format!("could not inspect reserved port: {error}"))?;
+    let callback = Url::parse(&format!("http://forgejo-callback:{}", configured.port()))
+        .map_err(|error| format!("could not construct callback URL: {error}"))?;
+    let (listener, callback) = bind_callback_listener(configured, callback).await?;
+    let selected = listener
+        .local_addr()
+        .map_err(|error| format!("could not inspect selected port: {error}"))?;
+    assert_ne!(selected.port(), configured.port());
+    assert_eq!(callback.port(), Some(selected.port()));
+    assert_eq!(callback.host_str(), Some("forgejo-callback"));
+    assert_eq!(selected.ip(), configured.ip());
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "runs only in the CI-provided disposable Forgejo webhook lane"]
 #[allow(clippy::too_many_lines)]
@@ -360,9 +401,7 @@ async fn forgejo_issue_label_changes_reach_poll_events() -> Result<(), String> {
             .await?;
 
         let (state, event_bus) = build_state(&context, &repo, &webhook_secret)?;
-        let listener = tokio::net::TcpListener::bind(listen_addr)
-            .await
-            .map_err(|error| format!("could not bind {LISTEN_ADDR_ENV}: {error}"))?;
+        let (listener, callback_base) = bind_callback_listener(listen_addr, callback_base).await?;
         let local_addr = listener
             .local_addr()
             .map_err(|error| format!("could not inspect gateway listener: {error}"))?;
