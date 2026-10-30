@@ -26,6 +26,7 @@ mod github_app;
 pub mod gitlab;
 mod inline_review_webhooks;
 pub mod woodpecker;
+pub mod woodpecker_log_decode;
 mod woodpecker_resolver;
 pub mod woodpecker_step_logs;
 
