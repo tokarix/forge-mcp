@@ -27,6 +27,7 @@ pub mod gitlab;
 mod inline_review_webhooks;
 pub mod woodpecker;
 pub mod woodpecker_log_decode;
+pub mod woodpecker_log_snapshot;
 mod woodpecker_resolver;
 pub mod woodpecker_step_logs;
 
