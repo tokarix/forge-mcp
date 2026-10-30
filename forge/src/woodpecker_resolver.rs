@@ -15,11 +15,11 @@ use serde_json::Value;
 use crate::woodpecker::{Failure, Limits, Origin, Resource, Session, safe_text};
 
 #[derive(Default, Deserialize)]
-struct Clock {
-    created: Option<i64>,
-    updated: Option<i64>,
-    started: Option<i64>,
-    finished: Option<i64>,
+pub(super) struct Clock {
+    pub(super) created: Option<i64>,
+    pub(super) updated: Option<i64>,
+    pub(super) started: Option<i64>,
+    pub(super) finished: Option<i64>,
 }
 impl From<Clock> for CiTimestamps {
     fn from(c: Clock) -> Self {
@@ -32,55 +32,55 @@ impl From<Clock> for CiTimestamps {
     }
 }
 #[derive(Deserialize)]
-struct Repo {
-    id: u64,
-    owner: String,
-    name: String,
-    forge_url: String,
+pub(super) struct Repo {
+    pub(super) id: u64,
+    pub(super) owner: String,
+    pub(super) name: String,
+    pub(super) forge_url: String,
 }
 #[derive(Deserialize)]
-struct Pipeline {
-    id: i64,
-    number: u64,
-    commit: String,
+pub(super) struct Pipeline {
+    pub(super) id: i64,
+    pub(super) number: u64,
+    pub(super) commit: String,
     #[serde(rename = "ref")]
-    reference: Option<String>,
-    status: Option<String>,
+    pub(super) reference: Option<String>,
+    pub(super) status: Option<String>,
     #[serde(default)]
-    errors: Option<Vec<ProviderError>>,
+    pub(super) errors: Option<Vec<ProviderError>>,
     #[serde(flatten)]
-    clock: Clock,
-    workflows: Option<Vec<Workflow>>,
+    pub(super) clock: Clock,
+    pub(super) workflows: Option<Vec<Workflow>>,
 }
 #[derive(Deserialize)]
-struct ProviderError {
-    message: Option<String>,
+pub(super) struct ProviderError {
+    pub(super) message: Option<String>,
 }
 #[derive(Deserialize)]
-struct Workflow {
-    id: i64,
-    pipeline_id: i64,
-    pid: i64,
-    name: Option<String>,
-    state: Option<String>,
-    error: Option<String>,
-    agent_id: Option<i64>,
+pub(super) struct Workflow {
+    pub(super) id: i64,
+    pub(super) pipeline_id: i64,
+    pub(super) pid: i64,
+    pub(super) name: Option<String>,
+    pub(super) state: Option<String>,
+    pub(super) error: Option<String>,
+    pub(super) agent_id: Option<i64>,
     #[serde(flatten)]
-    clock: Clock,
-    children: Option<Vec<Step>>,
+    pub(super) clock: Clock,
+    pub(super) children: Option<Vec<Step>>,
 }
 #[derive(Deserialize)]
-struct Step {
-    id: i64,
-    pipeline_id: i64,
-    ppid: i64,
-    uuid: Option<String>,
-    name: String,
-    state: String,
-    exit_code: Option<i64>,
-    error: Option<String>,
+pub(super) struct Step {
+    pub(super) id: i64,
+    pub(super) pipeline_id: i64,
+    pub(super) ppid: i64,
+    pub(super) uuid: Option<String>,
+    pub(super) name: String,
+    pub(super) state: String,
+    pub(super) exit_code: Option<i64>,
+    pub(super) error: Option<String>,
     #[serde(flatten)]
-    clock: Clock,
+    pub(super) clock: Clock,
 }
 #[derive(Deserialize)]
 struct Runner {
@@ -88,6 +88,31 @@ struct Runner {
     platform: Option<String>,
     backend: Option<String>,
     version: Option<String>,
+}
+
+/// Shared exact repository binding; owner/name alone never establish identity.
+pub(super) fn validate_repository(
+    identity: &Repo,
+    repo_id: u64,
+    repo: &RepositoryRef,
+    forge_base: &str,
+) -> Result<(), Failure> {
+    let expected = format!(
+        "{}/{}/{}",
+        forge_base.trim_end_matches('/'),
+        repo.owner,
+        repo.name
+    );
+    if identity.id != repo_id
+        || identity.owner != repo.owner
+        || identity.name != repo.name
+        || Origin::parse(&expected).is_err()
+        || Origin::parse(&identity.forge_url).is_err()
+        || reqwest::Url::parse(&identity.forge_url).ok() != reqwest::Url::parse(&expected).ok()
+    {
+        return Err(binding());
+    }
+    Ok(())
 }
 
 enum Selection<'a> {
@@ -246,22 +271,7 @@ impl Resolver {
         }
         self.pipelines.insert((repo_id, number));
         let identity: Repo = self.session.json(Resource::Repository(repo_id)).await?;
-        // The forge URL includes the instance identity. Never accept owner/name alone.
-        let expected = format!(
-            "{}/{}/{}",
-            self.forge_base.trim_end_matches('/'),
-            repo.owner,
-            repo.name
-        );
-        if identity.id != repo_id
-            || identity.owner != repo.owner
-            || identity.name != repo.name
-            || Origin::parse(&expected).is_err()
-            || Origin::parse(&identity.forge_url).is_err()
-            || reqwest::Url::parse(&identity.forge_url).ok() != reqwest::Url::parse(&expected).ok()
-        {
-            return Err(binding());
-        }
+        validate_repository(&identity, repo_id, repo, &self.forge_base)?;
         let pipeline: Pipeline = self
             .session
             .json(Resource::Pipeline(repo_id, number))

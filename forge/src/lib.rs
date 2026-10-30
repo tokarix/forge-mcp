@@ -27,6 +27,7 @@ pub mod gitlab;
 mod inline_review_webhooks;
 pub mod woodpecker;
 mod woodpecker_resolver;
+pub mod woodpecker_step_logs;
 
 static INSTALL_RING_PROVIDER: Once = Once::new();
 
