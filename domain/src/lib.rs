@@ -15,6 +15,9 @@ pub use change_request_changes::{BaseBranchChange, ChangeRequestChanges, DraftCh
 mod ci;
 pub use ci::{CiChangeEvent, CiEventDetails, CiEventSource};
 
+mod ci_step_logs;
+pub use ci_step_logs::*;
+
 pub mod diff;
 pub mod policy;
 
@@ -1740,6 +1743,18 @@ pub enum ServiceError {
 
 #[async_trait]
 pub trait RepositoryReadService: Send + Sync {
+    /// Retrieve explicitly selected retained step output after authorization.
+    ///
+    /// # Errors
+    /// Returns validation, audit or upstream service errors.
+    async fn get_repository_ci_step_logs(
+        &self,
+        request: GetRepositoryCiStepLogsRequest,
+        _credential: &ForgeCredential,
+    ) -> Result<RepositoryCiStepLogs, ServiceError> {
+        Ok(RepositoryCiStepLogs::unsupported(request.selector))
+    }
+
     /// Retrieve explicitly selected historical evidence.
     ///
     /// # Errors

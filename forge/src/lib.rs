@@ -731,6 +731,17 @@ pub trait ForgeAdapter: Send + Sync {
         credential: &ForgeCredential,
     ) -> Result<domain::CombinedCommitStatus, ForgeError>;
 
+    /// Retrieve explicitly selected retained step output independently of state.
+    async fn get_repository_ci_step_logs(
+        &self,
+        _repository: &RepositoryRef,
+        selector: domain::CiStepLogSelector,
+        _options: domain::CiStepLogOptions,
+        _credential: &ForgeCredential,
+    ) -> Result<domain::RepositoryCiStepLogs, ForgeError> {
+        Ok(domain::RepositoryCiStepLogs::unsupported(selector))
+    }
+
     /// Retrieve one repository-bound historical run without fetching PR state.
     async fn get_repository_ci_details(
         &self,
