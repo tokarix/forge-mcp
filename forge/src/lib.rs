@@ -734,6 +734,20 @@ pub trait ForgeAdapter: Send + Sync {
         credential: &ForgeCredential,
     ) -> Result<domain::CombinedCommitStatus, ForgeError>;
 
+    /// Retrieve an independently snapshotted plain-text step download.
+    ///
+    /// # Errors
+    /// Returns validation or upstream adapter errors.
+    async fn get_repository_ci_step_log_download(
+        &self,
+        _repository: &RepositoryRef,
+        selector: domain::CiStepLogSelector,
+        _options: domain::CiStepLogOptions,
+        _credential: &ForgeCredential,
+    ) -> Result<domain::RepositoryCiStepLogDownload, ForgeError> {
+        Ok(domain::RepositoryCiStepLogDownload::unsupported(selector))
+    }
+
     /// Retrieve explicitly selected retained step output independently of state.
     async fn get_repository_ci_step_logs(
         &self,

@@ -71,6 +71,14 @@ use utoipa_scalar::{Scalar, Servable};
         api::CiStepLogStatusResult,
         api::CiStepLogDiagnosticResult,
         api::RepositoryCiStepLogsResult,
+        api::CiStepLogDownloadSourceResult,
+        api::CiStepLogDownloadRepresentationResult,
+        api::CiLogOutputCompletenessResult,
+        api::CiStepLogDownloadStatusResult,
+        api::CiStepLogDownloadFragmentResult,
+        api::CiStepLogDownloadDiagnosticResult,
+        api::RepositoryCiStepLogDownloadResult,
+
 
         api::HistoricalEvidenceKindResult,
         api::HistoricalCiSelectorResult,

@@ -920,3 +920,7 @@ impl From<domain::RepositoryCiDetails> for RepositoryCiDetailsResult {
 #[path = "ci_step_logs_api.rs"]
 mod ci_step_logs;
 pub use ci_step_logs::*;
+
+#[path = "ci_step_log_download_api.rs"]
+mod ci_step_log_download;
+pub use ci_step_log_download::*;
