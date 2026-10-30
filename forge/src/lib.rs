@@ -2289,6 +2289,24 @@ impl ForgeAdapter for ForgejoAdapter {
         })
     }
 
+    async fn get_repository_ci_step_logs(
+        &self,
+        repository: &RepositoryRef,
+        selector: domain::CiStepLogSelector,
+        options: domain::CiStepLogOptions,
+        credential: &ForgeCredential,
+    ) -> Result<domain::RepositoryCiStepLogs, ForgeError> {
+        woodpecker_step_logs::read(
+            &self.config,
+            repository,
+            selector,
+            &options,
+            credential,
+            woodpecker_step_logs::ReaderLimits::default(),
+        )
+        .await
+    }
+
     async fn get_repository_ci_details(
         &self,
         repository: &RepositoryRef,
