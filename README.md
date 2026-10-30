@@ -1294,6 +1294,31 @@ archival, and cannot reconstruct deleted runs or logs. Current runner metadata
 cannot explain historical termination.
 
 
+### Discover step selectors
+
+The selected `get_repository_ci_details` response exposes
+`outcome.evidence.woodpecker.steps`: validated workflow children for successful,
+running and failed runs, including successful siblings in failed runs. Each
+entry includes `workflow_id`, `id` (step database ID), sanitized `name` and
+`state`, retained `uuid` when available, and `timestamps`. Duplicate names are
+allowed; select by numeric IDs. Metadata listing does not fetch nonfailed logs.
+Runner credentials and runner lookup failures do not suppress these selectors.
+
+`steps_complete: true` means all provider-reported workflows and children were
+inventoried. Missing/null workflow or child metadata, invalid bindings, and
+workflow/step/output limits set it to false with diagnostics. Thus `steps: []`
+with false is unknown or partial, while true means no reported children.
+Service selectors appear only if the provider reports services as children;
+the `not_exposed` diagnostic explicitly limits service discovery. Completeness
+never asserts that the provider reports all services.
+
+Copy an entry's `workflow_id` and `id` into `workflow_id` and `step_id` below,
+keeping the same repository and pipeline number. The reader revalidates source
+identity and reads retained output regardless of step state. Compare its commit,
+pipeline and child identity with the selected details if the run changed.
+Selected historical evidence remains diagnostic and never qualifies current-head
+CI or merge eligibility.
+
 ### Bounded retained step output
 
 Use MCP `get_repository_ci_step_logs` or

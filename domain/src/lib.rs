@@ -1325,6 +1325,24 @@ pub struct WoodpeckerStepEvidence {
     pub diagnostics: Vec<CiDiagnostic>,
 }
 
+/// Validated child metadata for selecting retained output, independent of state.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct WoodpeckerStepSelector {
+    /// Containing workflow database ID (not workflow position).
+    pub workflow_id: i64,
+    /// Step database ID; names are not identifiers.
+    pub id: i64,
+    /// Sanitized, bounded provider name.
+    pub name: String,
+    /// Sanitized, bounded provider state.
+    pub state: String,
+    /// Retained provider UUID, when available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uuid: Option<String>,
+    /// Retained provider timestamps.
+    pub timestamps: CiTimestamps,
+}
+
 /// Typed CI evidence; provider text must be sanitized and bounded before construction.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct WoodpeckerWorkflowEvidence {
@@ -1380,6 +1398,11 @@ pub struct WoodpeckerPipelineEvidence {
     pub timestamps: CiTimestamps,
     /// Workflows, including failures without failed steps.
     pub workflows: Vec<WoodpeckerWorkflowEvidence>,
+    /// Validated workflow children in provider order, regardless of state.
+    pub steps: Vec<WoodpeckerStepSelector>,
+    /// True only when all reported workflows and children were inventoried.
+    /// Does not assert that the provider reports services or unreported children.
+    pub steps_complete: bool,
     /// Allowlisted current observations, stored once per runner.
     pub runners: Vec<WoodpeckerRunnerEvidence>,
     /// Component failures and explicit capability limitations.

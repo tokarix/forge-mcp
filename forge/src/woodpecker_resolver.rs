@@ -7,7 +7,7 @@ use domain::{
     CiDiagnostic, CiDiagnosticCode as Code, CiDiagnosticComponent as Component, CiFailureStep,
     CiLogExcerpt, CiProvider, CiResolution, CiTimestamps, RepositoryRef,
     WoodpeckerPipelineEvidence, WoodpeckerRunnerEvidence, WoodpeckerStepEvidence,
-    WoodpeckerWorkflowEvidence,
+    WoodpeckerStepSelector, WoodpeckerWorkflowEvidence,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -311,6 +311,8 @@ impl Resolver {
             errors: Vec::new(),
             timestamps: pipeline.clock.into(),
             workflows: Vec::new(),
+            steps: Vec::new(),
+            steps_complete: pipeline.workflows.is_some(),
             runners: Vec::new(),
             diagnostics: vec![diagnostic(
                 Component::Termination,
@@ -339,6 +341,16 @@ impl Resolver {
                 None,
             ));
         }
+        if !evidence.steps_complete {
+            evidence.diagnostics.push(diagnostic(
+                Component::Pipeline,
+                &missing_children(),
+                id,
+                None,
+                None,
+                None,
+            ));
+        }
         let errors = pipeline.errors.unwrap_or_default();
         if errors.len() > 64 {
             self.truncated = true;
@@ -358,6 +370,7 @@ impl Resolver {
         for workflow in pipeline.workflows.unwrap_or_default() {
             if self.workflows >= self.limits.workflows {
                 self.truncated = true;
+                evidence.steps_complete = false;
                 break;
             }
             self.workflows += 1;
@@ -367,6 +380,7 @@ impl Resolver {
                 || !workflow_ids.insert(workflow.id)
                 || !workflow_positions.insert(workflow.pid)
             {
+                evidence.steps_complete = false;
                 evidence.diagnostics.push(diagnostic(
                     Component::Workflow,
                     &binding(),
@@ -377,10 +391,12 @@ impl Resolver {
                 ));
                 continue;
             }
+            let children_missing = workflow.children.is_none();
             let children = workflow.children.unwrap_or_default();
             if children.iter().any(|s| {
                 s.id <= 0 || s.pipeline_id != id || s.ppid != workflow.pid || !step_ids.insert(s.id)
             }) {
+                evidence.steps_complete = false;
                 evidence.diagnostics.push(diagnostic(
                     Component::Workflow,
                     &binding(),
@@ -433,12 +449,37 @@ impl Resolver {
                     }
                 }
             }
+            if children_missing {
+                evidence.steps_complete = false;
+                evidence.diagnostics.push(diagnostic(
+                    Component::Workflow,
+                    &missing_children(),
+                    id,
+                    Some(workflow.id),
+                    None,
+                    None,
+                ));
+            }
             for step in children {
                 if self.steps >= self.limits.steps {
                     self.truncated = true;
+                    evidence.steps_complete = false;
                     break;
                 }
                 self.steps += 1;
+                evidence.steps.push(WoodpeckerStepSelector {
+                    workflow_id: wid,
+                    id: step.id,
+                    name: self.text(&step.name, self.limits.string_bytes),
+                    state: self.text(&step.state, 64),
+                    uuid: self.optional(step.uuid.clone()),
+                    timestamps: CiTimestamps {
+                        created: step.clock.created,
+                        updated: step.clock.updated,
+                        started: step.clock.started,
+                        finished: step.clock.finished,
+                    },
+                });
                 if !matches!(step.state.as_str(), "failure" | "error") {
                     continue;
                 }
@@ -469,6 +510,15 @@ impl Resolver {
                 });
             }
         }
+        evidence.diagnostics.push(diagnostic(
+            Component::Workflow,
+            &Failure {
+                code: Code::NotExposed,
+                status: None,
+                message: "Step inventory covers provider-reported workflow children only; service selectors are unavailable unless reported as children",
+            },
+            id, None, None, None,
+        ));
         if self.truncated {
             evidence.diagnostics.push(diagnostic(
                 Component::Operation,
@@ -620,8 +670,9 @@ impl Resolver {
                 .find(|s| s.log_excerpt.is_some())
             {
                 step.log_excerpt = None;
+            } else if e.steps.pop().is_some() || e.workflows.pop().is_some() {
+                e.steps_complete = false;
             } else if failed_steps.pop().is_some()
-                || e.workflows.pop().is_some()
                 || e.runners.pop().is_some()
                 || e.errors.pop().is_some()
             {
@@ -644,6 +695,13 @@ pub(crate) fn selection_failure(
         evidence_kind: domain::CiEvidenceKind::Historical,
         selector,
         outcome: domain::HistoricalCiOutcome::SelectionDiagnostic { diagnostic: d },
+    }
+}
+fn missing_children() -> Failure {
+    Failure {
+        code: Code::MalformedResponse,
+        status: None,
+        message: "Provider omitted workflow or child inventory; an empty inventory is not authoritative",
     }
 }
 fn binding() -> Failure {
@@ -753,6 +811,137 @@ mod tests {
             pipeline_number: 42,
         }
     }
+    #[tokio::test]
+    async fn inventory_discovers_all_states_and_round_trips_without_runner_credentials() {
+        for state in ["success", "running", "failure"] {
+            let server = MockServer::start().await;
+            let mut p = fixture("pipeline");
+            p["status"] = state.into();
+            p["workflows"][0]["children"][0]["state"] = state.into();
+            let mut sibling = p["workflows"][0]["children"][0].clone();
+            sibling["id"] = 7002.into();
+            sibling["state"] = "success".into();
+            // Duplicate names deliberately retain distinct numeric identities.
+            p["workflows"][0]["children"]
+                .as_array_mut()
+                .expect("children")
+                .push(sibling);
+            let mut service = p["workflows"][0]["children"][0].clone();
+            service["id"] = 7003.into();
+            service["name"] = "postgres-service".into();
+            service["state"] = "running".into();
+            p["workflows"][0]["children"]
+                .as_array_mut()
+                .expect("children")
+                .push(service);
+            setup(&server, p).await;
+            mount(&server, "/api/repos/29/logs/42/7001", fixture("passing")).await;
+            let details = resolver(&server, None, Limits::default())
+                .historical(&repository(), selector())
+                .await;
+            let json = serde_json::to_value(&details).expect("json");
+            let evidence = &json["outcome"]["evidence"]["woodpecker"];
+            assert_eq!(evidence["steps_complete"], true);
+            assert_eq!(evidence["steps"].as_array().expect("steps").len(), 3);
+            assert_eq!(evidence["steps"][0]["state"], state);
+            assert_eq!(evidence["steps"][1]["state"], "success");
+            assert_eq!(evidence["steps"][2]["name"], "postgres-service");
+            let requests = server.received_requests().await.expect("requests");
+            assert_eq!(requests.len(), if state == "failure" { 3 } else { 2 });
+            assert!(
+                requests
+                    .iter()
+                    .all(|r| !r.url.path().contains("agents") && !r.url.path().ends_with("7002"))
+            );
+            let page = crate::woodpecker_step_logs::read(
+                &crate::ForgejoConfig {
+                    base_url: "https://forge.example.invalid".into(),
+                    token: None,
+                    woodpecker_url: Some(server.uri()),
+                    woodpecker_token: None,
+                },
+                &repository(),
+                domain::CiStepLogSelector {
+                    provider: "woodpecker".into(),
+                    provider_repository_id: 29,
+                    pipeline_number: 42,
+                    workflow_id: evidence["steps"][0]["workflow_id"]
+                        .as_u64()
+                        .expect("workflow"),
+                    step_id: evidence["steps"][0]["id"].as_u64().expect("step"),
+                },
+                &domain::CiStepLogOptions::default(),
+                &domain::ForgeCredential { token: None },
+                crate::woodpecker_step_logs::ReaderLimits::default(),
+            )
+            .await
+            .expect("logs");
+            assert_eq!(page.status, domain::CiStepLogStatus::Available);
+            let identity = page.identity.expect("identity");
+            assert_eq!(identity.commit, json["outcome"]["commit"]);
+            assert_eq!(identity.pipeline_id, evidence["id"]);
+            assert_eq!(identity.selector.step_id, 7001);
+            assert_eq!(identity.selector.provider_repository_id, 29);
+        }
+    }
+
+    #[tokio::test]
+    async fn inventory_distinguishes_missing_empty_invalid_and_bounded_children() {
+        for mode in [
+            "missing_workflows",
+            "missing_children",
+            "empty",
+            "invalid",
+            "step_limit",
+            "workflow_limit",
+            "output_limit",
+        ] {
+            let server = MockServer::start().await;
+            let mut p = fixture("pipeline");
+            p["workflows"][0]["children"][0]["state"] = "success".into();
+            let mut limits = Limits::default();
+            match mode {
+                "missing_workflows" => {
+                    p.as_object_mut().expect("pipeline").remove("workflows");
+                }
+                "missing_children" => {
+                    p["workflows"][0]
+                        .as_object_mut()
+                        .expect("workflow")
+                        .remove("children");
+                }
+                "empty" => p["workflows"][0]["children"] = serde_json::json!([]),
+                "invalid" => p["workflows"][0]["children"][0]["ppid"] = 999.into(),
+                "step_limit" => limits.steps = 0,
+                "workflow_limit" => limits.workflows = 0,
+                "output_limit" => {
+                    let mut child = p["workflows"][0]["children"][0].clone();
+                    child["name"] = "x".repeat(1024).into();
+                    child["id"] = 7002.into();
+                    p["workflows"][0]["children"]
+                        .as_array_mut()
+                        .expect("children")
+                        .push(child);
+                    limits.output_bytes = 1800;
+                }
+                _ => unreachable!(),
+            }
+            setup(&server, p).await;
+            let json = serde_json::to_value(
+                resolver(&server, None, limits)
+                    .historical(&repository(), selector())
+                    .await,
+            )
+            .expect("json");
+            let e = &json["outcome"]["evidence"]["woodpecker"];
+            assert_eq!(e["steps_complete"], mode == "empty", "{mode}: {json}");
+            if mode != "output_limit" {
+                assert_eq!(e["steps"], serde_json::json!([]), "{mode}");
+            }
+            assert_eq!(server.received_requests().await.expect("requests").len(), 2);
+        }
+    }
+
     #[tokio::test]
     async fn historical_keeps_actual_identity_for_every_provider_state_without_current_reads() {
         for state in ["failure", "pending", "success"] {
@@ -1043,6 +1232,8 @@ mod tests {
             .await;
             assert_eq!(result["type"], "resolved");
             assert_eq!(result["woodpecker"]["diagnostics"][1]["code"], code);
+            assert_eq!(result["woodpecker"]["steps"][0]["id"], 7001);
+            assert_eq!(result["woodpecker"]["steps_complete"], true);
             assert_eq!(
                 result["failed_steps"][0]["woodpecker"]["diagnostics"][0]["http_status"],
                 status

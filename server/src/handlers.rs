@@ -8100,6 +8100,19 @@ mod tests {
                 runner_id: Some(17),
                 timestamps: timestamps.clone(),
             }],
+            steps: ["success", "running", "failure"]
+                .into_iter()
+                .enumerate()
+                .map(|(i, state)| domain::WoodpeckerStepSelector {
+                    workflow_id: 6001,
+                    id: 7001 + i64::try_from(i).expect("index"),
+                    name: "verify".into(),
+                    state: state.into(),
+                    uuid: Some(format!("uuid-{i}")),
+                    timestamps: timestamps.clone(),
+                })
+                .collect(),
+            steps_complete: true,
             runners: vec![],
             diagnostics: vec![domain::CiDiagnostic {
                 component: domain::CiDiagnosticComponent::Runner,
@@ -8122,6 +8135,38 @@ mod tests {
             diagnostics: vec![],
         };
         let expected = serde_json::to_value(&evidence).expect("evidence");
+        for state in ["success", "running", "failure"] {
+            let mut selected_evidence = evidence.clone();
+            selected_evidence.status = Some(state.into());
+            let selected = domain::RepositoryCiDetails {
+                evidence_kind: domain::CiEvidenceKind::Historical,
+                selector: domain::HistoricalCiSelector {
+                    provider: "woodpecker".into(),
+                    provider_repository_id: 29,
+                    pipeline_number: 42,
+                },
+                outcome: domain::HistoricalCiOutcome::Selected {
+                    commit: "selected-commit".into(),
+                    reference: Some("refs/heads/old".into()),
+                    evidence: Box::new(domain::CiResolution::Resolved {
+                        provider: domain::CiProvider::Woodpecker,
+                        pipeline_url: "https://ci.example/repos/29/pipeline/42".into(),
+                        failed_steps: vec![],
+                        woodpecker: Some(Box::new(selected_evidence)),
+                    }),
+                },
+            };
+            let rest = serde_json::to_value(crate::api::RepositoryCiDetailsResult::from(selected))
+                .expect("REST JSON");
+            assert_eq!(
+                rest["outcome"]["evidence"]["woodpecker"]["steps"],
+                expected["steps"]
+            );
+            assert_eq!(
+                rest["outcome"]["evidence"]["woodpecker"]["steps_complete"],
+                true
+            );
+        }
         let mut read = FakeReadService::new();
         read.ci_details = Some(domain::ChangeRequestCiDetails {
             head_sha: "abc123".into(),

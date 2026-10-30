@@ -456,6 +456,37 @@ impl From<domain::WoodpeckerStepEvidence> for WoodpeckerStepEvidenceResult {
     }
 }
 
+/// Validated child metadata for selecting retained output, independent of state.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct WoodpeckerStepSelectorResult {
+    /// Containing workflow database ID (not workflow position).
+    pub workflow_id: i64,
+    /// Step database ID; names are not identifiers.
+    pub id: i64,
+    /// Sanitized, bounded provider name.
+    pub name: String,
+    /// Sanitized, bounded provider state.
+    pub state: String,
+    /// Retained provider UUID, when available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uuid: Option<String>,
+    /// Retained provider timestamps.
+    pub timestamps: CiTimestampsResult,
+}
+
+impl From<domain::WoodpeckerStepSelector> for WoodpeckerStepSelectorResult {
+    fn from(value: domain::WoodpeckerStepSelector) -> Self {
+        Self {
+            workflow_id: value.workflow_id,
+            id: value.id,
+            name: value.name,
+            state: value.state,
+            uuid: value.uuid,
+            timestamps: value.timestamps.into(),
+        }
+    }
+}
+
 /// Typed CI evidence; provider text must be sanitized and bounded before construction.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct WoodpeckerWorkflowEvidenceResult {
@@ -535,6 +566,10 @@ pub struct WoodpeckerPipelineEvidenceResult {
     pub timestamps: CiTimestampsResult,
     /// Workflows, including failures without failed steps.
     pub workflows: Vec<WoodpeckerWorkflowEvidenceResult>,
+    /// Validated workflow children, regardless of state.
+    pub steps: Vec<WoodpeckerStepSelectorResult>,
+    /// Whether all provider-reported workflows and children were inventoried.
+    pub steps_complete: bool,
     /// Allowlisted current observations, stored once per runner.
     pub runners: Vec<WoodpeckerRunnerEvidenceResult>,
     /// Component failures and explicit capability limitations.
@@ -551,6 +586,8 @@ impl From<domain::WoodpeckerPipelineEvidence> for WoodpeckerPipelineEvidenceResu
             errors: value.errors,
             timestamps: value.timestamps.into(),
             workflows: value.workflows.into_iter().map(Into::into).collect(),
+            steps: value.steps.into_iter().map(Into::into).collect(),
+            steps_complete: value.steps_complete,
             runners: value.runners.into_iter().map(Into::into).collect(),
             diagnostics: value.diagnostics.into_iter().map(Into::into).collect(),
         }
@@ -768,6 +805,7 @@ mod ci_evidence_contract_tests {
             "WoodpeckerPipelineEvidenceResult",
             "WoodpeckerStepEvidenceResult",
             "WoodpeckerWorkflowEvidenceResult",
+            "WoodpeckerStepSelectorResult",
             "WoodpeckerRunnerEvidenceResult",
             "CiDiagnosticResult",
             "CiDiagnosticCodeResult",

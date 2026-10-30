@@ -86,6 +86,7 @@ use utoipa_scalar::{Scalar, Servable};
         api::CiTimestampsResult,
         api::WoodpeckerStepEvidenceResult,
         api::WoodpeckerWorkflowEvidenceResult,
+        api::WoodpeckerStepSelectorResult,
         api::WoodpeckerRunnerEvidenceResult,
         api::WoodpeckerPipelineEvidenceResult,
 
