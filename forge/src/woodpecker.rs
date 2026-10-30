@@ -60,6 +60,36 @@ impl Default for Limits {
     }
 }
 
+/// Independent transport budgets for explicitly selected retained step output.
+///
+/// The provider returns a full array without range support. Each page must fetch
+/// that full bounded body again; log bodies are never retained in the cache.
+#[derive(Clone, Copy, Debug)]
+pub struct StepLogTransportLimits {
+    /// Overall deadline, including subsequent CPU work checked by the reader.
+    pub elapsed: Duration,
+    /// Repository, pipeline and one selected log request; no retries.
+    pub requests: usize,
+    /// Maximum bytes for each repository/pipeline metadata response.
+    pub metadata_bytes: usize,
+    /// Maximum bytes for the exact raw retained log response.
+    pub log_bytes: usize,
+    /// Cumulative fetched bytes across metadata and log responses.
+    pub fetched_bytes: usize,
+}
+
+impl Default for StepLogTransportLimits {
+    fn default() -> Self {
+        Self {
+            elapsed: Duration::from_secs(30),
+            requests: 3,
+            metadata_bytes: 2 * 1024 * 1024,
+            log_bytes: 8 * 1024 * 1024,
+            fetched_bytes: 12 * 1024 * 1024,
+        }
+    }
+}
+
 /// Safe transport failure; never includes upstream bodies, URLs or headers.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Failure {
@@ -214,6 +244,7 @@ pub struct Session {
     token: Option<String>,
     limits: Limits,
     deadline: Instant,
+    log_body_bytes: usize,
     requests: usize,
     fetched: usize,
     cache: HashMap<Resource, Result<Vec<u8>, Failure>>,
@@ -243,10 +274,83 @@ impl Session {
             token,
             limits,
             deadline: Instant::now() + limits.elapsed,
+            log_body_bytes: limits.body_bytes,
             requests: 0,
             fetched: 0,
             cache: HashMap::new(),
         })
+    }
+
+    /// Construct an independent full-log reader with log-specific budgets.
+    ///
+    /// # Errors
+    /// Returns a safe diagnostic when the HTTP client cannot be initialized.
+    pub fn for_step_logs(
+        origin: Origin,
+        token: Option<String>,
+        limits: StepLogTransportLimits,
+    ) -> Result<Self, Failure> {
+        let mut session = Self::new(
+            origin,
+            token,
+            Limits {
+                elapsed: limits.elapsed,
+                requests: limits.requests,
+                body_bytes: limits.metadata_bytes,
+                fetched_bytes: limits.fetched_bytes,
+                ..Limits::default()
+            },
+        )?;
+        session.log_body_bytes = limits.log_bytes;
+        Ok(session)
+    }
+
+    /// Check the shared deadline during decoding and page assembly, too.
+    ///
+    /// # Errors
+    /// Reports a hard operation limit, never a successful snapshot EOF.
+    pub fn check_deadline(&self) -> Result<(), Failure> {
+        if Instant::now() >= self.deadline {
+            Err(Failure::limit())
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Fetch exact retained log bytes without parsing or caching the log body.
+    ///
+    /// The caller must first validate repository, pipeline and step membership.
+    /// This method accepts only positive signed provider IDs, never URLs. It
+    /// shares request, cumulative byte and deadline budgets with metadata reads.
+    ///
+    /// # Errors
+    /// Reports safe HTTP, body, deadline and byte/request-limit failures.
+    pub async fn step_log_body(
+        &mut self,
+        repository: u64,
+        number: u64,
+        step: u64,
+    ) -> Result<Vec<u8>, Failure> {
+        if [repository, number, step]
+            .into_iter()
+            .any(|id| id == 0 || i64::try_from(id).is_err())
+        {
+            return Err(binding_failure());
+        }
+        self.check_deadline()?;
+        if self.requests >= self.limits.requests {
+            return Err(Failure::limit());
+        }
+        self.requests += 1;
+        let resource = Resource::Logs(repository, number, step);
+        let bytes = timeout_at(
+            self.deadline,
+            self.fetch_with_cap(resource, self.log_body_bytes),
+        )
+        .await
+        .map_err(|_| Failure::limit())??;
+        self.check_deadline()?;
+        Ok(bytes)
     }
 
     /// Retrieve bounded JSON. Both successful and failed resources are reused.
@@ -288,6 +392,14 @@ impl Session {
     }
 
     async fn fetch(&mut self, resource: Resource) -> Result<Vec<u8>, Failure> {
+        self.fetch_with_cap(resource, self.limits.body_bytes).await
+    }
+
+    async fn fetch_with_cap(
+        &mut self,
+        resource: Resource,
+        body_cap: usize,
+    ) -> Result<Vec<u8>, Failure> {
         let url = self
             .origin
             .0
@@ -316,7 +428,7 @@ impl Session {
             });
         }
         let remaining = self.limits.fetched_bytes.saturating_sub(self.fetched);
-        let cap = self.limits.body_bytes.min(remaining);
+        let cap = body_cap.min(remaining);
         if response
             .content_length()
             .is_some_and(|len| len > cap as u64)
@@ -381,6 +493,227 @@ mod tests {
             limits,
         )
         .expect("session")
+    }
+
+    #[tokio::test]
+    async fn selected_log_has_independent_body_cap_exact_bytes_and_no_log_cache() {
+        let mock = MockServer::start().await;
+        Mock::given(path("/ci/api/repos/1"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        let raw = "[ {\"data\":\"YQ==\"} ]\n";
+        Mock::given(path("/ci/api/repos/1/logs/42/9"))
+            .and(header("Authorization", "Bearer CI_SENTINEL"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(raw))
+            .expect(2)
+            .mount(&mock)
+            .await;
+        let mut client = Session::for_step_logs(
+            Origin::parse(&format!("{}/ci", mock.uri())).expect("origin"),
+            Some("CI_SENTINEL".into()),
+            StepLogTransportLimits {
+                metadata_bytes: 2,
+                log_bytes: raw.len(),
+                fetched_bytes: 2 + 2 * raw.len(),
+                ..StepLogTransportLimits::default()
+            },
+        )
+        .expect("session");
+        client
+            .json::<Value>(Resource::Repository(1))
+            .await
+            .expect("metadata");
+        for _ in 0..2 {
+            assert_eq!(
+                client.step_log_body(1, 42, 9).await.expect("raw"),
+                raw.as_bytes()
+            );
+        }
+        assert_eq!(client.cache.len(), 1);
+        assert_eq!(client.fetched, 2 + 2 * raw.len());
+        assert_eq!(
+            client
+                .step_log_body(1, 42, 9)
+                .await
+                .expect_err("request cap")
+                .code,
+            CiDiagnosticCode::LimitExceeded
+        );
+        assert_eq!(mock.received_requests().await.expect("requests").len(), 3);
+    }
+
+    #[tokio::test]
+    async fn selected_log_shares_cumulative_limits_but_not_metadata_cap() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("null"))
+            .mount(&mock)
+            .await;
+        for (metadata_bytes, log_bytes, fetched_bytes) in [(3, 8, 8), (8, 3, 8), (8, 8, 7)] {
+            let mut client = Session::for_step_logs(
+                Origin::parse(&mock.uri()).expect("origin"),
+                None,
+                StepLogTransportLimits {
+                    metadata_bytes,
+                    log_bytes,
+                    fetched_bytes,
+                    ..StepLogTransportLimits::default()
+                },
+            )
+            .expect("session");
+            let metadata = client.json::<Value>(Resource::Repository(1)).await;
+            let logs = client.step_log_body(1, 42, 9).await;
+            if metadata_bytes == 3 {
+                assert_eq!(
+                    metadata.expect_err("metadata cap").code,
+                    CiDiagnosticCode::LimitExceeded
+                );
+                assert_eq!(logs.expect("larger log cap"), b"null");
+            } else {
+                metadata.expect("metadata");
+                assert_eq!(
+                    logs.expect_err("log or cumulative cap").code,
+                    CiDiagnosticCode::LimitExceeded
+                );
+            }
+            assert!(!client.cache.contains_key(&Resource::Logs(1, 42, 9)));
+        }
+    }
+
+    #[tokio::test]
+    async fn selected_log_invalid_ids_and_expired_deadline_do_not_request() {
+        let mock = MockServer::start().await;
+        let mut client = Session::for_step_logs(
+            Origin::parse(&mock.uri()).expect("origin"),
+            None,
+            StepLogTransportLimits::default(),
+        )
+        .expect("session");
+        for (repo, number, step) in [(0, 42, 9), (1, 0, 9), (1, 42, 0), (1, 42, u64::MAX)] {
+            assert_eq!(
+                client
+                    .step_log_body(repo, number, step)
+                    .await
+                    .expect_err("id")
+                    .code,
+                CiDiagnosticCode::BindingMismatch
+            );
+        }
+        client.deadline = Instant::now();
+        assert_eq!(
+            client.check_deadline().expect_err("CPU deadline").code,
+            CiDiagnosticCode::LimitExceeded
+        );
+        assert_eq!(
+            client
+                .step_log_body(1, 42, 9)
+                .await
+                .expect_err("deadline")
+                .code,
+            CiDiagnosticCode::LimitExceeded
+        );
+        assert!(mock.received_requests().await.expect("requests").is_empty());
+    }
+
+    #[tokio::test]
+    async fn selected_log_errors_do_not_surface_bodies_and_redirects_do_not_escape() {
+        let mock = MockServer::start().await;
+        let destination = MockServer::start().await;
+        for (step, status, code) in [
+            (1, 401, CiDiagnosticCode::AuthorizationDenied),
+            (2, 404, CiDiagnosticCode::ResourceNotFound),
+            (3, 429, CiDiagnosticCode::Unavailable),
+            (4, 500, CiDiagnosticCode::Unavailable),
+            (5, 302, CiDiagnosticCode::Unavailable),
+        ] {
+            Mock::given(path(format!("/api/repos/1/logs/42/{step}")))
+                .respond_with(
+                    ResponseTemplate::new(status)
+                        .set_body_string("SENTINEL_SECRET")
+                        .insert_header("Location", format!("{}/stolen", destination.uri())),
+                )
+                .mount(&mock)
+                .await;
+            let mut client = Session::for_step_logs(
+                Origin::parse(&mock.uri()).expect("origin"),
+                Some("CI_SENTINEL".into()),
+                StepLogTransportLimits::default(),
+            )
+            .expect("session");
+            let error = client
+                .step_log_body(1, 42, step)
+                .await
+                .expect_err("HTTP error");
+            assert_eq!(error.code, code);
+            assert_eq!(error.status, Some(status));
+            assert!(!format!("{error:?}").contains("SENTINEL"));
+            assert!(client.cache.is_empty());
+        }
+        assert!(
+            destination
+                .received_requests()
+                .await
+                .expect("requests")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn selected_log_chunked_limit_and_slow_read_are_hard_failures() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        for slow in [false, true] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("listener");
+            let origin = Origin::parse(&format!(
+                "http://{}",
+                listener.local_addr().expect("address")
+            ))
+            .expect("origin");
+            let provider = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.expect("accept");
+                let mut buffer = [0; 4096];
+                assert!(socket.read(&mut buffer).await.expect("request") > 0);
+                if slow {
+                    socket
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nn")
+                        .await
+                        .expect("partial body");
+                    tokio::time::sleep(Duration::from_millis(150)).await;
+                } else {
+                    socket.write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n9\r\n123456789\r\n0\r\n\r\n")
+                        .await.expect("chunked body");
+                    socket.shutdown().await.expect("close");
+                }
+            });
+            let mut client = Session::for_step_logs(
+                origin,
+                None,
+                StepLogTransportLimits {
+                    elapsed: Duration::from_millis(75),
+                    log_bytes: 8,
+                    ..StepLogTransportLimits::default()
+                },
+            )
+            .expect("session");
+            let error = client
+                .step_log_body(1, 42, 9)
+                .await
+                .expect_err("hard read limit");
+            if slow {
+                assert!(matches!(
+                    error.code,
+                    CiDiagnosticCode::LimitExceeded | CiDiagnosticCode::Unavailable
+                ));
+            } else {
+                assert_eq!(error.code, CiDiagnosticCode::LimitExceeded);
+            }
+            assert!(client.cache.is_empty());
+            provider.await.expect("provider");
+        }
     }
 
     #[test]
