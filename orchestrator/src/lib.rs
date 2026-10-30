@@ -149,6 +149,65 @@ where
             .map_err(|e| ServiceError::Upstream(e.to_string()))
     }
 
+    async fn get_repository_ci_step_logs(
+        &self,
+        request: domain::GetRepositoryCiStepLogsRequest,
+        credential: &ForgeCredential,
+    ) -> Result<domain::RepositoryCiStepLogs, ServiceError> {
+        if !request.selector.valid() {
+            return Err(ServiceError::Validation(
+                "Step log IDs must be positive signed 64-bit integers".into(),
+            ));
+        }
+        request
+            .options
+            .validate()
+            .map_err(|message| ServiceError::Validation(message.into()))?;
+        let target = format!(
+            "{}/{}/{}/{}/{}",
+            request.selector.provider,
+            request.selector.provider_repository_id,
+            request.selector.pipeline_number,
+            request.selector.workflow_id,
+            request.selector.step_id
+        );
+        self.audit_sink
+            .record(AuditRecord {
+                agent: request.agent.clone(),
+                action: "get_repository_ci_step_logs".into(),
+                repository: request.repository.clone(),
+                target: target.clone(),
+            })
+            .await
+            .map_err(|e| ServiceError::Audit(e.to_string()))?;
+        let result = self
+            .adapter
+            .get_repository_ci_step_logs(
+                &request.repository,
+                request.selector,
+                request.options,
+                credential,
+            )
+            .await
+            .map_err(|error| match error {
+                forge::ForgeError::InvalidPayload(message) => ServiceError::Validation(message),
+                _ => ServiceError::Upstream("Step log reader failed".into()),
+            });
+        let outcome = result
+            .as_ref()
+            .map_or_else(|_| "error".into(), |page| format!("{:?}", page.status));
+        self.audit_sink
+            .record(AuditRecord {
+                agent: request.agent,
+                action: "get_repository_ci_step_logs_outcome".into(),
+                repository: request.repository,
+                target: format!("{target}/{outcome}"),
+            })
+            .await
+            .map_err(|e| ServiceError::Audit(e.to_string()))?;
+        result
+    }
+
     async fn get_repository_ci_details(
         &self,
         request: domain::GetRepositoryCiDetailsRequest,

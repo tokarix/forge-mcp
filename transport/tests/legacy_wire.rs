@@ -147,6 +147,7 @@ async fn baseline_initialization_and_catalog() {
         // separately below through tools/list and tools/call.
         // Issue #261 adds an inline read, covered by its own schema/session tests.
         // Issue #266 adds historical CI, with separate schema/session coverage.
+        // Issue #269 adds retained logs, with composed schema/session coverage.
         for frame in [&mut catalog, &mut expected] {
             frame["result"]["tools"]
                 .as_array_mut()
@@ -155,6 +156,7 @@ async fn baseline_initialization_and_catalog() {
                     tool["name"] != "list_change_requests"
                         && tool["name"] != "get_change_request_inline_comments"
                         && tool["name"] != "get_repository_ci_details"
+                        && tool["name"] != "get_repository_ci_step_logs"
                 });
         }
         assert_eq!(catalog, expected);

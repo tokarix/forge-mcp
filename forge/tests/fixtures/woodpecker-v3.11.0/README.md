@@ -76,3 +76,14 @@ Historical selection also decodes the pinned pipeline model's `commit` and
 in the synthetic pipeline fixtures. They describe the selected run's source,
 independently of current PR metadata. The public historical envelope calls
 the latter `reference`; no repository ID field is invented in pipeline JSON.
+
+
+`six-panics.json` and its exact decoded counterpart `six-panics.txt` are
+synthetic retained output, not production captures. They follow the pinned
+base64 `data` record contract and include 36 ordered records, six distinct
+panic blocks, whitespace and multibyte scalars. The composed MCP/gateway/
+orchestrator/Forgejo-adapter test traverses this successful retained step from
+tail through `beginning_cursor` and reconstructs the complete text across pages,
+including blocks preceding the final 20 records. No provider line number is
+used as a traversal position. These fixtures pin a supported API contract and
+do not claim the deployed Woodpecker version or live-provider qualification.

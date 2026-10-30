@@ -1292,3 +1292,57 @@ for those decisions. Evidence is bounded and redacted, with explicit partial
 diagnostics. This retrieves evidence still retained upstream, not durable log
 archival, and cannot reconstruct deleted runs or logs. Current runner metadata
 cannot explain historical termination.
+
+
+### Bounded retained step output
+
+Use MCP `get_repository_ci_step_logs` or
+`GET /api/v1/repos/{forge}/{owner}/{repo}/ci/woodpecker/{provider_repository_id}/pipelines/{pipeline_number}/workflows/{workflow_id}/steps/{step_id}/logs`.
+Each read authorizes repository access and validates the provider repository,
+run and child membership before fetching output. `pipeline_number` is the
+repository run number. `workflow_id` and `step_id` are database IDs returned by
+CI details, distinct from workflow position/pid, pipeline database ID and runner
+ID. Output can be read for successful, failed, active and service steps while
+retained. Historical evidence never establishes current-head CI success or
+merge eligibility; infrastructure causes remain `not_exposed`.
+
+```json
+{"forge":"adlevio","owner":"tokarix","repo":"forge-mcp","provider":"woodpecker","provider_repository_id":29,"pipeline_number":42,"workflow_id":6001,"step_id":7001,"page_bytes":16384,"start":"beginning"}
+```
+
+`strict-snapshot-v1` supports a retained snapshot, including an unchanged active
+step. It does **not** follow a continuously changing live log. Every page
+re-fetches the full bounded response: O(retained log size) work per page. Any
+raw body change (append, rewrite, shrink or replacement), source/child identity
+change or redaction policy change invalidates continuation. `stale_cursor` or
+`binding_mismatch` requires an explicit restart; the reader never silently
+restarts or mixes snapshots. A deleted log returns `unavailable` with a safe
+resource-not-found diagnostic and no continuation.
+
+Omit `start` for beginning, or use `start: "tail"` for an initial last window.
+To rewind after tail, pass its `beginning_cursor` in a new request. Otherwise
+pass `next_cursor` until null; omit `start` when sending a cursor. Every request
+must repeat the same forge/repository and selected IDs. `snapshot_complete`
+means the fetched snapshot ended; `provider_step_finished` independently
+reports terminal, active or unknown state. At EOF there is no polling cursor;
+a fresh initial read can establish another snapshot.
+
+Concatenate each record's fragments, then record output in array order, without
+adding separators. `record_index` is array position, and `byte_offset` measures
+canonical decoded/redacted UTF-8. Line numbers and timestamps never sort output.
+Long records span pages at Unicode boundaries. Empty, null, missing and malformed
+record data retain explicit positions. Invalid UTF-8 uses replacement characters
+with diagnostics. Known forge/CI credentials are redacted before pagination,
+including credentials crossing adjacent records; redaction units stay atomic.
+A too-small budget reports the minimum scalar or redaction unit size.
+
+The canonical text budget defaults to 16 KiB (accepted 1–64 KiB). Each response
+has at most 256 fragments and 512 KiB serialized JSON. `truncated` denotes more
+snapshot material or a retrieval/decoding limitation; inspect `status` and
+diagnostics to distinguish ordinary page continuation from hard failure.
+The reader permits three upstream requests and 30 seconds total, including CPU
+work. Metadata is capped at 2 MiB per response; retained raw logs and cumulative
+decoded output at 8 MiB each; cumulative fetched bodies at 12 MiB; records at
+65,536. A hard `retrieval_limit` establishes no false EOF or retry cursor.
+There is no upstream range API, cross-request log cache or log persistence.
+Automatic CI excerpts still retain only their existing final 20 records.

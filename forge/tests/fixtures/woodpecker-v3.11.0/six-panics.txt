@@ -1,0 +1,36 @@
+worker 0: preparing fixture
+thread worker-0 panicked at synthetic.rs:10:
+panic block 0: 終🙂
+	stack: first frame
+  second frame
+worker 0: retained end
+worker 1: preparing fixture
+thread worker-1 panicked at synthetic.rs:11:
+panic block 1: 終🙂
+	stack: first frame
+  second frame
+worker 1: retained end
+worker 2: preparing fixture
+thread worker-2 panicked at synthetic.rs:12:
+panic block 2: 終🙂
+	stack: first frame
+  second frame
+worker 2: retained end
+worker 3: preparing fixture
+thread worker-3 panicked at synthetic.rs:13:
+panic block 3: 終🙂
+	stack: first frame
+  second frame
+worker 3: retained end
+worker 4: preparing fixture
+thread worker-4 panicked at synthetic.rs:14:
+panic block 4: 終🙂
+	stack: first frame
+  second frame
+worker 4: retained end
+worker 5: preparing fixture
+thread worker-5 panicked at synthetic.rs:15:
+panic block 5: 終🙂
+	stack: first frame
+  second frame
+worker 5: retained end
