@@ -1371,3 +1371,83 @@ decoded output at 8 MiB each; cumulative fetched bodies at 12 MiB; records at
 65,536. A hard `retrieval_limit` establishes no false EOF or retry cursor.
 There is no upstream range API, cross-request log cache or log persistence.
 Automatic CI excerpts still retain only their existing final 20 records.
+
+### Bounded plain-text step downloads
+
+Use MCP `get_repository_ci_step_log_download` with the same numeric arguments
+shown above, or append `/download` to the REST `/logs` path. The gateway returns
+bounded JSON pages containing text, rather than a downloadable attachment. No
+URL, filename, destination, pipeline database ID or runner selector is accepted.
+Every page independently authorizes the repository, validates the whole selected
+membership graph, and fetches repository metadata, pipeline metadata and the
+fixed selected download. Cursor possession grants no access.
+
+JSON pages identify `source: "woodpecker_step_log_json"` and
+`representation: "json_records_v1"`. Download pages identify
+`source: "woodpecker_step_log_download"` and
+`representation: "plain_text_utf8_v1"`. Both always report
+`output_completeness: "unknown"` and a safe
+`output_completeness_unknown` diagnostic. `snapshot_complete` means only EOF of
+the available representation. `provider_step_finished` is independently true,
+false or null. A finished step and source EOF cannot certify retained output,
+current-head CI success or merge eligibility.
+
+Downloads use `strict-download-snapshot-v1`, with separate snapshot and cursor
+identities from JSON's unchanged `strict-snapshot-v1`. Tokens cannot cross the
+interfaces, even for identical raw bodies. Omit `start` for beginning; use
+`start: "tail"` for the last window. Pass its `beginning_cursor` to rewind or
+`next_cursor` to continue, omitting `start`. Repeat the exact selectors on every
+page. Append, shrink or replacement produces `stale_cursor`; changed authorized
+identity, origin/prefix or redaction policy produces `binding_mismatch`. Restart
+explicitly without a cursor; the gateway never silently restarts a traversal.
+Deletion may produce `resource_not_found` instead of a stale snapshot.
+
+Concatenate download `fragments[].text` in order without inserting separators.
+`byte_offset`, `position` and `end_position` count canonical decoded/redacted
+UTF-8 bytes, independently of raw transport bytes. Downloads have text fragments
+without record indices, timestamps or invented line metadata. CRLF, whitespace,
+NUL, ANSI escapes and missing final newline are preserved. There is no JSON or
+base64 interpretation of this source. Invalid UTF-8 is replaced explicitly,
+with `lossy_utf8` and `truncated: true` even at available-source EOF. Whole-stream
+credential redaction precedes paging, including transport/page boundaries;
+replacement units and Unicode scalars remain indivisible. Tiny budgets report
+the minimum required next unit size.
+
+Limits are 16 KiB page text by default, 1–64 KiB requested text, 4 KiB input
+cursor, 256 fragments and 512 KiB for the full serialized JSON envelope including
+escaping, diagnostics, identity and cursors. Download raw, decoded and canonical
+redacted output each have independent 8 MiB caps. The request-local budget is
+three provider requests, 30 seconds including CPU, 2 MiB per metadata response
+and 12 MiB aggregate fetched bodies. Each page re-fetches the entire bounded
+source: deliberately O(source size), without persistent downloads, caches,
+ranges, retries, redirects or fallback to JSON. Only the configured optional CI
+token authenticates provider requests; forge credentials never substitute for it.
+Public tokenless reads remain subject to existing policy.
+
+Availability depends on the provider version and configuration. A 404 is
+ambiguous: it does not prove the download capability is unsupported. Affirmative
+405/501 responses are `unsupported`; 401/403 are `authorization_denied`;
+429/5xx and network failures are `unavailable`. Missing/incompatible text/plain
+media type, unsupported content encoding and incomplete body framing are hard
+failures. Oversize or deadline exhaustion is `retrieval_limit`. Hard failures
+have no fragments, snapshot or cursors, `snapshot_complete: false` and
+`truncated: true`; identity appears only after successful graph validation.
+An empty framed source can have available EOF and `empty_logs`, while retention
+remains unknown. Error bodies and arbitrary response headers are never evidence.
+
+These paired examples are synthetic, using the same authorized selectors and
+validated commit/UUID in each pair:
+
+| Available JSON text | Available download text | Interpretation |
+| --- | --- | --- |
+| `compiling\n` | `compiling\nerror: synthetic failure\n` | Download supplies additional failure evidence; full retention remains unknown. |
+| `compiling\n` | `compiling\n` | Both available views end without a terminal result; no recovery, success or cause can be inferred. |
+| empty | empty | Available empty snapshots; no evidence of complete job output. |
+| `working\r\n` | `working\r\n` | An active or unknown-state step still has a readable retained snapshot. |
+
+The upstream handler can use the same retained store for both representations;
+these fixtures do not demonstrate deployed recovery. CI279/exit101 and
+CI281/exit255 establish missing terminal output after traversal of the available
+JSON views below budgets. They establish neither failure cause, deployed line
+limit, cache defect, runner failure nor upstream truncation. Neither interface
+can reconstruct unretained bytes. Terminal-string heuristics confer no CI authority.

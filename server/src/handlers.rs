@@ -5436,6 +5436,230 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn paired_sources_rest_mcp_preserve_identity_and_unknown_retention() {
+        use base64::Engine as _;
+        use rmcp::{ServiceExt, model::CallToolRequestParams};
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+        let provider = MockServer::start().await;
+        let audit = Arc::new(audit::InMemoryAuditSink::new());
+        let adapter = Arc::new(
+            forge::ForgejoAdapter::new(forge::ForgejoConfig {
+                base_url: "https://forge.example".into(),
+                token: Some("FORGE_SECRET".into()),
+                woodpecker_url: Some(provider.uri()),
+                woodpecker_token: Some("CI_SECRET".into()),
+            })
+            .expect("adapter"),
+        );
+        let app = crate::build_router(
+            test_state_with_read(
+                Arc::new(orchestrator::ReadOrchestrator::new(adapter, audit.clone())),
+                vec!["test-forge/org/repo".into()],
+                Arc::new(FakeWriteService::new()),
+            ),
+            false,
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let url = format!("http://{}", listener.local_addr().expect("address"));
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let gateway_app = app.clone();
+        let gateway = tokio::spawn(async move {
+            axum::serve(listener, gateway_app)
+                .with_graceful_shutdown(async {
+                    let _ = stopped.await;
+                })
+                .await
+                .expect("gateway");
+        });
+        let config = transport::ShimConfig {
+            channel_startup_spike: false,
+            enable_channels: false,
+            read_only: false,
+            server_name: "test".into(),
+            server_version: "test".into(),
+            gateways: vec![transport::GatewayConfig {
+                name: "test".into(),
+                token: "test-token".into(),
+                url,
+            }],
+        };
+        let (server_io, client_io) = tokio::io::duplex(4096);
+        let shim = tokio::spawn(async move {
+            transport::McpShim::new(config)
+                .serve(server_io)
+                .await
+                .expect("shim")
+                .waiting()
+                .await
+                .expect("wait");
+        });
+        let client = ().serve(client_io).await.expect("client");
+        for (json_text, download, state, finished) in [
+            (
+                "compiling\n",
+                "compiling\nerror: synthetic failure\n",
+                "failure",
+                Some(true),
+            ),
+            ("compiling\n", "compiling\n", "failure", Some(true)),
+            ("", "", "success", Some(true)),
+            ("working\r\n", "working\r\n", "running", Some(false)),
+            ("working", "working", "unknown", None),
+        ] {
+            provider.reset().await;
+            Mock::given(path("/api/repos/29")).respond_with(ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({"id":29,"owner":"org","name":"repo","forge_url":"https://forge.example/org/repo"})
+            )).mount(&provider).await;
+            let mut pipeline: serde_json::Value = serde_json::from_str(include_str!(
+                "../../forge/tests/fixtures/woodpecker-v3.11.0/exit-255.json"
+            ))
+            .expect("pipeline");
+            pipeline["workflows"][0]["children"][0]["state"] = state.into();
+            Mock::given(path("/api/repos/29/pipelines/42"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(pipeline))
+                .mount(&provider)
+                .await;
+            Mock::given(path("/api/repos/29/logs/42/7001")).respond_with(ResponseTemplate::new(200).set_body_json(
+                serde_json::json!([{"data":base64::prelude::BASE64_STANDARD.encode(json_text)}])
+            )).mount(&provider).await;
+            Mock::given(path("/api/repos/29/logs/42/7001/download"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .insert_header("content-type", "text/plain")
+                        .set_body_string(download),
+                )
+                .mount(&provider)
+                .await;
+            let mut identities = Vec::new();
+            let mut snapshots = Vec::new();
+            for (tool, suffix, expected, source, representation) in [
+                (
+                    "get_repository_ci_step_logs",
+                    "",
+                    json_text,
+                    "woodpecker_step_log_json",
+                    "json_records_v1",
+                ),
+                (
+                    "get_repository_ci_step_log_download",
+                    "/download",
+                    download,
+                    "woodpecker_step_log_download",
+                    "plain_text_utf8_v1",
+                ),
+            ] {
+                let base = serde_json::json!({"forge":"test-forge","owner":"org","repo":"repo","provider":"woodpecker","provider_repository_id":29,"pipeline_number":42,"workflow_id":6001,"step_id":7001,"page_bytes":4});
+                let mut args = base.clone();
+                let mut reconstructed = String::new();
+                for iteration in 0..100 {
+                    let response = client
+                        .call_tool(
+                            CallToolRequestParams::new(tool)
+                                .with_arguments(args.as_object().expect("args").clone()),
+                        )
+                        .await
+                        .expect("call");
+                    let page: serde_json::Value =
+                        serde_json::from_str(&response.content[0].as_text().expect("text").text)
+                            .expect("page");
+                    let mut uri = format!(
+                        "/api/v1/repos/test-forge/org/repo/ci/woodpecker/29/pipelines/42/workflows/6001/steps/7001/logs{suffix}?page_bytes=4"
+                    );
+                    if let Some(cursor) = args["cursor"].as_str() {
+                        uri.push_str("&cursor=");
+                        uri.push_str(cursor);
+                    }
+                    let rest = app
+                        .clone()
+                        .oneshot(
+                            Request::builder()
+                                .uri(uri)
+                                .header("authorization", "Bearer test-token")
+                                .body(Body::empty())
+                                .expect("request"),
+                        )
+                        .await
+                        .expect("REST");
+                    assert_eq!(rest.status(), StatusCode::OK);
+                    let bytes = axum::body::to_bytes(rest.into_body(), 512 * 1024)
+                        .await
+                        .expect("body");
+                    let rest: serde_json::Value =
+                        serde_json::from_slice(&bytes).expect("REST page");
+                    assert_eq!(rest, page);
+                    assert_eq!(page["status"], "available");
+                    assert_eq!(page["source"], source);
+                    assert_eq!(page["representation"], representation);
+                    assert_eq!(page["output_completeness"], "unknown");
+                    assert_eq!(page["evidence_kind"], "historical");
+                    assert_eq!(page["provider_step_finished"], serde_json::json!(finished));
+                    assert!(
+                        page["diagnostics"]
+                            .as_array()
+                            .expect("diagnostics")
+                            .iter()
+                            .any(|d| d["code"] == "output_completeness_unknown")
+                    );
+                    if iteration == 0 {
+                        identities.push(page["identity"].clone());
+                        snapshots.push(page["snapshot_id"].clone());
+                    }
+                    for fragment in page["fragments"].as_array().expect("fragments") {
+                        reconstructed.push_str(fragment["text"].as_str().expect("fragment"));
+                    }
+                    // Cursor possession never authorizes a different repository.
+                    let count = provider.received_requests().await.expect("requests").len();
+                    let mut denied = base.clone();
+                    denied["repo"] = "denied".into();
+                    denied["cursor"] = page["beginning_cursor"].clone();
+                    let denied = client
+                        .call_tool(
+                            CallToolRequestParams::new(tool)
+                                .with_arguments(denied.as_object().expect("args").clone()),
+                        )
+                        .await;
+                    assert!(
+                        denied.is_err() || denied.is_ok_and(|result| result.is_error == Some(true))
+                    );
+                    assert_eq!(
+                        provider.received_requests().await.expect("requests").len(),
+                        count
+                    );
+                    if page["next_cursor"].is_null() {
+                        assert_eq!(page["snapshot_complete"], true);
+                        break;
+                    }
+                    args["cursor"] = page["next_cursor"].clone();
+                    assert!(iteration < 99, "traversal advances");
+                }
+                assert_eq!(reconstructed, expected);
+            }
+            assert_eq!(identities[0], identities[1]);
+            assert_eq!(
+                identities[0]["commit"],
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            );
+            assert_ne!(snapshots[0], snapshots[1]);
+        }
+        let records = format!("{:?}", audit.records().expect("audit"));
+        for forbidden in [
+            "CI_SECRET",
+            "FORGE_SECRET",
+            "synthetic failure",
+            "next_cursor",
+        ] {
+            assert!(!records.contains(forbidden));
+        }
+        client.cancel().await.expect("cancel");
+        shim.await.expect("shim");
+        stop.send(()).expect("stop");
+        gateway.await.expect("gateway");
+    }
+
     fn file_diagnostic_policy() -> crate::diagnostics::FileReadDiagnosticPolicy {
         crate::diagnostics::FileReadDiagnosticPolicy::new(
             crate::config::FileReadDiagnosticsConfig {

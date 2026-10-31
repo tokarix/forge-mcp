@@ -2079,7 +2079,7 @@ impl McpShim {
     #[tool(
         input_schema = schema_for_type::<GetRepositoryCiStepLogsTool>(),
         name = "get_repository_ci_step_logs",
-        description = "Read retained Woodpecker step output independently of step state. workflow_id and step_id are database IDs; pipeline_number is the repository run number. strict-snapshot-v1 re-fetches up to 8 MiB on every page (30 seconds, 3 upstream requests). Any raw output or source/security binding change invalidates continuation; restart explicitly from beginning or tail. Default page_bytes 16384, range 1-65536. Tail supplies beginning_cursor for rewind. Snapshot EOF differs from provider step completion. Historical evidence never establishes current-head CI success or merge eligibility."
+        description = "Read retained Woodpecker step output independently of step state. workflow_id and step_id are database IDs; pipeline_number is the repository run number. strict-snapshot-v1 re-fetches up to 8 MiB on every page (30 seconds, 3 upstream requests). Any raw output or source/security binding change invalidates continuation; restart explicitly from beginning or tail. Default page_bytes 16384, range 1-65536. Tail supplies beginning_cursor for rewind. JSON source woodpecker_step_log_json / json_records_v1 reports unknown full output retention even at source EOF or provider completion. Concatenate decoded/redacted text without separators. JSON and download cursors cannot mix; 4 KiB cursor cap, 256 fragments and 512 KiB serialized envelope. Metadata cap 2 MiB each, aggregate fetched cap 12 MiB; no terminal-string heuristic qualifies CI. Historical evidence never establishes current-head CI success or merge eligibility."
     )]
     async fn get_repository_ci_step_logs(
         &self,

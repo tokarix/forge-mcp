@@ -3,6 +3,15 @@
 //! This is the provider's plain-text representation, independently fetched and
 //! snapshotted. Concatenate text fragments without inserting separators. Offsets
 //! measure decoded and redacted UTF-8 bytes, never network bytes or JSON records.
+//! Pages default to 16 KiB (1–64 KiB requested), with 4 KiB cursors, at most
+//! 256 fragments and a 512 KiB full serialized envelope. Each page reauthorizes
+//! and refetches the whole bounded source: O(source size), three requests and
+//! 30 seconds including CPU; metadata is 2 MiB each, raw/decoded/canonical text
+//! independently 8 MiB each and aggregate fetched bodies 12 MiB.
+//! `strict-download-snapshot-v1` cursors cannot mix with JSON cursors. Tail
+//! supplies `beginning_cursor` for rewind. Stale/binding failures require an
+//! explicit restart. Version-dependent capability and 404 ambiguity remain
+//! explicit. Lossy UTF-8 remains truncated at source EOF.
 //! Available-source EOF, provider completion and full-output retention are
 //! independent facts. A download cannot establish current-head CI qualification.
 
