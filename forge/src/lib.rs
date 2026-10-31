@@ -26,9 +26,12 @@ mod github_app;
 pub mod gitlab;
 mod inline_review_webhooks;
 pub mod woodpecker;
+pub mod woodpecker_download_decode;
+pub mod woodpecker_download_snapshot;
 pub mod woodpecker_log_decode;
 pub mod woodpecker_log_snapshot;
 mod woodpecker_resolver;
+pub mod woodpecker_step_log_download;
 pub mod woodpecker_step_logs;
 
 static INSTALL_RING_PROVIDER: Once = Once::new();
@@ -2301,6 +2304,24 @@ impl ForgeAdapter for ForgejoAdapter {
             statuses,
             total_count: combined.total_count,
         })
+    }
+
+    async fn get_repository_ci_step_log_download(
+        &self,
+        repository: &RepositoryRef,
+        selector: domain::CiStepLogSelector,
+        options: domain::CiStepLogOptions,
+        credential: &ForgeCredential,
+    ) -> Result<domain::RepositoryCiStepLogDownload, ForgeError> {
+        woodpecker_step_log_download::read(
+            &self.config,
+            repository,
+            selector,
+            &options,
+            credential,
+            woodpecker_step_log_download::ReaderLimits::default(),
+        )
+        .await
     }
 
     async fn get_repository_ci_step_logs(
