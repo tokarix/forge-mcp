@@ -5168,6 +5168,274 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn step_download_mcp_gateway_adapter_traversal_and_authorization() {
+        use rmcp::{ServiceExt, model::CallToolRequestParams};
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+        let provider = MockServer::start().await;
+        Mock::given(path("/api/repos/29")).respond_with(ResponseTemplate::new(200).set_body_json(
+            serde_json::json!({"id":29,"owner":"org","name":"repo","forge_url":"https://forge.example/org/repo"})
+        )).mount(&provider).await;
+        let mut pipeline: serde_json::Value = serde_json::from_str(include_str!(
+            "../../forge/tests/fixtures/woodpecker-v3.11.0/exit-255.json"
+        ))
+        .expect("pipeline");
+        pipeline["workflows"][0]["children"][0]["state"] = "success".into();
+        Mock::given(path("/api/repos/29/pipelines/42"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&pipeline))
+            .mount(&provider)
+            .await;
+        Mock::given(path("/api/repos/29/logs/42/7001/download"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/plain; charset=utf-8")
+                    .set_body_string(include_str!(
+                        "../../forge/tests/fixtures/woodpecker-v3.11.0/six-panics.txt"
+                    )),
+            )
+            .mount(&provider)
+            .await;
+        let audit = Arc::new(audit::InMemoryAuditSink::new());
+        let adapter = Arc::new(
+            forge::ForgejoAdapter::new(forge::ForgejoConfig {
+                base_url: "https://forge.example".into(),
+                token: Some("FORGE_SECRET".into()),
+                woodpecker_url: Some(provider.uri()),
+                woodpecker_token: Some("CI_SECRET".into()),
+            })
+            .expect("adapter"),
+        );
+        let read = Arc::new(orchestrator::ReadOrchestrator::new(adapter, audit.clone()));
+        let app = crate::build_router(
+            test_state_with_read(
+                read,
+                vec!["test-forge/org/repo".into()],
+                Arc::new(FakeWriteService::new()),
+            ),
+            false,
+        );
+        for (repo, token, query, status) in [
+            ("denied", "test-token", "", StatusCode::FORBIDDEN),
+            ("repo", "invalid", "", StatusCode::UNAUTHORIZED),
+            (
+                "repo",
+                "test-token",
+                "?page_bytes=0",
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "repo",
+                "test-token",
+                "?cursor=x&start=tail",
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "repo",
+                "test-token",
+                "?start=unknown",
+                StatusCode::BAD_REQUEST,
+            ),
+        ] {
+            let response = app.clone().oneshot(Request::builder().uri(format!("/api/v1/repos/test-forge/org/{repo}/ci/woodpecker/29/pipelines/42/workflows/6001/steps/7001/logs/download{query}"))
+                .header("authorization", format!("Bearer {token}")).body(Body::empty()).expect("request")).await.expect("response");
+            assert_eq!(response.status(), status);
+        }
+        assert!(
+            provider
+                .received_requests()
+                .await
+                .expect("requests")
+                .is_empty()
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let url = format!("http://{}", listener.local_addr().expect("address"));
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let gateway = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = stopped.await;
+                })
+                .await
+                .expect("gateway");
+        });
+        let config = transport::ShimConfig {
+            channel_startup_spike: false,
+            enable_channels: false,
+            read_only: false,
+            server_name: "test".into(),
+            server_version: "test".into(),
+            gateways: vec![transport::GatewayConfig {
+                name: "test".into(),
+                token: "test-token".into(),
+                url,
+            }],
+        };
+        let (server_io, client_io) = tokio::io::duplex(4096);
+        let shim = tokio::spawn(async move {
+            transport::McpShim::new(config)
+                .serve(server_io)
+                .await
+                .expect("shim")
+                .waiting()
+                .await
+                .expect("wait");
+        });
+        let client = ().serve(client_io).await.expect("client");
+        let discovery = client.list_all_tools().await.expect("tools/list");
+        let tool = discovery
+            .iter()
+            .find(|tool| tool.name == "get_repository_ci_step_log_download")
+            .expect("tool");
+        let schema = serde_json::to_value(&tool.input_schema).expect("schema");
+        for field in [
+            "forge",
+            "owner",
+            "repo",
+            "provider",
+            "provider_repository_id",
+            "pipeline_number",
+            "workflow_id",
+            "step_id",
+            "cursor",
+            "start",
+            "page_bytes",
+        ] {
+            assert!(schema["properties"][field].is_object());
+        }
+        let base = serde_json::json!({"forge":"test-forge","owner":"org","repo":"repo","provider":"woodpecker","provider_repository_id":29,"pipeline_number":42,"workflow_id":6001,"step_id":7001,"page_bytes":64});
+        let mut args = base.clone();
+        args["start"] = "tail".into();
+        let mut canonical = String::new();
+        let mut pages = 0;
+        loop {
+            let response = client
+                .call_tool(
+                    CallToolRequestParams::new("get_repository_ci_step_log_download")
+                        .with_arguments(args.as_object().expect("args").clone()),
+                )
+                .await
+                .expect("tool call");
+            let page: serde_json::Value =
+                serde_json::from_str(&response.content[0].as_text().expect("text").text)
+                    .expect("page");
+            assert_eq!(page["status"], "available");
+            assert_eq!(page["source"], "woodpecker_step_log_download");
+            assert_eq!(page["representation"], "plain_text_utf8_v1");
+            assert_eq!(page["output_completeness"], "unknown");
+            assert_eq!(page["identity"]["selector"]["workflow_id"], 6001);
+            assert_eq!(page["identity"]["pipeline_id"], 5001);
+            assert_eq!(
+                page["identity"]["commit"],
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            );
+            assert_eq!(page["evidence_kind"], "historical");
+            assert_eq!(page["provider_step_finished"], true);
+            if pages == 0 {
+                assert_eq!(page["snapshot_complete"], true);
+                args = base.clone();
+                args["cursor"] = page["beginning_cursor"].clone();
+            } else {
+                for fragment in page["fragments"].as_array().expect("fragments") {
+                    canonical.push_str(fragment["text"].as_str().expect("text"));
+                }
+                if page["snapshot_complete"] == true {
+                    assert!(page["next_cursor"].is_null());
+                    break;
+                }
+                args["cursor"] = page["next_cursor"].clone();
+            }
+            pages += 1;
+            assert!(pages < 100);
+        }
+        assert!(pages > 2);
+        assert_eq!(
+            canonical,
+            include_str!("../../forge/tests/fixtures/woodpecker-v3.11.0/six-panics.txt")
+        );
+        let requests = provider.received_requests().await.expect("requests");
+        assert_eq!(requests.len(), (pages + 1) * 3);
+        for request in requests {
+            assert_eq!(
+                request.headers.get("authorization").expect("auth"),
+                "Bearer CI_SECRET"
+            );
+        }
+        let records = audit.records().expect("audit");
+        assert_eq!(records.len(), (pages + 1) * 2);
+        assert!(
+            records
+                .iter()
+                .all(|r| r.target.starts_with("woodpecker/29/42/6001/7001"))
+        );
+        assert!(records.iter().any(
+            |r| r.action == "get_repository_ci_step_log_download_outcome"
+                && r.target.contains("/Available/pipeline_id=5001/commit=")
+        ));
+        provider.reset().await;
+        Mock::given(path("/api/repos/29")).respond_with(ResponseTemplate::new(200).set_body_json(
+            serde_json::json!({"id":29,"owner":"org","name":"repo","forge_url":"https://forge.example/org/repo"})
+        )).mount(&provider).await;
+        Mock::given(path("/api/repos/29/pipelines/42"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&pipeline))
+            .mount(&provider)
+            .await;
+        Mock::given(path("/api/repos/29/logs/42/7001/download"))
+            .respond_with(ResponseTemplate::new(503).set_body_string("CI_SECRET"))
+            .mount(&provider)
+            .await;
+        let response = client
+            .call_tool(
+                CallToolRequestParams::new("get_repository_ci_step_log_download")
+                    .with_arguments(base.as_object().expect("args").clone()),
+            )
+            .await
+            .expect("failure envelope");
+        let text = &response.content[0].as_text().expect("text").text;
+        assert!(!text.contains("CI_SECRET"));
+        let page: serde_json::Value = serde_json::from_str(text).expect("page");
+        assert_eq!(page["status"], "unavailable");
+        assert_eq!(page["identity"]["selector"]["step_id"], 7001);
+        assert_eq!(page["snapshot_complete"], false);
+        assert!(page["next_cursor"].is_null());
+        assert!(audit.records().expect("audit").iter().any(|r| r.action
+            == "get_repository_ci_step_log_download_outcome"
+            && r.target.contains("/Unavailable/pipeline_id=5001/commit=")));
+        client.cancel().await.expect("cancel");
+        shim.await.expect("shim stopped");
+        stop.send(()).expect("stop gateway");
+        gateway.await.expect("gateway stopped");
+    }
+
+    #[test]
+    fn step_download_openapi_registers_route_options_and_envelope() {
+        use utoipa::OpenApi;
+        let spec = serde_json::to_value(crate::ApiDoc::openapi()).expect("OpenAPI");
+        let operation = &spec["paths"]["/api/v1/repos/{forge}/{owner}/{repo}/ci/woodpecker/{provider_repository_id}/pipelines/{pipeline_number}/workflows/{workflow_id}/steps/{step_id}/logs/download"]
+            ["get"];
+        let params = operation["parameters"].as_array().expect("parameters");
+        for name in [
+            "forge",
+            "owner",
+            "repo",
+            "provider_repository_id",
+            "pipeline_number",
+            "workflow_id",
+            "step_id",
+            "cursor",
+            "start",
+            "page_bytes",
+        ] {
+            assert!(params.iter().any(|p| p["name"] == name));
+        }
+        assert_eq!(
+            operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/RepositoryCiStepLogDownloadResult"
+        );
+    }
+
     fn file_diagnostic_policy() -> crate::diagnostics::FileReadDiagnosticPolicy {
         crate::diagnostics::FileReadDiagnosticPolicy::new(
             crate::config::FileReadDiagnosticsConfig {
@@ -8964,5 +9232,77 @@ pub async fn get_repository_ci_step_logs(
     Ok::<_, (StatusCode, Json<ErrorBody>)>((
         status,
         Json(crate::api::RepositoryCiStepLogsResult::from(result)),
+    ))
+}
+
+/// Read bounded historical output after independent repository authorization.
+#[utoipa::path(
+    get,
+    path = "/api/v1/repos/{forge}/{owner}/{repo}/ci/woodpecker/{provider_repository_id}/pipelines/{pipeline_number}/workflows/{workflow_id}/steps/{step_id}/logs/download",
+    params(
+        ("forge" = String, Path), ("owner" = String, Path), ("repo" = String, Path),
+        ("provider_repository_id" = u64, Path), ("pipeline_number" = u64, Path),
+        ("workflow_id" = u64, Path), ("step_id" = u64, Path),
+        ("cursor" = Option<String>, Query, description = "Strict snapshot cursor; changes require explicit restart"),
+        ("start" = Option<String>, Query, description = "beginning (default) or tail; conflicts with cursor"),
+        ("page_bytes" = Option<usize>, Query, description = "Canonical UTF-8 text bytes: 1 through 65536; default 16384"),
+    ),
+    responses(
+        (status = 200, body = crate::api::RepositoryCiStepLogDownloadResult),
+        (status = 400, description = "Invalid input or cursor"),
+        (status = 401, body = ErrorBody), (status = 403, body = ErrorBody),
+    ),
+    security(("bearer" = []))
+)]
+pub async fn get_repository_ci_step_log_download(
+    State(state): State<AppState>,
+    Path(path): Path<CiStepLogsPath>,
+    Query(options): Query<domain::CiStepLogOptions>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let forge = resolve_forge(&state.forge_registry, &path.forge)?;
+    let agent = resolve_agent(
+        &headers,
+        &state.agent_registry,
+        &path.forge,
+        &path.owner,
+        &path.repo,
+    )?;
+    let selector = domain::CiStepLogSelector {
+        provider: "woodpecker".into(),
+        provider_repository_id: path.provider_repository_id,
+        pipeline_number: path.pipeline_number,
+        workflow_id: path.workflow_id,
+        step_id: path.step_id,
+    };
+    if !selector.valid() {
+        return Err(map_service_error(domain::ServiceError::Validation(
+            "Step log IDs must be positive signed 64-bit integers".into(),
+        )));
+    }
+    options
+        .validate()
+        .map_err(|message| map_service_error(domain::ServiceError::Validation(message.into())))?;
+    let result = forge
+        .read_service
+        .get_repository_ci_step_log_download(
+            domain::GetRepositoryCiStepLogDownloadRequest {
+                agent: agent.identity.clone(),
+                repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
+                selector,
+                options,
+            },
+            &resolve_credential(agent, &path.forge, forge),
+        )
+        .await
+        .map_err(map_service_error)?;
+    let status = if result.status == domain::CiStepLogDownloadStatus::InvalidCursor {
+        StatusCode::BAD_REQUEST
+    } else {
+        StatusCode::OK
+    };
+    Ok::<_, (StatusCode, Json<ErrorBody>)>((
+        status,
+        Json(crate::api::RepositoryCiStepLogDownloadResult::from(result)),
     ))
 }

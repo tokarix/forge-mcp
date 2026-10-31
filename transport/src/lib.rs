@@ -351,6 +351,34 @@ pub struct GetRepositoryCiStepLogsTool {
     pub page_bytes: Option<usize>,
 }
 
+/// Explicit plain-text download selection, independent of provider step state.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GetRepositoryCiStepLogDownloadTool {
+    /// Forge alias.
+    pub forge: String,
+    /// Authorized repository owner.
+    pub owner: String,
+    /// Authorized repository name.
+    pub repo: String,
+    /// Initially only woodpecker is supported.
+    pub provider: String,
+    /// Positive provider repository database ID.
+    pub provider_repository_id: u64,
+    /// Positive repository-scoped run number, distinct from pipeline database ID.
+    pub pipeline_number: u64,
+    /// Workflow database ID, never UI position or pid.
+    pub workflow_id: u64,
+    /// Step database ID, never runner ID.
+    pub step_id: u64,
+    /// Untrusted strict snapshot continuation; changes require explicit restart.
+    pub cursor: Option<String>,
+    /// Beginning (default) or tail; cannot be combined with cursor.
+    pub start: Option<CiStepLogStartTool>,
+    /// Canonical UTF-8 text byte budget: 1 through 65536; default 16384.
+    pub page_bytes: Option<usize>,
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct GetRepositoryCiDetailsTool {
     /// Forge alias.
@@ -2101,6 +2129,84 @@ impl McpShim {
                 "steps",
                 &selector.step_id.to_string(),
                 "logs",
+            ],
+        )?;
+        {
+            let mut query = url.query_pairs_mut();
+            if let Some(cursor) = options.cursor {
+                query.append_pair("cursor", &cursor);
+            }
+            if let Some(start) = options.start {
+                query.append_pair(
+                    "start",
+                    match start {
+                        domain::CiLogStart::Beginning => "beginning",
+                        domain::CiLogStart::Tail => "tail",
+                    },
+                );
+            }
+            if let Some(bytes) = options.page_bytes {
+                query.append_pair("page_bytes", &bytes.to_string());
+            }
+        }
+        self.gateway_get(url, &gw.token).await
+    }
+
+    /// Explicit bounded retained output; no live following or current-head authority.
+    #[tool(
+        input_schema = schema_for_type::<GetRepositoryCiStepLogDownloadTool>(),
+        name = "get_repository_ci_step_log_download",
+        description = "Read the version-dependent Woodpecker plain-text step download independently of step state. workflow_id and step_id are database IDs; pipeline_number is the repository run number. strict-download-snapshot-v1 re-fetches up to 8 MiB on every page (30 seconds, 3 upstream requests). Any raw output or source/security binding change invalidates continuation; restart explicitly from beginning or tail. Default page_bytes 16384, range 1-65536. Tail supplies beginning_cursor for rewind. Concatenate text fragments without separators; offsets count decoded/redacted UTF-8 bytes. Full output retention is always unknown, even at snapshot EOF or provider step completion. 404 leaves capability uncertain; lossy decoding remains truncated. No fallback to JSON. Separate JSON and download cursors cannot be mixed. Historical evidence never establishes current-head CI success or merge eligibility."
+    )]
+    async fn get_repository_ci_step_log_download(
+        &self,
+        Parameters(request): Parameters<GetRepositoryCiStepLogDownloadTool>,
+    ) -> Result<String, McpError> {
+        let selector = domain::CiStepLogSelector {
+            provider: request.provider,
+            provider_repository_id: request.provider_repository_id,
+            pipeline_number: request.pipeline_number,
+            workflow_id: request.workflow_id,
+            step_id: request.step_id,
+        };
+        let options = domain::CiStepLogOptions {
+            cursor: request.cursor,
+            page_bytes: request.page_bytes,
+            start: request.start.map(|start| match start {
+                CiStepLogStartTool::Beginning => domain::CiLogStart::Beginning,
+                CiStepLogStartTool::Tail => domain::CiLogStart::Tail,
+            }),
+        };
+        if selector.provider != "woodpecker" || !selector.valid() {
+            return Err(McpError::invalid_params(
+                "Woodpecker and positive signed 64-bit IDs are required",
+                None,
+            ));
+        }
+        options
+            .validate()
+            .map_err(|message| McpError::invalid_params(message, None))?;
+        let gw = self.resolve_gateway(&request.forge).await?;
+        let mut url = Self::build_url(
+            &gw.url,
+            &[
+                "api",
+                "v1",
+                "repos",
+                &request.forge,
+                &request.owner,
+                &request.repo,
+                "ci",
+                "woodpecker",
+                &selector.provider_repository_id.to_string(),
+                "pipelines",
+                &selector.pipeline_number.to_string(),
+                "workflows",
+                &selector.workflow_id.to_string(),
+                "steps",
+                &selector.step_id.to_string(),
+                "logs",
+                "download",
             ],
         )?;
         {

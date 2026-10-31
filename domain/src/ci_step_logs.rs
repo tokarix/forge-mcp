@@ -203,9 +203,31 @@ pub struct CiStepLogDiagnostic {
     pub http_status: Option<u16>,
 }
 
+/// Selected retained JSON source.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CiStepLogSource {
+    /// Retained JSON view; never proof of full output retention.
+    WoodpeckerStepLogJson,
+}
+
+/// Versioned JSON records with decoded text.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CiStepLogRepresentation {
+    /// Retained JSON view; never proof of full output retention.
+    JsonRecordsV1,
+}
+
 /// Retained historical output never establishes current-head CI or merge success.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct RepositoryCiStepLogs {
+    /// Selected retained source, outside cursor binding.
+    pub source: CiStepLogSource,
+    /// Selected representation, outside cursor binding.
+    pub representation: CiStepLogRepresentation,
+    /// Source EOF cannot establish full job-output retention.
+    pub output_completeness: crate::CiLogOutputCompleteness,
     /// Always historical, including active retained snapshots.
     pub evidence_kind: CiEvidenceKind,
     /// Echoed request hints, separate from validated identity.
@@ -238,10 +260,24 @@ pub struct RepositoryCiStepLogs {
     pub diagnostics: Vec<CiStepLogDiagnostic>,
 }
 impl RepositoryCiStepLogs {
+    /// Safe retention limitation, independent of cursor and provider state.
+    #[must_use]
+    pub fn completeness_diagnostic() -> CiStepLogDiagnostic {
+        CiStepLogDiagnostic {
+            code: "output_completeness_unknown".into(),
+            message: "Available source EOF does not establish full job-output retention".into(),
+            record_index: None,
+            http_status: None,
+        }
+    }
+
     /// Explicit unsupported default, with no purported validated identity.
     #[must_use]
     pub fn unsupported(selector: CiStepLogSelector) -> Self {
         Self {
+            source: CiStepLogSource::WoodpeckerStepLogJson,
+            representation: CiStepLogRepresentation::JsonRecordsV1,
+            output_completeness: crate::CiLogOutputCompleteness::Unknown,
             evidence_kind: CiEvidenceKind::Historical,
             selector,
             identity: None,
@@ -256,7 +292,7 @@ impl RepositoryCiStepLogs {
             snapshot_complete: false,
             provider_step_finished: None,
             truncated: true,
-            diagnostics: Vec::new(),
+            diagnostics: vec![Self::completeness_diagnostic()],
         }
     }
 }

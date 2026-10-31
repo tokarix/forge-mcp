@@ -113,9 +113,31 @@ pub struct CiStepLogDiagnosticResult {
     pub http_status: Option<u16>,
 }
 
+/// Selected retained JSON source.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CiStepLogSourceResult {
+    /// Retained JSON view; never proof of full output retention.
+    WoodpeckerStepLogJson,
+}
+
+/// Versioned JSON records with decoded text.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CiStepLogRepresentationResult {
+    /// Retained JSON view; never proof of full output retention.
+    JsonRecordsV1,
+}
+
 /// Retained historical output never establishes current-head CI or merge success.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct RepositoryCiStepLogsResult {
+    /// Selected retained source, outside cursor binding.
+    pub source: CiStepLogSourceResult,
+    /// Selected representation, outside cursor binding.
+    pub representation: CiStepLogRepresentationResult,
+    /// Source EOF cannot establish full job-output retention.
+    pub output_completeness: crate::api::CiLogOutputCompletenessResult,
     /// Always historical, including active retained snapshots.
     pub evidence_kind: HistoricalEvidenceKindResult,
     /// Echoed request hints, separate from validated identity.
@@ -220,6 +242,9 @@ impl From<domain::CiLogFragment> for CiLogFragmentResult {
 impl From<domain::RepositoryCiStepLogs> for RepositoryCiStepLogsResult {
     fn from(value: domain::RepositoryCiStepLogs) -> Self {
         Self {
+            source: CiStepLogSourceResult::WoodpeckerStepLogJson,
+            representation: CiStepLogRepresentationResult::JsonRecordsV1,
+            output_completeness: crate::api::CiLogOutputCompletenessResult::Unknown,
             evidence_kind: HistoricalEvidenceKindResult::Historical,
             selector: value.selector.into(),
             identity: value.identity.map(Into::into),

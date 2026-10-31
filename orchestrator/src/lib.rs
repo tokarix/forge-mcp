@@ -208,6 +208,75 @@ where
         result
     }
 
+    async fn get_repository_ci_step_log_download(
+        &self,
+        request: domain::GetRepositoryCiStepLogDownloadRequest,
+        credential: &ForgeCredential,
+    ) -> Result<domain::RepositoryCiStepLogDownload, ServiceError> {
+        if !request.selector.valid() {
+            return Err(ServiceError::Validation(
+                "Step log IDs must be positive signed 64-bit integers".into(),
+            ));
+        }
+        request
+            .options
+            .validate()
+            .map_err(|message| ServiceError::Validation(message.into()))?;
+        let target = format!(
+            "{}/{}/{}/{}/{}",
+            request.selector.provider,
+            request.selector.provider_repository_id,
+            request.selector.pipeline_number,
+            request.selector.workflow_id,
+            request.selector.step_id
+        );
+        self.audit_sink
+            .record(AuditRecord {
+                agent: request.agent.clone(),
+                action: "get_repository_ci_step_log_download".into(),
+                repository: request.repository.clone(),
+                target: target.clone(),
+            })
+            .await
+            .map_err(|e| ServiceError::Audit(e.to_string()))?;
+        let result = self
+            .adapter
+            .get_repository_ci_step_log_download(
+                &request.repository,
+                request.selector,
+                request.options,
+                credential,
+            )
+            .await
+            .map_err(|error| match error {
+                forge::ForgeError::InvalidPayload(message) => ServiceError::Validation(message),
+                _ => ServiceError::Upstream("Step log download reader failed".into()),
+            });
+        let outcome = result
+            .as_ref()
+            .map_or_else(|_| "error".into(), |page| format!("{:?}", page.status));
+        let validated = result.as_ref().ok().and_then(|page| page.identity.as_ref());
+        let identity = validated.map_or_else(String::new, |identity| {
+            format!(
+                "/pipeline_id={}/commit={}/workflow_pid={}/uuid={}",
+                identity.pipeline_id,
+                identity.commit,
+                identity.workflow_pid,
+                identity.step_uuid.as_deref().unwrap_or("unknown")
+            )
+        });
+        self.audit_sink
+            .record(AuditRecord {
+                agent: request.agent,
+                action: "get_repository_ci_step_log_download_outcome".into(),
+                repository: request.repository,
+                target: format!("{target}/{outcome}{identity}"),
+            })
+            .await
+            .map_err(|e| ServiceError::Audit(e.to_string()))?;
+        result
+    }
+
     async fn get_repository_ci_details(
         &self,
         request: domain::GetRepositoryCiDetailsRequest,

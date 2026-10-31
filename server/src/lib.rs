@@ -40,6 +40,7 @@ use utoipa_scalar::{Scalar, Servable};
         handlers::get_pull_ci_details,
         handlers::get_repository_ci_details,
         handlers::get_repository_ci_step_logs,
+        handlers::get_repository_ci_step_log_download,
         handlers::get_pull_comments,
         handlers::get_pull_reviews,
         handlers::get_pull_inline_comments,
@@ -71,6 +72,8 @@ use utoipa_scalar::{Scalar, Servable};
         api::CiStepLogStatusResult,
         api::CiStepLogDiagnosticResult,
         api::RepositoryCiStepLogsResult,
+        api::CiStepLogSourceResult,
+        api::CiStepLogRepresentationResult,
         api::CiStepLogDownloadSourceResult,
         api::CiStepLogDownloadRepresentationResult,
         api::CiLogOutputCompletenessResult,
@@ -243,6 +246,10 @@ pub fn build_router_with_diagnostics(
         .route(
             "/api/v1/repos/{forge}/{owner}/{repo}/ci/woodpecker/{provider_repository_id}/pipelines/{pipeline_number}/workflows/{workflow_id}/steps/{step_id}/logs",
             get(handlers::get_repository_ci_step_logs),
+        )
+        .route(
+            "/api/v1/repos/{forge}/{owner}/{repo}/ci/woodpecker/{provider_repository_id}/pipelines/{pipeline_number}/workflows/{workflow_id}/steps/{step_id}/logs/download",
+            get(handlers::get_repository_ci_step_log_download),
         )
         .route(
             "/api/v1/repos/{forge}/{owner}/{repo}/pulls/{index}/comments",

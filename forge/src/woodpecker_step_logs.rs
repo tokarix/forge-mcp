@@ -155,6 +155,7 @@ fn failed(
     page.identity = identity;
     page.status = status;
     page.diagnostics = vec![
+        RepositoryCiStepLogs::completeness_diagnostic(),
         CiStepLogDiagnostic {
             code: code.into(),
             message: message.into(),

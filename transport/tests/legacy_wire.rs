@@ -157,6 +157,7 @@ async fn baseline_initialization_and_catalog() {
                         && tool["name"] != "get_change_request_inline_comments"
                         && tool["name"] != "get_repository_ci_details"
                         && tool["name"] != "get_repository_ci_step_logs"
+                        && tool["name"] != "get_repository_ci_step_log_download"
                 });
         }
         assert_eq!(catalog, expected);
