@@ -127,6 +127,8 @@ pub enum Resource {
     Pipeline(u64, u64),
     /// Step logs within a repository-scoped pipeline number.
     Logs(u64, u64, u64),
+    /// Plain-text download for one selected step; never a caller-supplied URL.
+    LogDownload(u64, u64, u64),
     /// Single agent referenced by a validated workflow; never a list lookup.
     Runner(u64),
 }
@@ -137,6 +139,9 @@ impl Resource {
             Self::Repository(repo) => format!("api/repos/{repo}"),
             Self::Pipeline(repo, number) => format!("api/repos/{repo}/pipelines/{number}"),
             Self::Logs(repo, number, step) => format!("api/repos/{repo}/logs/{number}/{step}"),
+            Self::LogDownload(repo, number, step) => {
+                format!("api/repos/{repo}/logs/{number}/{step}/download")
+            }
             Self::Runner(id) => format!("api/agents/{id}"),
         }
     }
@@ -331,6 +336,37 @@ impl Session {
         number: u64,
         step: u64,
     ) -> Result<Vec<u8>, Failure> {
+        self.selected_body(Resource::Logs(repository, number, step))
+            .await
+    }
+
+    /// Fetch a fully received, identity-encoded plain-text step download.
+    ///
+    /// The caller must first validate the entire repository/pipeline/step graph
+    /// with `woodpecker_step_logs::select_step`. Only the configured CI token is
+    /// used. No redirects, retries, caching, ranges or JSON fallback are used.
+    /// Content-Disposition is ignored; no file is created.
+    ///
+    /// # Errors
+    /// Reports safe HTTP, framing, media, deadline and shared budget failures.
+    /// A 404 retains capability uncertainty; 405/501 remain explicit statuses
+    /// for the download reader to classify as unsupported.
+    pub async fn step_log_download_body(
+        &mut self,
+        repository: u64,
+        number: u64,
+        step: u64,
+    ) -> Result<Vec<u8>, Failure> {
+        self.selected_body(Resource::LogDownload(repository, number, step))
+            .await
+    }
+
+    async fn selected_body(&mut self, resource: Resource) -> Result<Vec<u8>, Failure> {
+        let (Resource::Logs(repository, number, step)
+        | Resource::LogDownload(repository, number, step)) = resource
+        else {
+            return Err(binding_failure());
+        };
         if [repository, number, step]
             .into_iter()
             .any(|id| id == 0 || i64::try_from(id).is_err())
@@ -342,7 +378,6 @@ impl Session {
             return Err(Failure::limit());
         }
         self.requests += 1;
-        let resource = Resource::Logs(repository, number, step);
         let bytes = timeout_at(
             self.deadline,
             self.fetch_with_cap(resource, self.log_body_bytes),
@@ -359,6 +394,11 @@ impl Session {
     /// Reports credential, HTTP, transport, malformed-body and budget failures.
     /// A 404 is always resource-not-found, never capability detection.
     pub async fn json<T: DeserializeOwned>(&mut self, resource: Resource) -> Result<T, Failure> {
+        // Selected bodies must never enter the metadata cache, even through
+        // this public low-level transport API.
+        if matches!(resource, Resource::LogDownload(..)) {
+            return Err(binding_failure());
+        }
         if let Resource::Runner(_) = resource
             && self.token.as_deref().is_none_or(str::is_empty)
         {
@@ -405,11 +445,18 @@ impl Session {
             .0
             .join(&resource.path())
             .map_err(|_| binding_failure())?;
+        let download = matches!(resource, Resource::LogDownload(..));
         let mut request = self.client.get(url);
+        if download {
+            request = request.header(reqwest::header::ACCEPT_ENCODING, "identity");
+        }
         if let Some(token) = self.token.as_deref().filter(|token| !token.is_empty()) {
             request = request.bearer_auth(token);
         }
-        let mut response = request.send().await.map_err(|_| {
+        let mut response = request.send().await.map_err(|error| {
+            if download && error.is_timeout() {
+                return Failure::limit();
+            }
             Failure::new(
                 CiDiagnosticCode::Unavailable,
                 "Woodpecker request unavailable",
@@ -427,6 +474,16 @@ impl Session {
                 message: "Woodpecker request did not succeed",
             });
         }
+        if download {
+            validate_download_headers(response.headers())?;
+            if status != reqwest::StatusCode::OK {
+                return Err(Failure::new(
+                    CiDiagnosticCode::MalformedResponse,
+                    "Unexpected partial or empty-status download response",
+                ));
+            }
+        }
+        let declared = response.content_length();
         let remaining = self.limits.fetched_bytes.saturating_sub(self.fetched);
         let cap = body_cap.min(remaining);
         if response
@@ -436,7 +493,10 @@ impl Session {
             return Err(Failure::limit());
         }
         let mut bytes = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(|_| {
+        while let Some(chunk) = response.chunk().await.map_err(|error| {
+            if download && error.is_timeout() {
+                return Failure::limit();
+            }
             Failure::new(
                 CiDiagnosticCode::Unavailable,
                 "Woodpecker response body unavailable",
@@ -448,8 +508,59 @@ impl Session {
             }
             bytes.extend_from_slice(&chunk);
         }
+        if download && declared.is_some_and(|length| length != bytes.len() as u64) {
+            return Err(Failure::new(
+                CiDiagnosticCode::MalformedResponse,
+                "Incomplete Woodpecker download body",
+            ));
+        }
+        self.check_deadline()?;
         Ok(bytes)
     }
+}
+
+fn validate_download_headers(headers: &reqwest::header::HeaderMap) -> Result<(), Failure> {
+    let malformed = || {
+        Failure::new(
+            CiDiagnosticCode::MalformedResponse,
+            "Unsupported Woodpecker download media type or encoding",
+        )
+    };
+    let mut encodings = headers.get_all(reqwest::header::CONTENT_ENCODING).iter();
+    if let Some(encoding) = encodings.next()
+        && (!encoding
+            .to_str()
+            .is_ok_and(|s| s.trim().eq_ignore_ascii_case("identity"))
+            || encodings.next().is_some())
+    {
+        return Err(malformed());
+    }
+    let mut types = headers.get_all(reqwest::header::CONTENT_TYPE).iter();
+    let media = types
+        .next()
+        .ok_or_else(malformed)?
+        .to_str()
+        .map_err(|_| malformed())?;
+    if types.next().is_some() {
+        return Err(malformed());
+    }
+    let mut parts = media.split(';');
+    if !parts
+        .next()
+        .is_some_and(|p| p.trim().eq_ignore_ascii_case("text/plain"))
+    {
+        return Err(malformed());
+    }
+    if let Some(parameter) = parts.next() {
+        let (key, value) = parameter.split_once('=').ok_or_else(malformed)?;
+        if !key.trim().eq_ignore_ascii_case("charset")
+            || !value.trim().trim_matches('"').eq_ignore_ascii_case("utf-8")
+            || parts.next().is_some()
+        {
+            return Err(malformed());
+        }
+    }
+    Ok(())
 }
 
 /// Redact configured credentials before truncation, preserving UTF-8 boundaries.
@@ -493,6 +604,347 @@ mod tests {
             limits,
         )
         .expect("session")
+    }
+
+    #[tokio::test]
+    async fn download_framing_and_deadline_never_return_partial_evidence() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        for (body, slow, cap, code) in [
+            (
+                "Content-Length: 20\r\n\r\npartial",
+                false,
+                32,
+                CiDiagnosticCode::Unavailable,
+            ),
+            (
+                "Transfer-Encoding: chunked\r\n\r\n9\r\npartial",
+                false,
+                32,
+                CiDiagnosticCode::Unavailable,
+            ),
+            (
+                "Transfer-Encoding: chunked\r\n\r\n9\r\n123456789\r\n0\r\n\r\n",
+                false,
+                8,
+                CiDiagnosticCode::LimitExceeded,
+            ),
+            (
+                "Content-Length: 20\r\n\r\npartial",
+                true,
+                32,
+                CiDiagnosticCode::LimitExceeded,
+            ),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("listener");
+            let origin = Origin::parse(&format!(
+                "http://{}",
+                listener.local_addr().expect("address")
+            ))
+            .expect("origin");
+            let provider = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.expect("accept");
+                let mut buffer = [0; 4096];
+                assert!(socket.read(&mut buffer).await.expect("request") > 0);
+                socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\n{body}").as_bytes()).await.expect("response");
+                if slow {
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+                socket.shutdown().await.expect("close");
+            });
+            let mut client = Session::for_step_logs(
+                origin,
+                None,
+                StepLogTransportLimits {
+                    elapsed: Duration::from_millis(100),
+                    log_bytes: cap,
+                    ..StepLogTransportLimits::default()
+                },
+            )
+            .expect("session");
+            assert_eq!(
+                client
+                    .step_log_download_body(1, 42, 9)
+                    .await
+                    .expect_err("hard failure")
+                    .code,
+                code
+            );
+            assert!(client.cache.is_empty());
+            provider.await.expect("provider");
+        }
+    }
+
+    #[tokio::test]
+    async fn download_redirect_is_not_followed_and_empty_framed_body_is_valid() {
+        let mock = MockServer::start().await;
+        let destination = MockServer::start().await;
+        Mock::given(path("/api/repos/1/logs/42/9/download"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("location", format!("{}/stolen", destination.uri()))
+                    .set_body_string("SENTINEL"),
+            )
+            .expect(1)
+            .mount(&mock)
+            .await;
+        let mut client = Session::for_step_logs(
+            Origin::parse(&mock.uri()).expect("origin"),
+            None,
+            StepLogTransportLimits::default(),
+        )
+        .expect("session");
+        let failure = client
+            .step_log_download_body(1, 42, 9)
+            .await
+            .expect_err("redirect");
+        assert_eq!(failure.status, Some(302));
+        assert!(!format!("{failure:?}").contains("SENTINEL"));
+        assert!(
+            destination
+                .received_requests()
+                .await
+                .expect("requests")
+                .is_empty()
+        );
+        mock.reset().await;
+        Mock::given(path("/api/repos/1/logs/42/9/download"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(Vec::new(), "text/plain"))
+            .expect(2)
+            .mount(&mock)
+            .await;
+        for _ in 0..2 {
+            assert!(
+                client
+                    .step_log_download_body(1, 42, 9)
+                    .await
+                    .expect("empty")
+                    .is_empty()
+            );
+        }
+        assert!(client.cache.is_empty());
+    }
+
+    #[tokio::test]
+    async fn download_is_exact_uncached_prefixed_and_shares_metadata_budget() {
+        let mock = MockServer::start().await;
+        Mock::given(path("/ci/api/repos/1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        Mock::given(path("/ci/api/repos/1/pipelines/42"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        let raw = include_bytes!("../tests/fixtures/woodpecker-download-af44fdc/raw-download.txt");
+        let raw = [raw.as_slice(), b"\0\xff"].concat();
+        Mock::given(method("GET"))
+            .and(path("/ci/api/repos/1/logs/42/9/download"))
+            .and(header("accept-encoding", "identity"))
+            .and(header("authorization", "Bearer CI_SENTINEL"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(raw.clone(), "text/plain; charset=utf-8")
+                    .insert_header("content-disposition", "attachment; filename=SENTINEL"),
+            )
+            .expect(1)
+            .mount(&mock)
+            .await;
+        let mut client = Session::for_step_logs(
+            Origin::parse(&format!("{}/ci", mock.uri())).expect("origin"),
+            Some("CI_SENTINEL".into()),
+            StepLogTransportLimits {
+                fetched_bytes: 4 + raw.len(),
+                log_bytes: raw.len(),
+                ..StepLogTransportLimits::default()
+            },
+        )
+        .expect("session");
+        client
+            .json::<Value>(Resource::Repository(1))
+            .await
+            .expect("repository");
+        client
+            .json::<Value>(Resource::Pipeline(1, 42))
+            .await
+            .expect("pipeline");
+        assert_eq!(
+            client
+                .step_log_download_body(1, 42, 9)
+                .await
+                .expect("download"),
+            raw
+        );
+        assert_eq!(client.fetched, 4 + raw.len());
+        assert!(!client.cache.contains_key(&Resource::LogDownload(1, 42, 9)));
+        assert_eq!(
+            client
+                .step_log_download_body(1, 42, 9)
+                .await
+                .expect_err("budget")
+                .code,
+            CiDiagnosticCode::LimitExceeded
+        );
+        assert_eq!(mock.received_requests().await.expect("requests").len(), 3);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // Explicit media/status/security acceptance table.
+    async fn download_media_encoding_status_and_caps_fail_without_leaking() {
+        let mock = MockServer::start().await;
+        for (status, media, encoding, cap, expected) in [
+            (200, Some("text/plain"), None, 8, None),
+            (
+                200,
+                Some("Text/Plain; Charset=\"UTF-8\""),
+                Some("identity"),
+                8,
+                None,
+            ),
+            (
+                200,
+                None,
+                None,
+                8,
+                Some(CiDiagnosticCode::MalformedResponse),
+            ),
+            (
+                200,
+                Some("application/json"),
+                None,
+                8,
+                Some(CiDiagnosticCode::MalformedResponse),
+            ),
+            (
+                200,
+                Some("text/plain; charset=latin1"),
+                None,
+                8,
+                Some(CiDiagnosticCode::MalformedResponse),
+            ),
+            (
+                200,
+                Some("text/plain"),
+                Some("gzip"),
+                8,
+                Some(CiDiagnosticCode::MalformedResponse),
+            ),
+            (
+                200,
+                Some("text/plain"),
+                None,
+                7,
+                Some(CiDiagnosticCode::LimitExceeded),
+            ),
+            (
+                206,
+                Some("text/plain"),
+                None,
+                8,
+                Some(CiDiagnosticCode::MalformedResponse),
+            ),
+            (
+                401,
+                None,
+                None,
+                8,
+                Some(CiDiagnosticCode::AuthorizationDenied),
+            ),
+            (
+                403,
+                None,
+                None,
+                8,
+                Some(CiDiagnosticCode::AuthorizationDenied),
+            ),
+            (404, None, None, 8, Some(CiDiagnosticCode::ResourceNotFound)),
+            (405, None, None, 8, Some(CiDiagnosticCode::Unavailable)),
+            (429, None, None, 8, Some(CiDiagnosticCode::Unavailable)),
+            (500, None, None, 8, Some(CiDiagnosticCode::Unavailable)),
+            (501, None, None, 8, Some(CiDiagnosticCode::Unavailable)),
+        ] {
+            mock.reset().await;
+            let mut response = ResponseTemplate::new(status).set_body_bytes(b"SENTINEL");
+            if let Some(media) = media {
+                response = response.insert_header("content-type", media);
+            }
+            if let Some(encoding) = encoding {
+                response = response.insert_header("content-encoding", encoding);
+            }
+            Mock::given(path("/api/repos/1/logs/42/9/download"))
+                .respond_with(response)
+                .expect(1)
+                .mount(&mock)
+                .await;
+            let mut client = Session::for_step_logs(
+                Origin::parse(&mock.uri()).expect("origin"),
+                None,
+                StepLogTransportLimits {
+                    log_bytes: cap,
+                    ..StepLogTransportLimits::default()
+                },
+            )
+            .expect("session");
+            let result = client.step_log_download_body(1, 42, 9).await;
+            if let Some(code) = expected {
+                let failure = result.expect_err("safe failure");
+                assert_eq!(failure.code, code, "status {status}, media {media:?}");
+                assert!(!format!("{failure:?}").contains("SENTINEL"));
+                if status != 200 && status != 206 {
+                    assert_eq!(failure.status, Some(status));
+                }
+            } else {
+                assert_eq!(result.expect("exact body"), b"SENTINEL");
+            }
+            assert!(client.cache.is_empty());
+            assert!(
+                mock.received_requests().await.expect("requests")[0]
+                    .headers
+                    .get("authorization")
+                    .is_none()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn download_rejects_invalid_selectors_and_metadata_cache_access() {
+        let mock = MockServer::start().await;
+        let mut client = Session::for_step_logs(
+            Origin::parse(&mock.uri()).expect("origin"),
+            None,
+            StepLogTransportLimits::default(),
+        )
+        .expect("session");
+        for (repo, pipeline, step) in [(0, 42, 9), (1, 0, 9), (1, 42, 0), (1, 42, u64::MAX)] {
+            assert_eq!(
+                client
+                    .step_log_download_body(repo, pipeline, step)
+                    .await
+                    .expect_err("selector")
+                    .code,
+                CiDiagnosticCode::BindingMismatch
+            );
+        }
+        assert!(
+            client
+                .json::<Value>(Resource::LogDownload(1, 42, 9))
+                .await
+                .is_err()
+        );
+        client.deadline = Instant::now();
+        assert_eq!(
+            client
+                .step_log_download_body(1, 42, 9)
+                .await
+                .expect_err("deadline")
+                .code,
+            CiDiagnosticCode::LimitExceeded
+        );
+        assert!(mock.received_requests().await.expect("requests").is_empty());
     }
 
     #[tokio::test]

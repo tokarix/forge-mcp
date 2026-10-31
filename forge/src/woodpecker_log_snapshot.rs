@@ -445,6 +445,24 @@ mod tests {
         panic!("nonterminating traversal");
     }
 
+    // Frozen before download transport changes: additive metadata must never
+    // change the JSON v1 binding, raw-byte snapshot or accepted token profile.
+    #[tokio::test]
+    async fn frozen_json_v1_cursor_resumes_unchanged() {
+        let s = snapshot(br#"[{"data":"YWJjZGVm"}]"#, "", "commit");
+        assert_eq!(s.id, "O2gzwdY9Mf4CRV4OaStk1EVRKv2nEBW544jMbOuYvmg");
+        let token = "eyJ2ZXJzaW9uIjoxLCJiaW5kaW5nIjoiZk5rejFLYXE2R1dydmhjakh5bEZDeElzMkFla1ZiQkRIa1p4UndSdjBOQSIsInNuYXBzaG90IjoiTzJnendkWTlNZjRDUlY0T2FTdGsxRVZSS3YybkVCVzU0NGpNYk91WXZtZyIsInBvc2l0aW9uIjp7InJlY29yZF9pbmRleCI6MCwiYnl0ZV9vZmZzZXQiOjJ9fQ";
+        assert_eq!(
+            s.cursor(CiLogPosition {
+                record_index: 0,
+                byte_offset: 2
+            })
+            .expect("cursor"),
+            token
+        );
+        assert_eq!(traverse(&s, Some(token.into()), 2), "cdef");
+    }
+
     #[tokio::test]
     async fn six_panics_tail_rewind_and_long_records_reconstruct_exactly() {
         let blocks: Vec<_> = (0..6)
