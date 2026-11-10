@@ -1,7 +1,10 @@
+//! Provider lifecycle tests using only the CI-owned disposable service.
 #[path = "support/cancellation.rs"]
 mod cancellation;
 #[path = "support/pull_listing.rs"]
 mod pull_listing;
+#[path = "support/source_identity.rs"]
+mod source_identity;
 mod support;
 
 use domain::{ForgeCredential, ForgeKind, RepositoryRef};

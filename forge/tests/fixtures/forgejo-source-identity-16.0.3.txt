@@ -1,0 +1,43 @@
+Provenance: Forgejo original source identity experiment for issue #275
+
+Provider: Forgejo 16.0.3+gitea-1.22.0, CI-owned disposable service.
+Source: Woodpecker repository 29, pipeline 797, workflow 12641,
+step 48211; PR #276 head 51340492ebd3ada45be3abc55d35e602394db998.
+https://git.dev.adlevio.net/tokarix/forge-mcp/pulls/276
+http://woodpecker.dev.adlevio.net/repos/29/pipeline/797/2
+
+The adjacent JSON contains all 11 SOURCE_IDENTITY_EVIDENCE records and
+all four SOURCE_IDENTITY_GROUND_TRUTH records from that successful step.
+Records were retrieved through the gateway's bounded plain-text download
+reader. Capture code allowlists only PR state/number/merged and head/base
+ref, label, sha, repo_id, and repository id/name/full_name/owner login/id.
+Body, title, clone URLs, credentials and unrelated user details are excluded.
+CI-generated names, IDs and SHAs are retained verbatim; absent keys and
+explicit nulls retain their different shapes. No production PR was mutated.
+
+Lifecycle and interpretation:
+- PR 1: known branch evidence/closed/Case+λ; open, closed with retained
+  source branch, then closed with source branch deleted and GET returning
+  404. PR 2 repeats the lifecycle with a merge. PR 3 is an open control.
+- PR 4: source repository is a fork owned by a distinct CI organization.
+  Creation uses a qualified owner:branch request head. Captures cover open,
+  closed, deleted branch and finally deleted source repository (verified
+  unreadable). Cleanup removes the remaining repositories, organization
+  and ephemeral token even after lifecycle failures.
+- For all four PRs, head.label equals the exact branch supplied at fixture
+  creation, including slash, case, plus and Unicode. List and detail agree.
+  This version's response label is UNQUALIFIED, including for the fork.
+  No delimiter grammar or qualified-response-label recovery is established.
+- After branch deletion, head.ref becomes refs/pull/<number>/head while
+  head.label retains the original branch; head.repo and repo_id still
+  identify the source repository independently of the target.
+- After source repository deletion, head.label survives but head.repo is
+  null and head.repo_id is -1. That shape cannot establish a complete
+  source identity and must remain unknown. Never substitute the base repo.
+
+Evidence boundary:
+This fixture proves provider behavior for these CI-created inputs on this
+version. It does not prove behavior on a deployed gateway, retention on
+other versions, or recovery for ambiguous/missing metadata. Production
+normalization and adapter/schema/transport regressions remain separate work.
+The historical Cockpit PR #470 has not been read through a corrected gateway.

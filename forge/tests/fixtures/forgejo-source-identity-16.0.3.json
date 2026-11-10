@@ -1,0 +1,874 @@
+{
+  "provider": "Forgejo",
+  "version": "16.0.3+gitea-1.22.0",
+  "pipeline": 797,
+  "commit": "51340492ebd3ada45be3abc55d35e602394db998",
+  "ground_truth": [
+    {
+      "branch": "evidence/closed/Case+λ",
+      "index": 1,
+      "source": "/api/v1/repos/forge-mcp-ci/forge-mcp-source-3904-1794335562372153342",
+      "target": "/api/v1/repos/forge-mcp-ci/forge-mcp-source-3904-1794335562372153342"
+    },
+    {
+      "branch": "evidence/merged/Case+λ",
+      "index": 2,
+      "source": "/api/v1/repos/forge-mcp-ci/forge-mcp-source-3904-1794335562372153342",
+      "target": "/api/v1/repos/forge-mcp-ci/forge-mcp-source-3904-1794335562372153342"
+    },
+    {
+      "branch": "evidence/open/Case+λ",
+      "index": 3,
+      "source": "/api/v1/repos/forge-mcp-ci/forge-mcp-source-3904-1794335562372153342",
+      "target": "/api/v1/repos/forge-mcp-ci/forge-mcp-source-3904-1794335562372153342"
+    },
+    {
+      "branch": "evidence/fork/Case+λ",
+      "index": 4,
+      "source": "/api/v1/repos/source-org-3904-1794335562372167185/forge-mcp-source-3904-1794335562372153342",
+      "target": "/api/v1/repos/forge-mcp-ci/forge-mcp-source-3904-1794335562372153342"
+    }
+  ],
+  "observations": [
+    {
+      "detail": {
+        "base": {
+          "label": "main",
+          "ref": "main",
+          "repo": {
+            "full_name": "forge-mcp-ci/forge-mcp-source-3904-1794335562372153342",
+            "id": 3,
+            "name": "forge-mcp-source-3904-1794335562372153342",
+            "owner": {
+              "id": 1,
+              "login": "forge-mcp-ci",
+              "username": "forge-mcp-ci"
+            }
+          },
+          "repo_id": 3,
+          "sha": "f21a3b1fc9c0b92118656cdb0a70b9b241a8127e"
+        },
+        "head": {
+          "label": "evidence/closed/Case+λ",
+          "ref": "evidence/closed/Case+λ",
+          "repo": {
+            "full_name": "forge-mcp-ci/forge-mcp-source-3904-1794335562372153342",
+            "id": 3,
+            "name": "forge-mcp-source-3904-1794335562372153342",
+            "owner": {
+              "id": 1,
+              "login": "forge-mcp-ci",
+              "username": "forge-mcp-ci"
+            }
+          },
+          "repo_id": 3,
+          "sha": "c427f5380dc36be44f72c03330688a130bbcc99c"
+        },
+        "merged": false,
+        "number": 1,
+        "state": "open"
+      },
+      "list": {
+        "base": {
+          "label": "main",
+          "ref": "main",
+          "repo": {
+            "full_name": "forge-mcp-ci/forge-mcp-source-3904-1794335562372153342",
+            "id": 3,
+            "name": "forge-mcp-source-3904-1794335562372153342",
+            "owner": {
+              "id": 1,
+              "login": "forge-mcp-ci",
+              "username": "forge-mcp-ci"
+            }
+          },
+          "repo_id": 3,
+          "sha": "f21a3b1fc9c0b92118656cdb0a70b9b241a8127e"
+        },
+        "head": {
+          "label": "evidence/closed/Case+λ",
+          "ref": "evidence/closed/Case+λ",
+          "repo": {
+            "full_name": "forge-mcp-ci/forge-mcp-source-3904-1794335562372153342",
+            "id": 3,
+            "name": "forge-mcp-source-3904-1794335562372153342",
+            "owner": {
+              "id": 1,
+              "login": "forge-mcp-ci",
+              "username": "forge-mcp-ci"
+            }
+          },
+          "repo_id": 3,
+          "sha": "c427f5380dc36be44f72c03330688a130bbcc99c"
+        },
+        "merged": false,
+        "number": 1,
+        "state": "open"
+      },
+      "phase": "open",
+      "version": "16.0.3+gitea-1.22.0"
+    },
+    {
+      "detail": {
+        "base": {
+          "label": "main",
+          "ref": "main",
+          "repo": {
+            "full_name": "forge-mcp-ci/forge-mcp-source-3904-1794335562372153342",
+            "id": 3,
+            "name": "forge-mcp-source-3904-1794335562372153342",
+            "owner": {
+              "id": 1,
+              "login": "forge-mcp-ci",
+              "username": "forge-mcp-ci"
+            }
+          },
+          "repo_id": 3,
+          "sha": "f21a3b1fc9c0b92118656cdb0a70b9b241a8127e"
+        },
+        "head": {
+          "label": "evidence/closed/Case+λ",
+          "ref": "evidence/closed/Case+λ",
+          "repo": {
+            "full_name": "forge-mcp-ci/forge-mcp-source-3904-1794335562372153342",
+            "id": 3,
+            "name": "forge-mcp-source-3904-1794335562372153342",
+            "owner": {
+              "id": 1,
+              "login": "forge-mcp-ci",
+              "username": "forge-mcp-ci"
+            }
+          },
+          "repo_id": 3,
+          "sha": "c427f5380dc36be44f72c03330688a130bbcc99c"
+        },
+        "merged": false,
+        "number": 1,
+        "state": "closed"
+      },
+      "list": {
+        "base": {
+          "label": "main",
+          "ref": "main",
+          "repo": {
+            "full_name": "forge-mcp-ci/forge-mcp-source-3904-1794335562372153342",
+            "id": 3,
+            "name": "forge-mcp-source-3904-1794335562372153342",
+            "owner": {
+              "id": 1,
+              "login": "forge-mcp-ci",
+              "username": "forge-mcp-ci"
+            }
+          },
+          "repo_id": 3,
+          "sha": "f21a3b1fc9c0b92118656cdb0a70b9b241a8127e"
+        },
+        "head": {
+          "label": "evidence/closed/Case+λ",
+          "ref": "evidence/closed/Case+λ",
+          "repo": {
+            "full_name": "forge-mcp-ci/forge-mcp-source-3904-1794335562372153342",
+            "id": 3,
+            "name": "forge-mcp-source-3904-1794335562372153342",
+            "owner": {
+              "id": 1,
+              "login": "forge-mcp-ci",
+              "username": "forge-mcp-ci"
+            }
+          },
+          "repo_id": 3,
+          "sha": "c427f5380dc36be44f72c03330688a130bbcc99c"
+        },
+        "merged": false,
+        "number": 1,
+        "state": "closed"
+      },
+      "phase": "terminal-retained-source",
+      "version": "16.0.3+gitea-1.22.0"
+    },
+    {
+      "detail": {
+        "base": {
+          "label": "main",
+          "ref": "main",
+          "repo": {
+            "full_name": "forge-mcp-ci/forge-mcp-source-3904-1794335562372153342",
+            "id": 3,
+            "name": "forge-mcp-source-3904-1794335562372153342",
+            "owner": {
+              "id": 1,
+              "login": "forge-mcp-ci",
+              "username": "forge-mcp-ci"
+            }
+          },
+          "repo_id": 3,
+          "sha": "f21a3b1fc9c0b92118656cdb0a70b9b241a8127e"
+        },
+        "head": {
+          "label": "evidence/closed/Case+λ",
+          "ref": "refs/pull/1/head",
+          "repo": {
+            "full_name": "forge-mcp-ci/forge-mcp-source-3904-1794335562372153342",
+            "id": 3,
+            "name": "forge-mcp-source-3904-1794335562372153342",
+            "owner": {
+              "id": 1,
+              "login": "forge-mcp-ci",
+              "username": "forge-mcp-ci"
+            }
+          },
+          "repo_id": 3,
+          "sha": "c427f5380dc36be44f72c03330688a130bbcc99c"
+        },
+        "merged": false,
+        "number": 1,
+        "state": "closed"
+      },
+      "list": {
+        "base": {
+          "label": "main",
+          "ref": "main",
+          "repo": {
+            "full_name": "forge-mcp-ci/forge-mcp-source-3904-1794335562372153342",
+            "id": 3,
+            "name": "forge-mcp-source-3904-1794335562372153342",
+            "owner": {
+              "id": 1,
+              "login": "forge-mcp-ci",
+              "username": "forge-mcp-ci"
+            }
+          },
+          "repo_id": 3,
+          "sha": "f21a3b1fc9c0b92118656cdb0a70b9b241a8127e"
+        },
+        "head": {
+          "label": "evidence/closed/Case+λ",
+          "ref": "refs/pull/1/head",
+          "repo": {
+            "full_name": "forge-mcp-ci/forge-mcp-source-3904-1794335562372153342",
+            "id": 3,
+            "name": "forge-mcp-source-3904-1794335562372153342",
+            "owner": {
+              "id": 1,
+              "login": "forge-mcp-ci",
+              "username": "forge-mcp-ci"
+            }
+          },
+          "repo_id": 3,
+          "sha": "c427f5380dc36be44f72c03330688a130bbcc99c"
+        },
+        "merged": false,
+        "number": 1,
+        "state": "closed"
+      },
+      "phase": "terminal-deleted-source",
+      "version": "16.0.3+gitea-1.22.0"
+    },
+    {
+      "detail": {
+        "base": {
+          "label": "main",
+          "ref": "main",
+          "repo": {
+            "full_name": "forge-mcp-ci/forge-mcp-source-3904-1794335562372153342",
+            "id": 3,
+            "name": "forge-mcp-source-3904-1794335562372153342",
+            "owner": {
+              "id": 1,
+              "login": "forge-mcp-ci",
+              "username": "forge-mcp-ci"
+            }
+          },
+          "repo_id": 3,
+          "sha": "f21a3b1fc9c0b92118656cdb0a70b9b241a8127e"
+        },
+        "head": {
+          "label": "evidence/merged/Case+λ",
+          "ref": "evidence/merged/Case+λ",
+          "repo": {
+            "full_name": "forge-mcp-ci/forge-mcp-source-3904-1794335562372153342",
+            "id": 3,
+            "name": "forge-mcp-source-3904-1794335562372153342",
+            "owner": {
+              "id": 1,
+              "login": "forge-mcp-ci",
+              "username": "forge-mcp-ci"
+            }
+          },
+          "repo_id": 3,
+          "sha": "7738788d77fbd9ca1afbf7a7c84586794bbd9786"
+        },
+        "merged": false,
+        "number": 2,
+        "state": "open"
+      },
+      "list": {
+        "base": {
+          "label": "main",
+          "ref": "main",
+          "repo": {
+            "full_name": "forge-mcp-ci/forge-mcp-source-3904-1794335562372153342",
+            "id": 3,
+            "name": "forge-mcp-source-3904-1794335562372153342",
+            "owner": {
+              "id": 1,
+              "login": "forge-mcp-ci",
+              "username": "forge-mcp-ci"
+            }
+          },
+          "repo_id": 3,
+          "sha": "f21a3b1fc9c0b92118656cdb0a70b9b241a8127e"
+        },
+        "head": {
+          "label": "evidence/merged/Case+λ",
+          "ref": "evidence/merged/Case+λ",
+          "repo": {
+            "full_name": "forge-mcp-ci/forge-mcp-source-3904-1794335562372153342",
+            "id": 3,
+            "name": "forge-mcp-source-3904-1794335562372153342",
+            "owner": {
+              "id": 1,
+              "login": "forge-mcp-ci",
+              "username": "forge-mcp-ci"
+            }
+          },
+          "repo_id": 3,
+          "sha": "7738788d77fbd9ca1afbf7a7c84586794bbd9786"
+        },
+        "merged": false,
+        "number": 2,
+        "state": "open"
+      },
+      "phase": "open",
+      "version": "16.0.3+gitea-1.22.0"
+    },
+    {
+      "detail": {
+        "base": {
+          "label": "main",
+          "ref": "main",
+          "repo": {
+            "full_name": "forge-mcp-ci/forge-mcp-source-3904-1794335562372153342",
+            "id": 3,
+            "name": "forge-mcp-source-3904-1794335562372153342",
+            "owner": {
+              "id": 1,
+              "login": "forge-mcp-ci",
+              "username": "forge-mcp-ci"
+            }
+          },
+          "repo_id": 3,
+          "sha": "b19db15908962877f8dc3e0f727fe792a314c0a3"
+        },
+        "head": {
+          "label": "evidence/merged/Case+λ",
+          "ref": "evidence/merged/Case+λ",
+          "repo": {
+            "full_name": "forge-mcp-ci/forge-mcp-source-3904-1794335562372153342",
+            "id": 3,
+            "name": "forge-mcp-source-3904-1794335562372153342",
+            "owner": {
+              "id": 1,
+              "login": "forge-mcp-ci",
+              "username": "forge-mcp-ci"
+            }
+          },
+          "repo_id": 3,
+          "sha": "7738788d77fbd9ca1afbf7a7c84586794bbd9786"
+        },
+        "merged": true,
+        "number": 2,
+        "state": "closed"
+      },
+      "list": {
+        "base": {
+          "label": "main",
+          "ref": "main",
+          "repo": {
+            "full_name": "forge-mcp-ci/forge-mcp-source-3904-1794335562372153342",
+            "id": 3,
+            "name": "forge-mcp-source-3904-1794335562372153342",
+            "owner": {
+              "id": 1,
+              "login": "forge-mcp-ci",
+              "username": "forge-mcp-ci"
+            }
+          },
+          "repo_id": 3,
+          "sha": "b19db15908962877f8dc3e0f727fe792a314c0a3"
+        },
+        "head": {
+          "label": "evidence/merged/Case+λ",
+          "ref": "evidence/merged/Case+λ",
+          "repo": {
+            "full_name": "forge-mcp-ci/forge-mcp-source-3904-1794335562372153342",
+            "id": 3,
+            "name": "forge-mcp-source-3904-1794335562372153342",
+            "owner": {
+              "id": 1,
+              "login": "forge-mcp-ci",
+              "username": "forge-mcp-ci"
+            }
+          },
+          "repo_id": 3,
+          "sha": "7738788d77fbd9ca1afbf7a7c84586794bbd9786"
+        },
+        "merged": true,
+        "number": 2,
+        "state": "closed"
+      },
+      "phase": "terminal-retained-source",
+      "version": "16.0.3+gitea-1.22.0"
+    },
+    {
+      "detail": {
+        "base": {
+          "label": "main",
+          "ref": "main",
+          "repo": {
+            "full_name": "forge-mcp-ci/forge-mcp-source-3904-1794335562372153342",
+            "id": 3,
+            "name": "forge-mcp-source-3904-1794335562372153342",
+            "owner": {
+              "id": 1,
+              "login": "forge-mcp-ci",
+              "username": "forge-mcp-ci"
+            }
+          },
+          "repo_id": 3,
+          "sha": "b19db15908962877f8dc3e0f727fe792a314c0a3"
+        },
+        "head": {
+          "label": "evidence/merged/Case+λ",
+          "ref": "refs/pull/2/head",
+          "repo": {
+            "full_name": "forge-mcp-ci/forge-mcp-source-3904-1794335562372153342",
+            "id": 3,
+            "name": "forge-mcp-source-3904-1794335562372153342",
+            "owner": {
+              "id": 1,
+              "login": "forge-mcp-ci",
+              "username": "forge-mcp-ci"
+            }
+          },
+          "repo_id": 3,
+          "sha": "7738788d77fbd9ca1afbf7a7c84586794bbd9786"
+        },
+        "merged": true,
+        "number": 2,
+        "state": "closed"
+      },
+      "list": {
+        "base": {
+          "label": "main",
+          "ref": "main",
+          "repo": {
+            "full_name": "forge-mcp-ci/forge-mcp-source-3904-1794335562372153342",
+            "id": 3,
+            "name": "forge-mcp-source-3904-1794335562372153342",
+            "owner": {
+              "id": 1,
+              "login": "forge-mcp-ci",
+              "username": "forge-mcp-ci"
+            }
+          },
+          "repo_id": 3,
+          "sha": "b19db15908962877f8dc3e0f727fe792a314c0a3"
+        },
+        "head": {
+          "label": "evidence/merged/Case+λ",
+          "ref": "refs/pull/2/head",
+          "repo": {
+            "full_name": "forge-mcp-ci/forge-mcp-source-3904-1794335562372153342",
+            "id": 3,
+            "name": "forge-mcp-source-3904-1794335562372153342",
+            "owner": {
+              "id": 1,
+              "login": "forge-mcp-ci",
+              "username": "forge-mcp-ci"
+            }
+          },
+          "repo_id": 3,
+          "sha": "7738788d77fbd9ca1afbf7a7c84586794bbd9786"
+        },
+        "merged": true,
+        "number": 2,
+        "state": "closed"
+      },
+      "phase": "terminal-deleted-source",
+      "version": "16.0.3+gitea-1.22.0"
+    },
+    {
+      "detail": {
+        "base": {
+          "label": "main",
+          "ref": "main",
+          "repo": {
+            "full_name": "forge-mcp-ci/forge-mcp-source-3904-1794335562372153342",
+            "id": 3,
+            "name": "forge-mcp-source-3904-1794335562372153342",
+            "owner": {
+              "id": 1,
+              "login": "forge-mcp-ci",
+              "username": "forge-mcp-ci"
+            }
+          },
+          "repo_id": 3,
+          "sha": "b19db15908962877f8dc3e0f727fe792a314c0a3"
+        },
+        "head": {
+          "label": "evidence/open/Case+λ",
+          "ref": "evidence/open/Case+λ",
+          "repo": {
+            "full_name": "forge-mcp-ci/forge-mcp-source-3904-1794335562372153342",
+            "id": 3,
+            "name": "forge-mcp-source-3904-1794335562372153342",
+            "owner": {
+              "id": 1,
+              "login": "forge-mcp-ci",
+              "username": "forge-mcp-ci"
+            }
+          },
+          "repo_id": 3,
+          "sha": "6c87a525955cba2d3186aff8c84798d92ca222a0"
+        },
+        "merged": false,
+        "number": 3,
+        "state": "open"
+      },
+      "list": {
+        "base": {
+          "label": "main",
+          "ref": "main",
+          "repo": {
+            "full_name": "forge-mcp-ci/forge-mcp-source-3904-1794335562372153342",
+            "id": 3,
+            "name": "forge-mcp-source-3904-1794335562372153342",
+            "owner": {
+              "id": 1,
+              "login": "forge-mcp-ci",
+              "username": "forge-mcp-ci"
+            }
+          },
+          "repo_id": 3,
+          "sha": "b19db15908962877f8dc3e0f727fe792a314c0a3"
+        },
+        "head": {
+          "label": "evidence/open/Case+λ",
+          "ref": "evidence/open/Case+λ",
+          "repo": {
+            "full_name": "forge-mcp-ci/forge-mcp-source-3904-1794335562372153342",
+            "id": 3,
+            "name": "forge-mcp-source-3904-1794335562372153342",
+            "owner": {
+              "id": 1,
+              "login": "forge-mcp-ci",
+              "username": "forge-mcp-ci"
+            }
+          },
+          "repo_id": 3,
+          "sha": "6c87a525955cba2d3186aff8c84798d92ca222a0"
+        },
+        "merged": false,
+        "number": 3,
+        "state": "open"
+      },
+      "phase": "retained-open-control",
+      "version": "16.0.3+gitea-1.22.0"
+    },
+    {
+      "detail": {
+        "base": {
+          "label": "main",
+          "ref": "main",
+          "repo": {
+            "full_name": "forge-mcp-ci/forge-mcp-source-3904-1794335562372153342",
+            "id": 3,
+            "name": "forge-mcp-source-3904-1794335562372153342",
+            "owner": {
+              "id": 1,
+              "login": "forge-mcp-ci",
+              "username": "forge-mcp-ci"
+            }
+          },
+          "repo_id": 3,
+          "sha": "b19db15908962877f8dc3e0f727fe792a314c0a3"
+        },
+        "head": {
+          "label": "evidence/fork/Case+λ",
+          "ref": "evidence/fork/Case+λ",
+          "repo": {
+            "full_name": "source-org-3904-1794335562372167185/forge-mcp-source-3904-1794335562372153342",
+            "id": 8,
+            "name": "forge-mcp-source-3904-1794335562372153342",
+            "owner": {
+              "id": 3,
+              "login": "source-org-3904-1794335562372167185",
+              "username": "source-org-3904-1794335562372167185"
+            }
+          },
+          "repo_id": 8,
+          "sha": "529ea0fb3b8c92fa5f615d6f9f0055c11c94c616"
+        },
+        "merged": false,
+        "number": 4,
+        "state": "open"
+      },
+      "list": {
+        "base": {
+          "label": "main",
+          "ref": "main",
+          "repo": {
+            "full_name": "forge-mcp-ci/forge-mcp-source-3904-1794335562372153342",
+            "id": 3,
+            "name": "forge-mcp-source-3904-1794335562372153342",
+            "owner": {
+              "id": 1,
+              "login": "forge-mcp-ci",
+              "username": "forge-mcp-ci"
+            }
+          },
+          "repo_id": 3,
+          "sha": "b19db15908962877f8dc3e0f727fe792a314c0a3"
+        },
+        "head": {
+          "label": "evidence/fork/Case+λ",
+          "ref": "evidence/fork/Case+λ",
+          "repo": {
+            "full_name": "source-org-3904-1794335562372167185/forge-mcp-source-3904-1794335562372153342",
+            "id": 8,
+            "name": "forge-mcp-source-3904-1794335562372153342",
+            "owner": {
+              "id": 3,
+              "login": "source-org-3904-1794335562372167185",
+              "username": "source-org-3904-1794335562372167185"
+            }
+          },
+          "repo_id": 8,
+          "sha": "529ea0fb3b8c92fa5f615d6f9f0055c11c94c616"
+        },
+        "merged": false,
+        "number": 4,
+        "state": "open"
+      },
+      "phase": "fork-open",
+      "version": "16.0.3+gitea-1.22.0"
+    },
+    {
+      "detail": {
+        "base": {
+          "label": "main",
+          "ref": "main",
+          "repo": {
+            "full_name": "forge-mcp-ci/forge-mcp-source-3904-1794335562372153342",
+            "id": 3,
+            "name": "forge-mcp-source-3904-1794335562372153342",
+            "owner": {
+              "id": 1,
+              "login": "forge-mcp-ci",
+              "username": "forge-mcp-ci"
+            }
+          },
+          "repo_id": 3,
+          "sha": "b19db15908962877f8dc3e0f727fe792a314c0a3"
+        },
+        "head": {
+          "label": "evidence/fork/Case+λ",
+          "ref": "evidence/fork/Case+λ",
+          "repo": {
+            "full_name": "source-org-3904-1794335562372167185/forge-mcp-source-3904-1794335562372153342",
+            "id": 8,
+            "name": "forge-mcp-source-3904-1794335562372153342",
+            "owner": {
+              "id": 3,
+              "login": "source-org-3904-1794335562372167185",
+              "username": "source-org-3904-1794335562372167185"
+            }
+          },
+          "repo_id": 8,
+          "sha": "529ea0fb3b8c92fa5f615d6f9f0055c11c94c616"
+        },
+        "merged": false,
+        "number": 4,
+        "state": "closed"
+      },
+      "list": {
+        "base": {
+          "label": "main",
+          "ref": "main",
+          "repo": {
+            "full_name": "forge-mcp-ci/forge-mcp-source-3904-1794335562372153342",
+            "id": 3,
+            "name": "forge-mcp-source-3904-1794335562372153342",
+            "owner": {
+              "id": 1,
+              "login": "forge-mcp-ci",
+              "username": "forge-mcp-ci"
+            }
+          },
+          "repo_id": 3,
+          "sha": "b19db15908962877f8dc3e0f727fe792a314c0a3"
+        },
+        "head": {
+          "label": "evidence/fork/Case+λ",
+          "ref": "evidence/fork/Case+λ",
+          "repo": {
+            "full_name": "source-org-3904-1794335562372167185/forge-mcp-source-3904-1794335562372153342",
+            "id": 8,
+            "name": "forge-mcp-source-3904-1794335562372153342",
+            "owner": {
+              "id": 3,
+              "login": "source-org-3904-1794335562372167185",
+              "username": "source-org-3904-1794335562372167185"
+            }
+          },
+          "repo_id": 8,
+          "sha": "529ea0fb3b8c92fa5f615d6f9f0055c11c94c616"
+        },
+        "merged": false,
+        "number": 4,
+        "state": "closed"
+      },
+      "phase": "fork-closed-retained-source",
+      "version": "16.0.3+gitea-1.22.0"
+    },
+    {
+      "detail": {
+        "base": {
+          "label": "main",
+          "ref": "main",
+          "repo": {
+            "full_name": "forge-mcp-ci/forge-mcp-source-3904-1794335562372153342",
+            "id": 3,
+            "name": "forge-mcp-source-3904-1794335562372153342",
+            "owner": {
+              "id": 1,
+              "login": "forge-mcp-ci",
+              "username": "forge-mcp-ci"
+            }
+          },
+          "repo_id": 3,
+          "sha": "b19db15908962877f8dc3e0f727fe792a314c0a3"
+        },
+        "head": {
+          "label": "evidence/fork/Case+λ",
+          "ref": "refs/pull/4/head",
+          "repo": {
+            "full_name": "source-org-3904-1794335562372167185/forge-mcp-source-3904-1794335562372153342",
+            "id": 8,
+            "name": "forge-mcp-source-3904-1794335562372153342",
+            "owner": {
+              "id": 3,
+              "login": "source-org-3904-1794335562372167185",
+              "username": "source-org-3904-1794335562372167185"
+            }
+          },
+          "repo_id": 8,
+          "sha": "529ea0fb3b8c92fa5f615d6f9f0055c11c94c616"
+        },
+        "merged": false,
+        "number": 4,
+        "state": "closed"
+      },
+      "list": {
+        "base": {
+          "label": "main",
+          "ref": "main",
+          "repo": {
+            "full_name": "forge-mcp-ci/forge-mcp-source-3904-1794335562372153342",
+            "id": 3,
+            "name": "forge-mcp-source-3904-1794335562372153342",
+            "owner": {
+              "id": 1,
+              "login": "forge-mcp-ci",
+              "username": "forge-mcp-ci"
+            }
+          },
+          "repo_id": 3,
+          "sha": "b19db15908962877f8dc3e0f727fe792a314c0a3"
+        },
+        "head": {
+          "label": "evidence/fork/Case+λ",
+          "ref": "refs/pull/4/head",
+          "repo": {
+            "full_name": "source-org-3904-1794335562372167185/forge-mcp-source-3904-1794335562372153342",
+            "id": 8,
+            "name": "forge-mcp-source-3904-1794335562372153342",
+            "owner": {
+              "id": 3,
+              "login": "source-org-3904-1794335562372167185",
+              "username": "source-org-3904-1794335562372167185"
+            }
+          },
+          "repo_id": 8,
+          "sha": "529ea0fb3b8c92fa5f615d6f9f0055c11c94c616"
+        },
+        "merged": false,
+        "number": 4,
+        "state": "closed"
+      },
+      "phase": "fork-closed-deleted-source",
+      "version": "16.0.3+gitea-1.22.0"
+    },
+    {
+      "detail": {
+        "base": {
+          "label": "main",
+          "ref": "main",
+          "repo": {
+            "full_name": "forge-mcp-ci/forge-mcp-source-3904-1794335562372153342",
+            "id": 3,
+            "name": "forge-mcp-source-3904-1794335562372153342",
+            "owner": {
+              "id": 1,
+              "login": "forge-mcp-ci",
+              "username": "forge-mcp-ci"
+            }
+          },
+          "repo_id": 3,
+          "sha": "b19db15908962877f8dc3e0f727fe792a314c0a3"
+        },
+        "head": {
+          "label": "evidence/fork/Case+λ",
+          "ref": "refs/pull/4/head",
+          "repo": null,
+          "repo_id": -1,
+          "sha": "529ea0fb3b8c92fa5f615d6f9f0055c11c94c616"
+        },
+        "merged": false,
+        "number": 4,
+        "state": "closed"
+      },
+      "list": {
+        "base": {
+          "label": "main",
+          "ref": "main",
+          "repo": {
+            "full_name": "forge-mcp-ci/forge-mcp-source-3904-1794335562372153342",
+            "id": 3,
+            "name": "forge-mcp-source-3904-1794335562372153342",
+            "owner": {
+              "id": 1,
+              "login": "forge-mcp-ci",
+              "username": "forge-mcp-ci"
+            }
+          },
+          "repo_id": 3,
+          "sha": "b19db15908962877f8dc3e0f727fe792a314c0a3"
+        },
+        "head": {
+          "label": "evidence/fork/Case+λ",
+          "ref": "refs/pull/4/head",
+          "repo": null,
+          "repo_id": -1,
+          "sha": "529ea0fb3b8c92fa5f615d6f9f0055c11c94c616"
+        },
+        "merged": false,
+        "number": 4,
+        "state": "closed"
+      },
+      "phase": "fork-closed-deleted-repository",
+      "version": "16.0.3+gitea-1.22.0"
+    }
+  ]
+}

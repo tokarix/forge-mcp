@@ -1,0 +1,16 @@
+Provider: CI-owned Forgejo 16.0.3+gitea-1.22.0.
+Capture SHA: 206b38775236ccc6e51182a7a18624e6580e3955.
+Woodpecker repository 29, pipeline 803, workflow 12656, integration step 48280.
+Retrieved through forge-mcp get_repository_ci_step_logs (three strict-snapshot pages).
+18 allowlisted list(state=all)/detail observations; six successful branch creation
+requests and independent branch/repository read-backs; six verified 404 deletions.
+Fresh repository PR indices 1 and 2 were checked against refs/pull/1/head and
+refs/pull/2/head respectively. Both collisions retain original labels after deletion.
+refs/pull/topic and refs/pull/275/head cover closed-unmerged and merged lifecycles.
+Source repository ID/coordinates were read separately from PR metadata.
+Only allowlisted identity/state fields are retained, preserving absent/null.
+Original pipeline797 fixture/provenance remain unchanged.
+Pipeline803 ordinary checks passed; integration intentionally exposed the old
+resolver defect: all 18 positive prefix assertions failed, while original
+identity cases and exhaustive pull listing passed. This is capture evidence,
+not acceptance qualification. Final changed head requires its own passing CI.
