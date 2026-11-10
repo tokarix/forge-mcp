@@ -109,6 +109,26 @@ pub struct Repository {
     pub url: String,
 }
 
+/// Provider-authoritative historical source identity, scoped to this forge.
+/// This evidence does not authorize mutation of a deleted or recreated branch.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub struct SourceBranchIdentity {
+    /// Exact original branch name, without normalization.
+    pub branch: String,
+    /// Source repository; never substituted from the target repository.
+    pub repository: SourceRepositoryIdentity,
+}
+
+/// Provider repository ID and coordinates within the responding forge.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub struct SourceRepositoryIdentity {
+    pub id: u64,
+    pub owner: String,
+    pub name: String,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct ChangeRequest {
@@ -119,7 +139,11 @@ pub struct ChangeRequest {
     pub body: String,
     pub changed_files_count: Option<u64>,
     pub commit_count: Option<u64>,
+    /// Legacy provider ref; may be synthetic and is not original-source authority.
     pub head_branch: String,
+    /// Unknown or insufficient source evidence is explicitly null on the wire.
+    #[serde(default)]
+    pub source_branch_identity: Option<SourceBranchIdentity>,
     pub head_sha: Option<String>,
     pub has_conflicts: Option<bool>,
     pub index: u64,
@@ -2459,6 +2483,7 @@ mod tests {
             body: "fix".to_string(),
             changed_files_count: None,
             commit_count: None,
+            source_branch_identity: None,
             head_branch: "agent/fix".to_string(),
             head_sha: None,
             has_conflicts: None,
@@ -2486,6 +2511,7 @@ mod tests {
             body: "fix".to_string(),
             changed_files_count: None,
             commit_count: None,
+            source_branch_identity: None,
             head_branch: "agent/fix".to_string(),
             head_sha: None,
             has_conflicts: Some(true),
@@ -2525,6 +2551,7 @@ mod tests {
             body: "fix".to_string(),
             changed_files_count: None,
             commit_count: None,
+            source_branch_identity: None,
             head_branch: "agent/fix".to_string(),
             head_sha: None,
             has_conflicts: None,
@@ -2974,5 +3001,41 @@ mod historical_ci_tests {
         assert_eq!(json["outcome"]["type"], "unsupported");
         assert!(json.get("head_sha").is_none());
         assert!(json.get("state").is_none());
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod source_identity_contract_tests {
+    use super::*;
+    #[test]
+    fn identity_is_nullable_and_legacy_json_defaults_to_unknown() {
+        let mut request = ChangeRequest::default();
+        let json = serde_json::to_value(&request).expect("JSON");
+        assert!(json["source_branch_identity"].is_null());
+        let mut legacy = json;
+        legacy
+            .as_object_mut()
+            .expect("object")
+            .remove("source_branch_identity");
+        assert_eq!(
+            serde_json::from_value::<ChangeRequest>(legacy)
+                .expect("legacy")
+                .source_branch_identity,
+            None
+        );
+        request.source_branch_identity = Some(SourceBranchIdentity {
+            branch: "Case/λ+punctuation".into(),
+            repository: SourceRepositoryIdentity {
+                id: 42,
+                owner: "fork".into(),
+                name: "repo".into(),
+            },
+        });
+        assert_eq!(
+            serde_json::from_value::<ChangeRequest>(serde_json::to_value(&request).expect("JSON"))
+                .expect("round trip"),
+            request
+        );
     }
 }

@@ -4011,6 +4011,7 @@ mod tests {
                     body: "body".to_string(),
                     changed_files_count: None,
                     commit_count: None,
+                    source_branch_identity: None,
                     head_branch: "agent/fix".to_string(),
                     head_sha: None,
                     has_conflicts: None,
@@ -4178,6 +4179,7 @@ mod tests {
                 body: String::new(),
                 changed_files_count: None,
                 commit_count: None,
+                source_branch_identity: None,
                 head_branch: "agent/fix".to_string(),
                 head_sha: None,
                 has_conflicts: None,
@@ -4252,6 +4254,7 @@ mod tests {
                     body: "body".to_string(),
                     changed_files_count: None,
                     commit_count: None,
+                    source_branch_identity: None,
                     head_branch: "agent/fix".to_string(),
                     head_sha: None,
                     has_conflicts: None,
@@ -4371,6 +4374,7 @@ mod tests {
                 body: request.body.unwrap_or_default(),
                 changed_files_count: None,
                 commit_count: None,
+                source_branch_identity: None,
                 head_branch: "agent/fix".to_string(),
                 head_sha: None,
                 has_conflicts: None,
@@ -7594,6 +7598,14 @@ mod tests {
                 body: "body".to_string(),
                 changed_files_count: None,
                 commit_count: None,
+                source_branch_identity: Some(domain::SourceBranchIdentity {
+                    branch: "original/λ".into(),
+                    repository: domain::SourceRepositoryIdentity {
+                        id: 42,
+                        owner: "fork".into(),
+                        name: "source".into(),
+                    },
+                }),
                 head_branch: "agent/fix".to_string(),
                 head_sha: Some("abc123".to_string()),
                 has_conflicts: Some(true),
@@ -7631,6 +7643,11 @@ mod tests {
                 .expect("read response body");
             let json: serde_json::Value =
                 serde_json::from_slice(&body).expect("parse JSON response");
+            assert_eq!(json["source_branch_identity"]["branch"], "original/λ");
+            assert_eq!(
+                json["source_branch_identity"]["repository"]["owner"],
+                "fork"
+            );
             assert_eq!(json["mergeability"], "conflicting");
             assert_eq!(json["has_conflicts"], true);
             assert_eq!(json["draft"], serde_json::json!(draft));
@@ -7647,6 +7664,14 @@ mod tests {
                 body: "body".to_string(),
                 changed_files_count: None,
                 commit_count: None,
+                source_branch_identity: Some(domain::SourceBranchIdentity {
+                    branch: "original/λ".into(),
+                    repository: domain::SourceRepositoryIdentity {
+                        id: 42,
+                        owner: "fork".into(),
+                        name: "source".into(),
+                    },
+                }),
                 head_branch: "agent/fix".to_string(),
                 head_sha: Some("abc123".to_string()),
                 has_conflicts: Some(false),
@@ -7684,6 +7709,11 @@ mod tests {
                 .expect("read response body");
             let json: serde_json::Value =
                 serde_json::from_slice(&body).expect("parse JSON response");
+            assert_eq!(json[0]["source_branch_identity"]["branch"], "original/λ");
+            assert_eq!(
+                json[0]["source_branch_identity"]["repository"]["owner"],
+                "fork"
+            );
             assert_eq!(json[0]["mergeability"], "mergeable");
             assert_eq!(json[0]["has_conflicts"], false);
             assert_eq!(json[0]["draft"], serde_json::json!(draft));

@@ -113,6 +113,8 @@ use utoipa_scalar::{Scalar, Servable};
         api::ListBranchesResponse,
         api::ErrorBody,
         domain::ChangeRequest,
+        domain::SourceBranchIdentity,
+        domain::SourceRepositoryIdentity,
         domain::ChangeRequestState,
         domain::DependsOnReadContract,
         domain::Issue,
@@ -306,6 +308,26 @@ pub fn build_router_with_diagnostics(
 #[allow(clippy::expect_used)]
 mod draft_schema_tests {
     use super::*;
+
+    #[test]
+    fn source_identity_schema_is_optional_nullable_and_registered() {
+        let document = serde_json::to_value(ApiDoc::openapi()).expect("schema");
+        let schemas = &document["components"]["schemas"];
+        let schema = &schemas["ChangeRequest"];
+        assert!(
+            !schema["required"]
+                .as_array()
+                .expect("required")
+                .iter()
+                .any(|v| v == "source_branch_identity")
+        );
+        let property = &schema["properties"]["source_branch_identity"];
+        let serialized = property.to_string();
+        assert!(serialized.contains("null"));
+        assert!(serialized.contains("SourceBranchIdentity"));
+        assert!(schemas["SourceBranchIdentity"].is_object());
+        assert!(schemas["SourceRepositoryIdentity"].is_object());
+    }
 
     #[test]
     fn change_request_draft_schema_is_optional_nullable_boolean() {

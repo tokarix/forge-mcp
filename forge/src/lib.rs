@@ -1518,6 +1518,64 @@ struct ForgejoPullBranch {
     #[serde(rename = "ref")]
     ref_name: String,
     sha: String,
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default)]
+    repo_id: Option<i64>,
+    #[serde(default)]
+    repo: Option<ForgejoSourceRepository>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ForgejoSourceRepository {
+    id: Option<u64>,
+    name: Option<String>,
+    full_name: Option<String>,
+    owner: Option<ForgejoSourceOwner>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ForgejoSourceOwner {
+    login: Option<String>,
+}
+
+impl ForgejoPullBranch {
+    // Forgejo 16.0.3 captures prove original unqualified label retention,
+    // including genuine refs/pull/ branches and exact synthetic-ref collisions.
+    // Qualified labels have no proven response grammar and remain unknown.
+    fn source_identity(&self, index: u64) -> Option<domain::SourceBranchIdentity> {
+        let branch = self.label.as_deref()?;
+        if branch.is_empty()
+            || branch
+                .chars()
+                .any(|c| c.is_ascii_whitespace() || c.is_ascii_control() || c == ':')
+            || (self.ref_name != branch && self.ref_name != format!("refs/pull/{index}/head"))
+        {
+            return None;
+        }
+        let repo = self.repo.as_ref()?;
+        let id = repo.id.filter(|id| *id > 0)?;
+        if self.repo_id? <= 0 || u64::try_from(self.repo_id?).ok()? != id {
+            return None;
+        }
+        let owner = repo.owner.as_ref()?.login.as_deref()?;
+        let name = repo.name.as_deref()?;
+        if [owner, name]
+            .iter()
+            .any(|s| s.is_empty() || s.contains('/') || s.chars().any(char::is_whitespace))
+            || repo.full_name.as_deref()? != format!("{owner}/{name}")
+        {
+            return None;
+        }
+        Some(domain::SourceBranchIdentity {
+            branch: branch.to_owned(),
+            repository: domain::SourceRepositoryIdentity {
+                id,
+                owner: owner.to_owned(),
+                name: name.to_owned(),
+            },
+        })
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1564,6 +1622,7 @@ impl ForgejoPullRequest {
             body: self.body.unwrap_or_default(),
             changed_files_count: self.changed_files,
             commit_count: None,
+            source_branch_identity: self.head.source_identity(self.number),
             head_branch: self.head.ref_name,
             head_sha: Some(self.head.sha),
             has_conflicts,
@@ -7940,3 +7999,6 @@ mod draft_contract_tests {
 
 #[cfg(test)]
 mod pull_pagination_tests;
+
+#[cfg(test)]
+mod source_identity_tests;

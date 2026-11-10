@@ -432,6 +432,7 @@ impl GitLabMergeRequest {
             body: self.description.unwrap_or_default(),
             changed_files_count,
             commit_count: None,
+            source_branch_identity: None,
             head_branch: self.source_branch,
             head_sha,
             has_conflicts,

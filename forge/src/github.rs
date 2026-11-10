@@ -816,6 +816,7 @@ impl GitHubPullRequest {
             body: self.body.unwrap_or_default(),
             changed_files_count: self.changed_files,
             commit_count: self.commits,
+            source_branch_identity: None,
             head_branch: self.head.name,
             head_sha: Some(self.head.sha),
             has_conflicts: match mergeability {

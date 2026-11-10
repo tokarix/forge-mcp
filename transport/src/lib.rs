@@ -2024,7 +2024,7 @@ impl McpShim {
     #[tool(
         input_schema = schema_for_type::<GetChangeRequestTool>(),
         name = "get_change_request",
-        description = "Get a single change request (pull request) by index. Returns nullable authoritative draft, mergeability, nullable has_conflicts, and labels. NotMergeable is not conflict evidence; re-read get before readiness decisions."
+        description = "Get a single change request (pull request) by index. Returns nullable source_branch_identity (exact original branch and source repository within this forge), authoritative draft, mergeability, nullable has_conflicts, and labels. NotMergeable is not conflict evidence; re-read get before readiness decisions."
     )]
     async fn get_change_request(
         &self,
@@ -2387,7 +2387,7 @@ impl McpShim {
     #[tool(
         input_schema = schema_for_type::<ListChangeRequestsTool>(),
         name = "list_change_requests",
-        description = "List change requests (pull requests) as a JSON array. Filters: open, closed (unmerged), merged, all. Forgejo success exhausts pagination within safety budgets; any page/continuation/budget failure errors, never returns a prefix. GitLab does not support all. This is not an atomic snapshot: use fresh detail/head checks and admission fences; concurrent PR creation remains possible. Returns nullable authoritative draft, mergeability, nullable has_conflicts, and labels for each request. Sparse metadata remains unknown; re-read get before readiness decisions."
+        description = "List change requests (pull requests) as a JSON array. Filters: open, closed (unmerged), merged, all. Forgejo success exhausts pagination within safety budgets; any page/continuation/budget failure errors, never returns a prefix. GitLab does not support all. This is not an atomic snapshot: use fresh detail/head checks and admission fences; concurrent PR creation remains possible. Returns nullable source_branch_identity (exact original branch and source repository within this forge), authoritative draft, mergeability, nullable has_conflicts, and labels for each request. head_branch may be synthetic. Unknown source identity is null and cannot establish branch mismatch or absence; scope comparisons to the source repository. Sparse metadata remains unknown; re-read get before readiness decisions."
     )]
     async fn list_change_requests(
         &self,
@@ -8049,6 +8049,7 @@ mod tests {
                     "head_branch": "agent/fix",
                     "body": "Fix bug",
                     "url": "https://example.com/pulls/1",
+                    "source_branch_identity": {"branch":"original/λ", "repository":{"id":42,"owner":"fork","name":"source"}},
                     "mergeability": "conflicting",
                     "has_conflicts": true,
                     "draft": true,
@@ -8076,6 +8077,11 @@ mod tests {
 
         let json: serde_json::Value = serde_json::from_str(&result)?;
         assert_eq!(json["index"], 1);
+        assert_eq!(json["source_branch_identity"]["branch"], "original/λ");
+        assert_eq!(
+            json["source_branch_identity"]["repository"]["owner"],
+            "fork"
+        );
         assert_eq!(json["mergeability"], "conflicting");
         assert_eq!(json["has_conflicts"], true);
         assert_eq!(json["draft"], true);
@@ -8103,6 +8109,7 @@ mod tests {
                         "head_branch": "agent/fix",
                         "body": "Fix bug",
                         "url": "https://example.com/pulls/1",
+                        "source_branch_identity": null,
                         "mergeability": "mergeable",
                         "has_conflicts": false,
                         "draft": false,
@@ -8140,6 +8147,8 @@ mod tests {
             .await?;
 
         let json: serde_json::Value = serde_json::from_str(&result)?;
+        assert!(json[0]["source_branch_identity"].is_null());
+        assert!(json[1].get("source_branch_identity").is_none());
         assert_eq!(json[0]["mergeability"], "mergeable");
         assert_eq!(json[0]["has_conflicts"], false);
         assert_eq!(json[0]["draft"], false);

@@ -148,7 +148,14 @@ async fn baseline_initialization_and_catalog() {
         // Issue #261 adds an inline read, covered by its own schema/session tests.
         // Issue #266 adds historical CI, with separate schema/session coverage.
         // Issue #269 adds retained logs, with composed schema/session coverage.
+        // Issue #275 extends only the get description. Preserve comparison of
+        // its complete request schema against the recorded SDK baseline.
         for frame in [&mut catalog, &mut expected] {
+            for tool in frame["result"]["tools"].as_array_mut().expect("tools") {
+                if tool["name"] == "get_change_request" {
+                    tool["description"] = json!("source identity description extended by #275");
+                }
+            }
             frame["result"]["tools"]
                 .as_array_mut()
                 .expect("tools")
