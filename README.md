@@ -1451,3 +1451,45 @@ CI281/exit255 establish missing terminal output after traversal of the available
 JSON views below budgets. They establish neither failure cause, deployed line
 limit, cache defect, runner failure nor upstream truncation. Neither interface
 can reconstruct unretained bytes. Terminal-string heuristics confer no CI authority.
+
+### Original PR source identity
+
+Change-request list and detail responses include `source_branch_identity`,
+either `null` (unknown) or an object such as:
+
+```json
+{"branch":"agent/fix/λ","repository":{"id":42,"owner":"fork-owner","name":"source"}}
+```
+
+The branch is the exact original name; the repository ID and coordinates are
+scoped to the responding forge. Compare identities within that source
+repository, including for forks. Forgejo normalization uses retained unqualified
+`head.label` with consistent source repository metadata, established by the
+checked-in Forgejo 16.0.3 lifecycle fixture. Missing, conflicting, qualified or
+insufficient metadata, including a deleted source repository, remains unknown.
+Other adapters currently return null. No target repository fallback is used.
+
+`head_branch` retains its legacy behavior and can contain a synthetic
+`refs/pull/<number>/head` after source deletion. It is not authoritative original
+source identity. Unknown identity cannot prove a branch mismatch or PR absence;
+even an exhaustive successful list can contain unresolved relevant rows. These
+rows remain in the response. Identity evidence does not authorize mutation of a
+deleted or recreated branch and does not provide atomic snapshot guarantees.
+
+The field is additive: old normalized JSON deserializes as unknown. Deploy the
+updated server and MCP shim together to expose and describe the contract; the
+shim forwards JSON without inferring identity. Downstream consumers must adopt
+the new authority field explicitly. CI proves disposable-provider behavior;
+recovery for historical production PRs requires separate read-only verification
+through the deployed server. No production recovery is claimed by the fixture.
+
+Forgejo 16.0.3 CI evidence also covers genuine short branch names beginning with
+`refs/pull/`, including branches exactly equal to their PR's synthetic ref.
+The retained original `head.label` and consistent source repository metadata
+establish identity; the spelling of `head.ref` alone never does. Both closed and
+merged cases retain these labels after verified branch deletion. Separate prefix
+capture provenance records pipeline 803, whose mandatory assertions exposed the
+old prefix exclusion; acceptance requires passing CI on the final candidate SHA.
+These captures establish behavior for the tested provider version, not production
+recovery or an assurance across untested versions. Production Cockpit PR #470
+verification remains pending independent review, merge and normal deployment.
