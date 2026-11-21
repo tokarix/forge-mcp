@@ -2282,6 +2282,11 @@ impl crate::ForgeAdapter for GitHubAdapter {
         base_branch: &str,
         credential: &ForgeCredential,
     ) -> Result<ChangeRequest, ForgeError> {
+        if head_branch.contains(':') {
+            return Err(ForgeError::InvalidPayload(
+                "qualified GitHub heads require the fork pull request workflow".into(),
+            ));
+        }
         let url = format!(
             "{}/repos/{}/pulls",
             self.api_base(),

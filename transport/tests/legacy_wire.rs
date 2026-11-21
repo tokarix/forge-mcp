@@ -9,7 +9,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream};
 use transport::{GatewayConfig, McpShim, ShimConfig};
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
-    matchers::{header, method, path},
+    matchers::{body_json, header, method, path},
 };
 
 const DEADLINE: Duration = Duration::from_secs(10);
@@ -111,6 +111,52 @@ fn assert_error(frame: &Value, code: i64) {
     assert!(!frame.to_string().contains("synthetic-token"));
 }
 
+fn normalize_open_change_request(catalog: &mut Value, baseline: &Value) {
+    let find = |frame: &Value| {
+        frame["result"]["tools"]
+            .as_array()
+            .expect("tools")
+            .iter()
+            .position(|tool| tool["name"] == "open_change_request")
+            .expect("open_change_request tool")
+    };
+    let baseline = &baseline["result"]["tools"][find(baseline)];
+    let index = find(catalog);
+    let tool = &mut catalog["result"]["tools"][index];
+    let description = tool["description"].as_str().expect("description");
+    for term in ["bare BRANCH", "OWNER:BRANCH", "defaults to the destination"] {
+        assert!(description.contains(term), "{description}");
+    }
+    let schema = &mut tool["inputSchema"];
+    assert_eq!(
+        schema["required"],
+        json!([
+            "base_branch",
+            "body",
+            "forge",
+            "head_branch",
+            "owner",
+            "repo",
+            "title"
+        ])
+    );
+    let properties = schema["properties"].as_object_mut().expect("properties");
+    let selector = properties.remove("head_repo").expect("selector");
+    assert_eq!(selector["type"], json!(["string", "null"]));
+    let selector_help = selector["description"].as_str().expect("selector help");
+    assert!(selector_help.contains("OWNER:BRANCH"));
+    assert!(selector_help.contains("destination repository's short name"));
+    assert!(
+        properties["head_branch"]["description"]
+            .as_str()
+            .expect("head help")
+            .contains("OWNER:BRANCH")
+    );
+    properties.get_mut("head_branch").expect("head property")["description"] =
+        baseline["inputSchema"]["properties"]["head_branch"]["description"].clone();
+    tool["description"] = baseline["description"].clone();
+}
+
 #[tokio::test]
 async fn baseline_initialization_and_catalog() {
     for requested in ["2024-11-05", "2025-03-26", "2025-06-18", "2099-01-01"] {
@@ -142,6 +188,7 @@ async fn baseline_initialization_and_catalog() {
         // from the upgraded serializer to make a compatibility failure pass.
         let mut expected: Value = serde_json::from_str(include_str!("fixtures/tools-1.3.json"))
             .expect("baseline catalog");
+        normalize_open_change_request(&mut catalog, &expected);
         // Issue #255 intentionally extends this one tool; keep the recorded
         // SDK baseline intact for every other tool. Its new contract is tested
         // separately below through tools/list and tools/call.
@@ -180,6 +227,56 @@ async fn baseline_initialization_and_catalog() {
         }
         wire.finish(true).await;
     }
+}
+
+#[tokio::test]
+async fn open_change_request_preserves_legacy_and_qualified_post_bodies() {
+    let server = MockServer::start().await;
+    let mut wire = Wire::new(config(&server.uri()));
+    wire.initialize("2025-06-18").await;
+    for (head, selector) in [
+        ("fork:agent/Topic", Some("renamed-fork")),
+        ("agent/Topic", None),
+    ] {
+        let mut payload = json!({
+            "base_branch": "main",
+            "body": "First line\nSecond line",
+            "head_branch": head,
+            "title": "Fixture pull",
+        });
+        if let Some(selector) = selector {
+            payload["head_repo"] = json!(selector);
+        }
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/fixture/upstream/destination/pulls"))
+            .and(header("authorization", "Bearer synthetic-token"))
+            .and(body_json(payload.clone()))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({"index": 7})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut arguments = payload;
+        arguments["forge"] = json!("fixture");
+        arguments["owner"] = json!("upstream");
+        arguments["repo"] = json!("destination");
+        assert_eq!(
+            wire.request(
+                "tools/call",
+                json!({"name": "open_change_request", "arguments": arguments})
+            )
+            .await,
+            json!({"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"{\"index\":7}"}],"isError":false}})
+        );
+    }
+    let requests = server.received_requests().await.expect("requests");
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.method == "POST")
+            .count(),
+        2
+    );
+    wire.finish(true).await;
 }
 
 #[tokio::test]

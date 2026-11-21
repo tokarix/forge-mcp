@@ -310,6 +310,26 @@ mod draft_schema_tests {
     use super::*;
 
     #[test]
+    fn open_pull_schema_keeps_the_fork_repository_selector_optional() {
+        let document = serde_json::to_value(ApiDoc::openapi()).expect("schema");
+        let schema = &document["components"]["schemas"]["OpenPullBody"];
+        assert_eq!(
+            schema["required"],
+            serde_json::json!(["base_branch", "body", "head_branch", "title"])
+        );
+        assert_eq!(
+            schema["properties"]["head_repo"]["type"],
+            serde_json::json!(["string", "null"])
+        );
+        assert!(
+            schema["properties"]["head_repo"]["description"]
+                .as_str()
+                .expect("selector is documented")
+                .contains("destination short name")
+        );
+    }
+
+    #[test]
     fn source_identity_schema_is_optional_nullable_and_registered() {
         let document = serde_json::to_value(ApiDoc::openapi()).expect("schema");
         let schemas = &document["components"]["schemas"];

@@ -89,7 +89,10 @@ pub struct RebaseCommitMapping {
 pub struct OpenPullBody {
     pub base_branch: String,
     pub body: String,
+    /// Bare destination branch or GitHub fork head in OWNER:BRANCH form.
     pub head_branch: String,
+    /// Optional fork short name. For a qualified head, defaults to the destination short name.
+    pub head_repo: Option<String>,
     pub title: String,
 }
 

@@ -4,6 +4,9 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+mod pull_creation;
+pub use pull_creation::*;
+
 mod inline_review;
 pub use inline_review::*;
 
@@ -1545,6 +1548,7 @@ pub struct OpenChangeRequestRequest {
     pub base_branch: String,
     pub body: String,
     pub head_branch: String,
+    pub head_repo: Option<String>,
     pub repository: RepositoryRef,
     pub title: String,
 }

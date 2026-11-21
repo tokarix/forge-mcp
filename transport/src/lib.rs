@@ -602,8 +602,10 @@ pub struct OpenChangeRequestTool {
     pub body: String,
     /// Forge alias -- use `forge_info` to discover available aliases.
     pub forge: String,
-    /// Head branch with the changes.
+    /// Short head branch for the destination repository, or `OWNER:BRANCH` for a GitHub fork.
     pub head_branch: String,
+    /// Optional GitHub fork short repository name for `OWNER:BRANCH`. Defaults to the destination repository's short name.
+    pub head_repo: Option<String>,
     /// Repository owner or organization.
     pub owner: String,
     /// Repository name.
@@ -2533,6 +2535,8 @@ impl McpShim {
             Before calling this tool, check if a PR already exists for your branch \
             using list_change_requests. If one exists, do NOT open a new PR — push \
             fixes to the existing branch using commit_patch with existing_branch: true.\n\
+            Use a bare BRANCH for the destination repository or OWNER:BRANCH for a GitHub fork. \
+            For a qualified head, head_repo defaults to the destination repository's short name.\n\
             For the body, pass plain Markdown text with real newlines; do NOT pre-escape \
             paragraph breaks as literal `\\n` sequences."
     )]
@@ -2554,12 +2558,15 @@ impl McpShim {
                 "pulls",
             ],
         )?;
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "base_branch": request.base_branch,
             "body": request.body,
             "head_branch": request.head_branch,
             "title": request.title,
         });
+        if let Some(head_repo) = request.head_repo {
+            body["head_repo"] = head_repo.into();
+        }
         self.gateway_post(url, &gw.token, &body).await
     }
 
@@ -4371,6 +4378,7 @@ mod tests {
             body: "test body".to_string(),
             forge: "test".to_string(),
             head_branch: "agent/branch".to_string(),
+            head_repo: None,
             owner: "owner".to_string(),
             repo: "repo".to_string(),
             title: "test title".to_string(),

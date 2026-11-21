@@ -1046,15 +1046,22 @@ pub async fn post_pulls(
         &path.repo,
     )?;
     let credential = resolve_credential(agent, &path.forge, forge);
-    let identity = agent.identity.clone();
     let policy = agent.policy.clone();
-
-    // Per-agent branch prefix check for the head branch
+    let request = OpenChangeRequestRequest {
+        agent: agent.identity.clone(),
+        base_branch: body.base_branch,
+        body: body.body,
+        head_branch: body.head_branch,
+        head_repo: body.head_repo,
+        repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
+        title: body.title,
+    };
+    let head = request.fork_head().map_err(map_service_error)?;
     let policy_context = domain::policy::PolicyContext {
         action: "open_change_request".to_string(),
-        agent: identity.clone(),
-        repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
-        target_branch: body.head_branch.clone(),
+        agent: request.agent.clone(),
+        repository: request.repository.clone(),
+        target_branch: head.map_or_else(|| request.head_branch.clone(), |head| head.branch.into()),
         touched_paths: vec![],
     };
     let decision = domain::policy::evaluate(&policy, &policy_context)
@@ -1069,18 +1076,7 @@ pub async fn post_pulls(
 
     let result = forge
         .write_service
-        .open_change_request(
-            OpenChangeRequestRequest {
-                agent: identity,
-                base_branch: body.base_branch,
-                body: body.body,
-                head_branch: body.head_branch,
-                repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
-                title: body.title,
-            },
-            authorized,
-            &credential,
-        )
+        .open_change_request(request, authorized, &credential)
         .await
         .map_err(map_service_error)?;
 

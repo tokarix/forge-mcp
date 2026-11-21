@@ -1279,6 +1279,12 @@ where
         authorized: domain::policy::AuthorizedWrite,
         credential: &ForgeCredential,
     ) -> Result<domain::OpenChangeRequestResponse, ServiceError> {
+        if request.fork_head()?.is_some() {
+            return Err(ServiceError::Validation(
+                "qualified GitHub pull creation is unavailable".into(),
+            ));
+        }
+
         // 1. Evaluate policy — enforce branch constraints
         let policy_context = domain::policy::PolicyContext {
             action: "open_change_request".to_string(),
@@ -4517,6 +4523,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             base_branch: "main".to_string(),
             body: "Fix things".to_string(),
             head_branch: "unauthorized-branch".to_string(),
+            head_repo: None,
             repository: RepositoryRef {
                 alias: "test".to_string(),
                 forge: ForgeKind::Forgejo,
@@ -4537,6 +4544,45 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             .expect_err("wrong branch prefix should be rejected");
 
         assert!(matches!(err, ServiceError::PolicyDenied { .. }));
+        assert_eq!(audit.records().expect("audit records").len(), 0);
+    }
+
+    #[tokio::test]
+    async fn qualified_github_head_does_not_reach_audit_or_create() {
+        let adapter = Arc::new(WriteTestForgeAdapter);
+        let audit = Arc::new(InMemoryAuditSink::new());
+        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit), None);
+
+        let request = OpenChangeRequestRequest {
+            agent: AgentIdentity {
+                agent_id: "test-agent".to_string(),
+                session_id: "test-session".to_string(),
+            },
+            base_branch: "main".to_string(),
+            body: "Fix things".to_string(),
+            head_branch: "fork:agent/fix".to_string(),
+            head_repo: None,
+            repository: RepositoryRef {
+                alias: "test".to_string(),
+                forge: ForgeKind::GitHub,
+                host: "https://forge.example".to_string(),
+                name: "repo".to_string(),
+                owner: "org".to_string(),
+            },
+            title: "Fix".to_string(),
+        };
+
+        let err = orchestrator
+            .open_change_request(
+                request,
+                default_authorized(),
+                &domain::ForgeCredential { token: None },
+            )
+            .await
+            .expect_err("qualified creation is gated");
+
+        assert!(matches!(err, ServiceError::Validation(message)
+            if message == "qualified GitHub pull creation is unavailable"));
         assert_eq!(audit.records().expect("audit records").len(), 0);
     }
 
@@ -4583,6 +4629,7 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             base_branch: "main".to_string(),
             body: "Fix things".to_string(),
             head_branch: "agent/fix".to_string(),
+            head_repo: None,
             repository: RepositoryRef {
                 alias: "test".to_string(),
                 forge: ForgeKind::Forgejo,
