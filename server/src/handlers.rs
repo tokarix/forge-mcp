@@ -1046,37 +1046,26 @@ pub async fn post_pulls(
         &path.repo,
     )?;
     let credential = resolve_credential(agent, &path.forge, forge);
-    let policy = agent.policy.clone();
-    let request = OpenChangeRequestRequest {
+    let authorized = domain::PullAuthorization {
         agent: agent.identity.clone(),
-        base_branch: body.base_branch,
-        body: body.body,
-        head_branch: body.head_branch,
-        head_repo: body.head_repo,
-        repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
-        title: body.title,
+        grants: agent.policy_config.allowed_repos.clone(),
+        policy: agent.policy.clone(),
     };
-    let head = request.fork_head().map_err(map_service_error)?;
-    let policy_context = domain::policy::PolicyContext {
-        action: "open_change_request".to_string(),
-        agent: request.agent.clone(),
-        repository: request.repository.clone(),
-        target_branch: head.map_or_else(|| request.head_branch.clone(), |head| head.branch.into()),
-        touched_paths: vec![],
-    };
-    let decision = domain::policy::evaluate(&policy, &policy_context)
-        .map_err(|e| map_service_error(ServiceError::Validation(e.to_string())))?;
-    if !decision.is_allowed() {
-        return Err(map_service_error(ServiceError::PolicyDenied {
-            reasons: decision.reasons.join("; "),
-        }));
-    }
-
-    let authorized = domain::policy::AuthorizedWrite { policy };
 
     let result = forge
         .write_service
-        .open_change_request(request, authorized, &credential)
+        .open_change_request(
+            OpenChangeRequestRequest {
+                base_branch: body.base_branch,
+                body: body.body,
+                head_branch: body.head_branch,
+                head_repo: body.head_repo,
+                repository: repo_ref(&path.forge, &path.owner, &path.repo, forge),
+                title: body.title,
+            },
+            authorized,
+            &credential,
+        )
         .await
         .map_err(map_service_error)?;
 
@@ -4239,7 +4228,7 @@ mod tests {
         async fn open_change_request(
             &self,
             request: OpenChangeRequestRequest,
-            _authorized: domain::policy::AuthorizedWrite,
+            _authorized: domain::PullAuthorization,
             _credential: &domain::ForgeCredential,
         ) -> Result<OpenChangeRequestResponse, ServiceError> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);

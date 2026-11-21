@@ -24,6 +24,8 @@ use crate::{
     read_bounded_issue_response, redirect_error, remaining_deadline, validate_next_page,
 };
 
+mod fork_pull;
+
 const API_VERSION: &str = "2022-11-28";
 const PAGE_SIZE: u32 = 100;
 const MAX_BRANCH_PAGES: u64 = 5;
@@ -163,6 +165,7 @@ impl std::fmt::Debug for GitHubConfig {
 pub struct GitHubAdapter {
     auth: GitHubAuth,
     client: reqwest::Client,
+    fork_pull_client: reqwest::Client,
     config: GitHubConfig,
     managed_app_credentials: Vec<GitHubAppCredential>,
 }
@@ -197,6 +200,7 @@ impl GitHubAdapter {
             client: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .build()?,
+            fork_pull_client: fork_pull::client()?,
             config,
             managed_app_credentials: Vec::new(),
         })
@@ -223,6 +227,7 @@ impl GitHubAdapter {
         Ok(Self {
             auth: GitHubAuth::App(managed_credential.clone()),
             client,
+            fork_pull_client: fork_pull::client()?,
             config,
             managed_app_credentials: vec![managed_credential],
         })
@@ -2308,6 +2313,29 @@ impl crate::ForgeAdapter for GitHubAdapter {
         .await?;
         let pull: GitHubPullRequest = response.json().await?;
         Ok(pull.into_change_request())
+    }
+
+    async fn resolve_fork_pull(
+        &self,
+        request: &domain::OpenChangeRequestRequest,
+        head: &domain::ForkPullHead<'_>,
+        authorized: &domain::PullAuthorization,
+        credential: &ForgeCredential,
+    ) -> Result<domain::PinnedPullRepositories, domain::ServiceError> {
+        self.resolve_fork_repositories(request, head, authorized, credential)
+            .await
+    }
+
+    async fn create_fork_pull(
+        &self,
+        request: &domain::OpenChangeRequestRequest,
+        head: &domain::ForkPullHead<'_>,
+        pinned: &domain::PinnedPullRepositories,
+        authorized: &domain::PullAuthorization,
+        credential: &ForgeCredential,
+    ) -> Result<ChangeRequest, domain::ServiceError> {
+        self.dispatch_fork_pull(request, head, pinned, authorized, credential)
+            .await
     }
 
     async fn create_commit_status(

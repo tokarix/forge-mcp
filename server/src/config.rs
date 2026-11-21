@@ -387,28 +387,7 @@ impl AgentPolicyConfig {
     /// - `"alias/group/subgroup/*"` — all repos under a nested namespace
     #[must_use]
     pub fn is_repo_allowed(&self, forge_alias: &str, owner: &str, repo: &str) -> bool {
-        self.allowed_repos.iter().any(|pattern| {
-            if pattern == "*" {
-                return true;
-            }
-            let Some((alias, rest)) = pattern.split_once('/') else {
-                return false;
-            };
-            if alias != forge_alias {
-                return false;
-            }
-            if rest == "*" {
-                return true;
-            }
-            let Some((namespace, repo_pattern)) = rest.rsplit_once('/') else {
-                return false;
-            };
-            if repo_pattern == "*" {
-                namespace == owner
-            } else {
-                namespace == owner && repo_pattern == repo
-            }
-        })
+        domain::policy::is_repo_allowed(&self.allowed_repos, forge_alias, owner, repo)
     }
 }
 

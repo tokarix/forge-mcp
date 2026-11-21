@@ -856,6 +856,7 @@ where
     adapter: Arc<A>,
     audit_sink: Arc<S>,
     configured_commit_author: Option<domain::CommitAuthor>,
+    pull_forge: Option<domain::PullForgeBinding>,
 }
 
 impl<A, S> WriteOrchestrator<A, S>
@@ -873,7 +874,53 @@ where
             adapter,
             audit_sink,
             configured_commit_author,
+            pull_forge: None,
         }
+    }
+    /// Binds pull creation to the forge instance registered for this adapter.
+    #[must_use]
+    pub fn with_forge_binding(mut self, binding: domain::PullForgeBinding) -> Self {
+        self.pull_forge = Some(binding);
+        self
+    }
+
+    async fn open_fork_pull(
+        &self,
+        request: &domain::OpenChangeRequestRequest,
+        head: &domain::ForkPullHead<'_>,
+        authorized: &domain::PullAuthorization,
+        credential: &ForgeCredential,
+    ) -> Result<ChangeRequest, ServiceError> {
+        // Snapshot the effective installation credential for every GitHub request.
+        let credential = self.adapter.effective_credential(credential);
+        let pinned = self
+            .adapter
+            .resolve_fork_pull(request, head, authorized, &credential)
+            .await?;
+        let source = &pinned.source;
+        let destination = &pinned.destination;
+        self.audit_sink
+            .record(AuditRecord {
+                agent: authorized.agent.clone(),
+                action: "open_change_request".into(),
+                repository: destination.canonical.clone(),
+                target: format!(
+                    "{}/{} ({}) refs/heads/{} -> {}/{} ({}) refs/heads/{}",
+                    source.canonical.owner,
+                    source.canonical.name,
+                    source.id,
+                    head.branch,
+                    destination.canonical.owner,
+                    destination.canonical.name,
+                    destination.id,
+                    request.base_branch,
+                ),
+            })
+            .await
+            .map_err(|error| ServiceError::Audit(error.to_string()))?;
+        self.adapter
+            .create_fork_pull(request, head, &pinned, authorized, &credential)
+            .await
     }
 }
 
@@ -1276,56 +1323,48 @@ where
     async fn open_change_request(
         &self,
         request: domain::OpenChangeRequestRequest,
-        authorized: domain::policy::AuthorizedWrite,
+        authorized: domain::PullAuthorization,
         credential: &ForgeCredential,
     ) -> Result<domain::OpenChangeRequestResponse, ServiceError> {
-        if request.fork_head()?.is_some() {
+        let head = request.fork_head()?;
+        if self
+            .pull_forge
+            .as_ref()
+            .map_or(head.is_some(), |forge| !forge.matches(&request.repository))
+        {
             return Err(ServiceError::Validation(
-                "qualified GitHub pull creation is unavailable".into(),
+                "pull request repository does not match the registered forge".into(),
             ));
         }
-
-        // 1. Evaluate policy — enforce branch constraints
-        let policy_context = domain::policy::PolicyContext {
-            action: "open_change_request".to_string(),
-            agent: request.agent.clone(),
-            repository: request.repository.clone(),
-            target_branch: request.head_branch.clone(),
-            touched_paths: Vec::new(),
+        authorized.require_repository(&request.repository)?;
+        let change_request = if let Some(head) = head {
+            authorized.require_repository(&head.repository)?;
+            authorized.require_branch(&head.repository, head.branch)?;
+            self.open_fork_pull(&request, &head, &authorized, credential)
+                .await?
+        } else {
+            authorized.require_branch(&request.repository, &request.head_branch)?;
+            self.audit_sink
+                .record(AuditRecord {
+                    agent: authorized.agent,
+                    action: "open_change_request".into(),
+                    repository: request.repository.clone(),
+                    target: request.head_branch.clone(),
+                })
+                .await
+                .map_err(|error| ServiceError::Audit(error.to_string()))?;
+            self.adapter
+                .create_change_request(
+                    &request.repository,
+                    &request.title,
+                    &request.body,
+                    &request.head_branch,
+                    &request.base_branch,
+                    credential,
+                )
+                .await
+                .map_err(|error| ServiceError::Upstream(error.to_string()))?
         };
-        let decision = domain::policy::evaluate(&authorized.policy, &policy_context)
-            .map_err(|e| ServiceError::Validation(e.to_string()))?;
-
-        if !decision.is_allowed() {
-            return Err(ServiceError::PolicyDenied {
-                reasons: decision.reasons.join("; "),
-            });
-        }
-
-        // 2. Audit intent
-        self.audit_sink
-            .record(AuditRecord {
-                agent: request.agent.clone(),
-                action: "open_change_request".to_string(),
-                repository: request.repository.clone(),
-                target: request.head_branch.clone(),
-            })
-            .await
-            .map_err(|e| ServiceError::Audit(e.to_string()))?;
-
-        // 3. Create on forge
-        let change_request = self
-            .adapter
-            .create_change_request(
-                &request.repository,
-                &request.title,
-                &request.body,
-                &request.head_branch,
-                &request.base_branch,
-                credential,
-            )
-            .await
-            .map_err(|e| ServiceError::Upstream(e.to_string()))?;
 
         Ok(domain::OpenChangeRequestResponse {
             change_request,
@@ -4516,10 +4555,6 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
         let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit), None);
 
         let request = OpenChangeRequestRequest {
-            agent: AgentIdentity {
-                agent_id: "test-agent".to_string(),
-                session_id: "test-session".to_string(),
-            },
             base_branch: "main".to_string(),
             body: "Fix things".to_string(),
             head_branch: "unauthorized-branch".to_string(),
@@ -4537,52 +4572,20 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
         let err = orchestrator
             .open_change_request(
                 request,
-                default_authorized(),
+                domain::PullAuthorization {
+                    agent: AgentIdentity {
+                        agent_id: "test-agent".to_string(),
+                        session_id: "test-session".to_string(),
+                    },
+                    grants: vec!["test/org/repo".into()],
+                    policy: default_authorized().policy,
+                },
                 &domain::ForgeCredential { token: None },
             )
             .await
             .expect_err("wrong branch prefix should be rejected");
 
         assert!(matches!(err, ServiceError::PolicyDenied { .. }));
-        assert_eq!(audit.records().expect("audit records").len(), 0);
-    }
-
-    #[tokio::test]
-    async fn qualified_github_head_does_not_reach_audit_or_create() {
-        let adapter = Arc::new(WriteTestForgeAdapter);
-        let audit = Arc::new(InMemoryAuditSink::new());
-        let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit), None);
-
-        let request = OpenChangeRequestRequest {
-            agent: AgentIdentity {
-                agent_id: "test-agent".to_string(),
-                session_id: "test-session".to_string(),
-            },
-            base_branch: "main".to_string(),
-            body: "Fix things".to_string(),
-            head_branch: "fork:agent/fix".to_string(),
-            head_repo: None,
-            repository: RepositoryRef {
-                alias: "test".to_string(),
-                forge: ForgeKind::GitHub,
-                host: "https://forge.example".to_string(),
-                name: "repo".to_string(),
-                owner: "org".to_string(),
-            },
-            title: "Fix".to_string(),
-        };
-
-        let err = orchestrator
-            .open_change_request(
-                request,
-                default_authorized(),
-                &domain::ForgeCredential { token: None },
-            )
-            .await
-            .expect_err("qualified creation is gated");
-
-        assert!(matches!(err, ServiceError::Validation(message)
-            if message == "qualified GitHub pull creation is unavailable"));
         assert_eq!(audit.records().expect("audit records").len(), 0);
     }
 
@@ -4622,10 +4625,6 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
         let orchestrator = WriteOrchestrator::new(adapter, Arc::clone(&audit), None);
 
         let request = OpenChangeRequestRequest {
-            agent: AgentIdentity {
-                agent_id: "test-agent".to_string(),
-                session_id: "test-session".to_string(),
-            },
             base_branch: "main".to_string(),
             body: "Fix things".to_string(),
             head_branch: "agent/fix".to_string(),
@@ -4643,7 +4642,14 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
         let response = orchestrator
             .open_change_request(
                 request,
-                default_authorized(),
+                domain::PullAuthorization {
+                    agent: AgentIdentity {
+                        agent_id: "test-agent".to_string(),
+                        session_id: "test-session".to_string(),
+                    },
+                    grants: vec!["test/org/repo".into()],
+                    policy: default_authorized().policy,
+                },
                 &domain::ForgeCredential { token: None },
             )
             .await

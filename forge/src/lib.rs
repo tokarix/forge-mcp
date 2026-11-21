@@ -643,6 +643,33 @@ pub trait ForgeAdapter: Send + Sync {
         credential: &ForgeCredential,
     ) -> Result<ChangeRequest, ForgeError>;
 
+    /// Resolve both granted coordinates, pin their identities and verify both refs.
+    async fn resolve_fork_pull(
+        &self,
+        _request: &domain::OpenChangeRequestRequest,
+        _head: &domain::ForkPullHead<'_>,
+        _authorized: &domain::PullAuthorization,
+        _credential: &ForgeCredential,
+    ) -> Result<domain::PinnedPullRepositories, domain::ServiceError> {
+        Err(domain::ServiceError::Validation(
+            "qualified pull requests require a GitHub adapter".into(),
+        ))
+    }
+
+    /// Refresh the pinned identities, reauthorize and dispatch a single create.
+    async fn create_fork_pull(
+        &self,
+        _request: &domain::OpenChangeRequestRequest,
+        _head: &domain::ForkPullHead<'_>,
+        _pinned: &domain::PinnedPullRepositories,
+        _authorized: &domain::PullAuthorization,
+        _credential: &ForgeCredential,
+    ) -> Result<ChangeRequest, domain::ServiceError> {
+        Err(domain::ServiceError::Validation(
+            "qualified pull requests require a GitHub adapter".into(),
+        ))
+    }
+
     /// Creates a commit status on the given SHA.
     async fn create_commit_status(
         &self,

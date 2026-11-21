@@ -51,11 +51,18 @@ where
         Arc::clone(audit_sink),
     ));
 
-    let write_service = Arc::new(WriteOrchestrator::new(
-        Arc::clone(&adapter),
-        Arc::clone(audit_sink),
-        configured_commit_author,
-    ));
+    let write_service = Arc::new(
+        WriteOrchestrator::new(
+            Arc::clone(&adapter),
+            Arc::clone(audit_sink),
+            configured_commit_author,
+        )
+        .with_forge_binding(domain::PullForgeBinding {
+            alias: forge_config.alias.clone(),
+            host: forge_config.base_url.clone(),
+            kind: forge_kind.clone(),
+        }),
+    );
 
     ForgeInstance {
         adapter: rest_adapter,

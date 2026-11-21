@@ -1,6 +1,85 @@
-//! Interpretation of GitHub fork pull request heads.
+//! Repository and branch authorization for pull request creation.
 
-use crate::{ForgeKind, OpenChangeRequestRequest, RepositoryRef, ServiceError};
+use crate::{
+    AgentIdentity, ForgeKind, OpenChangeRequestRequest, RepositoryRef, ServiceError, policy,
+};
+
+/// Trusted identity, grants and branch policy resolved by authentication.
+#[derive(Clone, Debug)]
+pub struct PullAuthorization {
+    pub agent: AgentIdentity,
+    pub grants: Vec<String>,
+    pub policy: policy::PolicyConfig,
+}
+
+impl PullAuthorization {
+    /// Check an exact requested or provider-canonical repository path.
+    ///
+    /// # Errors
+    ///
+    /// Returns a policy denial when the repository is outside the grants.
+    pub fn require_repository(&self, repository: &RepositoryRef) -> Result<(), ServiceError> {
+        if policy::is_repo_allowed(
+            &self.grants,
+            &repository.alias,
+            &repository.owner,
+            &repository.name,
+        ) {
+            return Ok(());
+        }
+        Err(ServiceError::PolicyDenied {
+            reasons: format!(
+                "agent '{}' is not authorized for repository '{}/{}'",
+                self.agent.agent_id, repository.owner, repository.name,
+            ),
+        })
+    }
+
+    /// Apply the PR write policy to the short head branch.
+    ///
+    /// # Errors
+    ///
+    /// Returns a policy denial or a policy configuration error.
+    pub fn require_branch(
+        &self,
+        repository: &RepositoryRef,
+        branch: &str,
+    ) -> Result<(), ServiceError> {
+        let context = policy::PolicyContext {
+            action: "open_change_request".into(),
+            agent: self.agent.clone(),
+            repository: repository.clone(),
+            target_branch: branch.into(),
+            touched_paths: Vec::new(),
+        };
+        let decision = policy::evaluate(&self.policy, &context)
+            .map_err(|error| ServiceError::Validation(error.to_string()))?;
+        if decision.is_allowed() {
+            return Ok(());
+        }
+        Err(ServiceError::PolicyDenied {
+            reasons: decision.reasons.join("; "),
+        })
+    }
+}
+
+/// The exact instance attached to a registered write service.
+#[derive(Clone, Debug)]
+pub struct PullForgeBinding {
+    pub alias: String,
+    pub host: String,
+    pub kind: ForgeKind,
+}
+
+impl PullForgeBinding {
+    /// Whether this repository names the forge served by the adapter.
+    #[must_use]
+    pub fn matches(&self, repository: &RepositoryRef) -> bool {
+        self.alias == repository.alias
+            && self.host == repository.host
+            && self.kind == repository.forge
+    }
+}
 
 /// GitHub-qualified head, split into the requested source and literal short branch.
 #[derive(Debug)]
@@ -78,4 +157,18 @@ fn valid_short_branch(branch: &str) -> bool {
         && branch
             .split('/')
             .all(|part| !part.is_empty() && !part.starts_with('.') && !part.ends_with(".lock"))
+}
+
+/// Repository identity pinned during fork pull request resolution.
+#[derive(Debug)]
+pub struct PinnedPullRepository {
+    pub canonical: RepositoryRef,
+    pub id: String,
+}
+
+/// Fork and destination verified before recording the create intent.
+#[derive(Debug)]
+pub struct PinnedPullRepositories {
+    pub source: PinnedPullRepository,
+    pub destination: PinnedPullRepository,
 }

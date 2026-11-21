@@ -1074,7 +1074,7 @@ mod tests {
         async fn open_change_request(
             &self,
             request: domain::OpenChangeRequestRequest,
-            _authorized: domain::policy::AuthorizedWrite,
+            _authorized: domain::PullAuthorization,
             _credential: &domain::ForgeCredential,
         ) -> Result<OpenChangeRequestResponse, ServiceError> {
             Ok(OpenChangeRequestResponse {

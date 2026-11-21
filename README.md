@@ -23,6 +23,24 @@ Write safety:
 - Audit-before-action on all write operations
 - Git auth via `http.extraHeader` — token never in argv or URLs
 
+### Opening GitHub pull requests from forks
+
+Set `owner` and `repo` to the destination and pass `OWNER:BRANCH` as
+`head_branch` to select a GitHub fork. The fork defaults to the destination's
+short repository name on `OWNER`. Pass `head_repo` with the fork's short name
+if it differs. For example, a request for `upstream/project` with
+`head_branch = "my-org:agent/codex/topic"` and `head_repo = "project-fork"`
+uses `my-org/project-fork` as the source. Use a bare branch for a source in
+the destination repository.
+
+Grant the agent access to both repositories on the configured forge alias.
+The branch prefix applies to the short head branch after the colon. The gateway
+checks the fork network and both exact branch refs, records the intent, and
+checks the repositories' current canonical names against the grants immediately
+before dispatching one GitHub create request bound to the verified IDs and
+branches. The selected GitHub credential needs access to both repositories
+and permission to create a pull request on the destination.
+
 ### Choosing pull request feedback
 
 `get_change_request_comments` remains the mixed chronological discussion/review

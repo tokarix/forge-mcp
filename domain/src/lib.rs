@@ -4,11 +4,11 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-mod pull_creation;
-pub use pull_creation::*;
-
 mod inline_review;
 pub use inline_review::*;
+
+mod pull_creation;
+pub use pull_creation::*;
 
 mod branch_push;
 pub use branch_push::{BranchPushDetails, BranchPushEvent};
@@ -1544,7 +1544,6 @@ pub struct ListRepositoriesRequest {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OpenChangeRequestRequest {
-    pub agent: AgentIdentity,
     pub base_branch: String,
     pub body: String,
     pub head_branch: String,
@@ -2160,7 +2159,7 @@ pub trait RepositoryWriteService: Send + Sync {
     async fn open_change_request(
         &self,
         request: OpenChangeRequestRequest,
-        authorized: policy::AuthorizedWrite,
+        authorized: PullAuthorization,
         credential: &ForgeCredential,
     ) -> Result<OpenChangeRequestResponse, ServiceError>;
 

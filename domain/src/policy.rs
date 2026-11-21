@@ -65,6 +65,29 @@ pub struct AuthorizedWrite {
     pub policy: PolicyConfig,
 }
 
+/// Matches repository grants scoped by alias, namespace and short name.
+#[must_use]
+pub fn is_repo_allowed(grants: &[String], forge_alias: &str, owner: &str, repo: &str) -> bool {
+    grants.iter().any(|pattern| {
+        if pattern == "*" {
+            return true;
+        }
+        let Some((alias, rest)) = pattern.split_once('/') else {
+            return false;
+        };
+        if alias != forge_alias {
+            return false;
+        }
+        if rest == "*" {
+            return true;
+        }
+        let Some((namespace, repo_pattern)) = rest.rsplit_once('/') else {
+            return false;
+        };
+        namespace == owner && (repo_pattern == "*" || repo_pattern == repo)
+    })
+}
+
 /// Policy rule configuration.
 #[derive(Clone, Debug)]
 pub struct PolicyConfig {
